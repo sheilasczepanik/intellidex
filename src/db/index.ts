@@ -1,6 +1,7 @@
 import type { EntityRelationship, SourceCitation, ExternalIntelLead, IntelClaim, IntelClaimCategory } from "../types";
 import { storedEntityType } from "../types";
 import { namesLooselyMatch, parseEventTime } from "../lib/eventTime";
+import { classifySource } from "../lib/sourceTier";
 import {
   db,
   DEFAULT_OPERATOR,
@@ -84,6 +85,8 @@ export async function createCase(input: {
   status: CaseStatus;
   jurisdiction?: string;
   workingNotes?: string;
+  incidentStart?: string;
+  incidentEnd?: string;
 }) {
   const now = Date.now();
   const row: CaseRecord = {
@@ -97,6 +100,8 @@ export async function createCase(input: {
     updatedAt: now,
     workingNotes: input.workingNotes ?? "",
     jurisdiction: input.jurisdiction ?? "",
+    incidentStart: input.incidentStart ?? "",
+    incidentEnd: input.incidentEnd ?? "",
   };
   await db.cases.add(row);
   return row;
@@ -104,7 +109,7 @@ export async function createCase(input: {
 
 export async function updateCase(
   id: string,
-  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt">>,
+  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "incidentStart" | "incidentEnd">>,
 ) {
   await db.cases.update(id, { ...patch, updatedAt: Date.now() });
 }
@@ -141,6 +146,8 @@ export async function createEntity(input: {
   classification?: string;
   identifiers?: string[];
   metadata?: Record<string, string>;
+  provenanceTier?: "primary" | "secondary";
+  uncorroborated?: boolean;
 }) {
   const row: EntityRecord = {
     id: crypto.randomUUID(),
@@ -153,6 +160,8 @@ export async function createEntity(input: {
     identifiers: input.identifiers ?? [],
     metadata: input.metadata ?? {},
     createdAt: new Date().toISOString(),
+    provenanceTier: input.provenanceTier ?? "primary",
+    uncorroborated: input.uncorroborated ?? input.provenanceTier === "secondary",
   };
   await db.entities.add(row);
   await touchCase(input.caseId);
@@ -167,6 +176,7 @@ export async function upsertEntityByName(input: {
   classification?: string;
   identifiers?: string[];
   notes?: string;
+  fromSecondary?: boolean;
 }) {
   const name = input.name.trim();
   if (!name) return null;
@@ -179,15 +189,27 @@ export async function upsertEntityByName(input: {
   }) ?? roster.find((e) => namesLooselyMatch(e.name, name) || e.name.trim().toLowerCase() === name.toLowerCase());
   if (hit) {
     const identifiers = [...new Set([...(hit.identifiers ?? []), ...(input.identifiers ?? [])])];
-    await db.entities.update(hit.id, {
-      identifiers,
-      classification: input.classification || hit.classification || hit.role,
-      notes: input.notes && hit.notes && !hit.notes.includes(input.notes)
+    const patch: Partial<EntityRecord> = { identifiers };
+    if (input.fromSecondary) {
+      const note = input.notes?.trim();
+      if (note && !(hit.notes || "").includes(note)) {
+        patch.notes = [hit.notes, `Media (uncorroborated): ${note}`].filter(Boolean).join("\n");
+      }
+    } else {
+      if (input.classification) patch.classification = input.classification;
+      if (input.role) patch.role = input.role;
+      patch.notes = input.notes && hit.notes && !hit.notes.includes(input.notes)
         ? [hit.notes, input.notes].filter(Boolean).join("\n")
-        : (hit.notes || input.notes || ""),
-    });
+        : (hit.notes || input.notes || "");
+      patch.provenanceTier = "primary";
+      patch.uncorroborated = false;
+    }
+    await db.entities.update(hit.id, patch);
     return (await db.entities.get(hit.id)) ?? hit;
   }
+  const mediaNote = input.notes?.trim()
+    ? (input.fromSecondary ? `Media (uncorroborated): ${input.notes.trim()}` : input.notes)
+    : "";
   return createEntity({
     caseId: input.caseId,
     name,
@@ -195,8 +217,20 @@ export async function upsertEntityByName(input: {
     role: input.role || input.classification || "UNVERIFIED",
     classification: input.classification || input.role || "UNVERIFIED",
     identifiers: input.identifiers ?? [],
-    notes: input.notes ?? "",
+    notes: mediaNote,
+    provenanceTier: input.fromSecondary ? "secondary" : "primary",
+    uncorroborated: Boolean(input.fromSecondary),
   });
+}
+
+export async function promoteEntityToVerified(id: string) {
+  const rec = await db.entities.get(id);
+  if (!rec) return;
+  await db.entities.update(id, {
+    provenanceTier: "primary",
+    uncorroborated: false,
+  });
+  await touchCase(rec.caseId);
 }
 
 export async function addRelationship(input: Omit<EntityRelationship, "id">) {
@@ -266,6 +300,7 @@ export async function createTimelineEvent(input: {
   sourceDocId?: string;
   isVerified?: boolean;
   sourceCitation?: SourceCitation;
+  tier?: "primary" | "secondary";
 }) {
   const row: TimelineEventRecord = {
     id: crypto.randomUUID(),
@@ -277,6 +312,7 @@ export async function createTimelineEvent(input: {
     sourceDocId: input.sourceDocId ?? "",
     isVerified: input.isVerified ?? true,
     sourceCitation: input.sourceCitation,
+    tier: input.tier ?? "primary",
   };
   await db.timelineEvents.add(row);
   await touchCase(input.caseId);
@@ -321,9 +357,21 @@ export async function addEvidence(input: {
   sourceUrl?: string;
   publishedDate?: string;
   wordCount?: number;
+  fromPaste?: boolean;
+  fromEditorial?: boolean;
 }) {
   const fileName = input.fileName.trim() || "untitled.txt";
   const now = new Date().toISOString();
+  const classified = classifySource({
+    fileName,
+    originalFileName: input.originalFileName,
+    sourceType: input.sourceType,
+    sourceUrl: input.sourceUrl,
+    fileType: input.fileType,
+    fromWeb: input.sourceType === "web_article" || Boolean(input.sourceUrl),
+    fromPaste: input.fromPaste,
+    fromEditorial: input.fromEditorial,
+  });
   const row = {
     id: crypto.randomUUID(),
     caseId: input.caseId,
@@ -344,6 +392,8 @@ export async function addEvidence(input: {
     originalFileName: input.originalFileName ?? fileName,
     mimeType: input.mimeType ?? input.mediaType ?? input.fileType ?? "",
     sourceType: input.sourceType,
+    sourceClass: classified.sourceClass,
+    tier: classified.tier,
     sourceUrl: input.sourceUrl,
     publishedDate: input.publishedDate,
     wordCount: input.wordCount,
@@ -503,6 +553,12 @@ export async function confirmVerifyDraft(id: string) {
     entityId = exact?.id ?? loose?.id ?? "";
   }
 
+  const source = draft.evidenceId ? await db.evidence.get(draft.evidenceId) : undefined;
+  const secondary = source?.tier === "secondary"
+    || source?.sourceClass === "news_article"
+    || source?.sourceClass === "press_release"
+    || source?.sourceType === "web_article";
+
   if (!entityId) {
     const created = await createEntity({
       caseId: draft.caseId,
@@ -512,8 +568,15 @@ export async function confirmVerifyDraft(id: string) {
       notes: [draft.details, draft.snippet && `“${draft.snippet}”`, `Promoted from Verify · ${draft.category || "fact"}`]
         .filter(Boolean)
         .join("\n"),
+      provenanceTier: secondary ? "secondary" : "primary",
+      uncorroborated: secondary,
     });
     entityId = created.id;
+  } else if (!secondary) {
+    const existing = roster.find((e) => e.id === entityId);
+    if (existing?.uncorroborated || existing?.provenanceTier === "secondary") {
+      await db.entities.update(entityId, { provenanceTier: "primary", uncorroborated: false });
+    }
   }
 
   await createTimelineEvent({
@@ -526,8 +589,9 @@ export async function confirmVerifyDraft(id: string) {
     title: draft.title,
     description: [draft.details, draft.snippet && `“${draft.snippet}”`].filter(Boolean).join(" — "),
     sourceDocId: draft.evidenceId,
-    isVerified: true,
+    isVerified: !secondary,
     sourceCitation: draft.sourceCitation,
+    tier: secondary ? "secondary" : "primary",
   });
   await db.verifyDrafts.update(id, { status: "confirmed", entityId });
 }
@@ -567,6 +631,31 @@ export async function deleteCaseContact(id: string) {
   if (!rec) return;
   await db.caseContacts.delete(id);
   await touchCase(rec.caseId);
+}
+
+/** Mirror extracted people onto the rolodex so Overview contacts update without a review gate. */
+export async function ensureContactsForPeople(caseId: string) {
+  const people = (await db.entities.where("caseId").equals(caseId).toArray())
+    .filter((e) => e.type === "person");
+  const contacts = await db.caseContacts.where("caseId").equals(caseId).toArray();
+  const byEntity = new Set(contacts.map((c) => c.entityId).filter(Boolean));
+  const byName = new Set(contacts.map((c) => c.name.trim().toLowerCase()));
+  for (const person of people) {
+    const key = person.name.trim().toLowerCase();
+    if (byEntity.has(person.id) || byName.has(key)) continue;
+    await createCaseContact({
+      caseId,
+      name: person.name,
+      affiliation: person.role?.trim() || "Other",
+      entityId: person.id,
+      phone: "",
+      email: "",
+      address: "",
+      notes: person.notes || "",
+    });
+    byEntity.add(person.id);
+    byName.add(key);
+  }
 }
 
 export function computeAvatarInitials(firstName: string, lastName: string) {

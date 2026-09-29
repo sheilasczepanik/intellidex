@@ -10,6 +10,7 @@ import {
 import { isPdfFile, isTextFile, readFileAsDataUrl } from "./lib/pdfText";
 import { parseArticleUrl } from "./lib/scrapeClient";
 import { LOW_CLARITY_BADGE } from "./lib/textClarity";
+import { isSecondaryEvidence, MEDIA_CUSTODY_BANNER, sourceClassLabel } from "./lib/sourceTier";
 import { inferSourceType } from "./types";
 
 const mono = "font-mono";
@@ -78,6 +79,7 @@ export type StagePersistInput = {
   sha256Hash?: string;
   mimeType?: string;
   originalFileName?: string;
+  sourceType?: "pdf" | "image" | "text" | "web_article";
 };
 
 type StagedRow = { id: string; status?: string };
@@ -96,6 +98,7 @@ async function readAndHashFile(file: File): Promise<StagePersistInput> {
       mimeType: file.type || "application/pdf",
       sha256Hash,
       originalFileName: file.name,
+      sourceType: "pdf",
     };
   }
   if (isImageFile(file)) {
@@ -119,6 +122,7 @@ async function readAndHashFile(file: File): Promise<StagePersistInput> {
       mimeType: file.type || "image/jpeg",
       sha256Hash,
       originalFileName: file.name,
+      sourceType: "image",
     };
   }
   if (!isTextFile(file)) {
@@ -134,6 +138,7 @@ async function readAndHashFile(file: File): Promise<StagePersistInput> {
     mimeType: file.type || "text/plain",
     sha256Hash,
     originalFileName: file.name,
+    sourceType: "text",
   };
 }
 
@@ -189,7 +194,7 @@ type Props = {
   inputCls: string;
   jobElapsed: number;
   onDropFiles: (files: FileList | File[]) => void;
-  onPasteSave: () => void;
+  onPasteSave: (kind?: "official" | "editorial", text?: string) => void;
   onExtract: (id?: string) => void;
   onRetry: (id: string) => void;
   onRetrySummary: (id: string) => void;
@@ -225,6 +230,8 @@ export default function EvidenceIntake({
   const [articleUrl, setArticleUrl] = useState("");
   const [urlError, setUrlError] = useState<string | null>(null);
   const [scrapeStage, setScrapeStage] = useState<"idle" | "scraping" | "staging">("idle");
+  const [intakeTab, setIntakeTab] = useState<"official" | "press">("official");
+  const [editorialText, setEditorialText] = useState("");
   const scrapeBusy = scrapeStage !== "idle";
   useEffect(() => {
     const tick = window.setInterval(() => {
@@ -285,6 +292,30 @@ export default function EvidenceIntake({
         onChange={(e) => { if (e.target.files) onDropFiles(e.target.files); e.target.value = ""; }}
       />
 
+      <div className="mb-5 grid grid-cols-2 gap-1 rounded-[10px] border border-slate-200 bg-slate-50 p-1">
+        <button
+          type="button"
+          onClick={() => setIntakeTab("official")}
+          className={`rounded-[8px] px-2 py-2.5 text-[12.5px] font-semibold ${intakeTab === "official" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}
+        >
+          Official Evidence & Court Records
+        </button>
+        <button
+          type="button"
+          onClick={() => setIntakeTab("press")}
+          className={`rounded-[8px] px-2 py-2.5 text-[12.5px] font-semibold ${intakeTab === "press" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}
+        >
+          External Intelligence & Press
+        </button>
+      </div>
+
+      {intakeTab === "press" && (
+        <div className="mb-5 rounded-[10px] border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[12.5px] leading-relaxed text-amber-950">
+          {MEDIA_CUSTODY_BANNER}
+        </div>
+      )}
+
+      {intakeTab === "official" ? (
       <div
         onDragOver={(e) => { e.preventDefault(); if (!dragging) setDragging(true); }}
         onDragLeave={() => setDragging(false)}
@@ -296,12 +327,12 @@ export default function EvidenceIntake({
           {busy ? <Loader2 className="h-5 w-5 animate-spin" /> : <CloudUpload className="h-5 w-5" />}
         </div>
         <div className="mb-2 text-[23px] font-semibold tracking-tight">
-          {ingestJob ? ingestStageLabel(ingestJob) : dragging ? "Release to stage these files" : "Drop a report, photo, or notes here"}
+          {ingestJob ? ingestStageLabel(ingestJob) : dragging ? "Release to stage these files" : "Drop PDFs, warrants, or transcripts"}
         </div>
         <p className="mb-[18px] text-[13px] text-slate-500">
           {ingestJob
             ? `${ingestPercent(ingestJob, nowMs)}% · ${ingestElapsedSec(ingestJob, nowMs)}s elapsed — nothing leaves this machine except the extract API call.`
-            : <>or <span className="text-blue-600">browse</span> — stored locally in IndexedDB for this case.</>}
+            : <>or <span className="text-blue-600">browse</span> — stored as primary evidence in IndexedDB.</>}
         </p>
         <div className={`flex flex-wrap justify-center gap-2 ${mono} text-[10.5px] tracking-[0.08em] text-slate-500`}>
           {["TXT", "MD", "CSV", "JSON", "PDF", "PNG", "JPG", "WEBP"].map((f) => (
@@ -309,13 +340,13 @@ export default function EvidenceIntake({
           ))}
         </div>
       </div>
-
-      <div className="mt-6 rounded-[14px] border border-slate-200 bg-white p-5">
+      ) : (
+      <div className="rounded-[14px] border border-amber-200 bg-white p-5">
         <div className="mb-1 flex items-center gap-2">
-          <Globe className="h-4 w-4 text-blue-600" />
+          <Globe className="h-4 w-4 text-amber-700" />
           <h2 className="text-[15px] font-semibold">Import via Web Link / Article</h2>
         </div>
-        <p className="mb-3 text-[12.5px] text-slate-500">Fetch a public report, press release, or bulletin and stage the readable text into this case vault.</p>
+        <p className="mb-3 text-[12.5px] text-slate-500">Fetch a public report, press release, or bulletin. Staged as secondary / media intelligence.</p>
         <div className="flex flex-col gap-2.5 sm:flex-row">
           <input
             type="url"
@@ -348,10 +379,12 @@ export default function EvidenceIntake({
           </div>
         )}
       </div>
+      )}
 
+      {intakeTab === "official" ? (
       <div className="mt-6 rounded-[14px] border border-slate-200 bg-white p-5">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-[15px] font-semibold">Paste narrative</h2>
+          <h2 className="text-[15px] font-semibold">Paste official narrative</h2>
           <button type="button" onClick={() => setPasteText(sampleNarrative)}
             className={`${mono} text-[10.5px] tracking-[0.08em] text-blue-600 hover:underline`}>LOAD SAMPLE</button>
         </div>
@@ -360,12 +393,31 @@ export default function EvidenceIntake({
           className={`${inputCls} resize-y py-3 text-[13.5px] leading-relaxed`} />
         <div className="mt-3 flex justify-end">
           <button type="button" disabled={!pasteText.trim()}
-            onClick={onPasteSave}
+            onClick={() => onPasteSave("official")}
             className="inline-flex h-9 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-[13px] font-semibold text-white hover:bg-blue-700 disabled:opacity-40">
             Save to vault
           </button>
         </div>
       </div>
+      ) : (
+      <div className="mt-6 rounded-[14px] border border-amber-200 bg-white p-5">
+        <h2 className="mb-3 text-[15px] font-semibold">Paste editorial narrative</h2>
+        <textarea value={editorialText} onChange={(e) => setEditorialText(e.target.value)} rows={7}
+          placeholder="Paste news copy, press notes, or open-source reporting…"
+          className={`${inputCls} resize-y py-3 text-[13.5px] leading-relaxed`} />
+        <div className="mt-3 flex justify-end">
+          <button type="button" disabled={!editorialText.trim()}
+            onClick={() => {
+              const text = editorialText;
+              setEditorialText("");
+              onPasteSave("editorial", text);
+            }}
+            className="inline-flex h-9 items-center gap-2 rounded-[10px] border border-amber-400 bg-amber-50 px-4 text-[13px] font-semibold text-amber-950 hover:bg-amber-100 disabled:opacity-40">
+            Index as secondary
+          </button>
+        </div>
+      </div>
+      )}
 
       <div className="mb-1 mt-10 flex items-center justify-between border-b border-slate-200 pb-3.5">
         <h2 className={`${mono} text-[11px] font-medium tracking-[0.14em] text-slate-500`}>STAGING QUEUE</h2>
@@ -379,6 +431,7 @@ export default function EvidenceIntake({
           const elapsed = job ? ingestElapsedSec(job, nowMs) : 0;
           const failed = q.status === "failed";
           const isWeb = inferSourceType(q) === "web_article";
+          const secondary = isSecondaryEvidence(q);
           const chipTone: Tone = failed ? "fail" : q.textClarity === "low" || q.status === "flagged" ? "review" : q.status === "indexed" ? "ok" : "active";
           return (
             <div key={q.id} className={`border-b border-slate-100 px-0.5 py-[15px] ${activeEvidenceId === q.id ? "bg-blue-50/50" : ""}`}>
@@ -393,7 +446,14 @@ export default function EvidenceIntake({
                   )}
                 </div>
                 <button type="button" className="min-w-0 text-left" onClick={() => setActiveEvidenceId(q.id)}>
-                  <div className={`mb-1 truncate ${mono} text-[13px]`}>{q.fileName}</div>
+                  <div className={`mb-1 flex min-w-0 items-center gap-2 ${mono} text-[13px]`}>
+                    <span className="truncate">{q.fileName}</span>
+                    {secondary && (
+                      <span className="shrink-0 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[9.5px] tracking-[0.06em] text-amber-900">
+                        {sourceClassLabel(q.sourceClass) || "SECONDARY"}
+                      </span>
+                    )}
+                  </div>
                   <div className="text-[11.5px] text-slate-500">
                     {job
                       ? `${ingestStageLabel(job)} · ${elapsed}s elapsed`

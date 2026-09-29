@@ -188,7 +188,7 @@ export default function EntityGraph({ entities, relationships, onOpenEntity }: P
                     key={ent.id}
                     type="button"
                     onClick={() => select(ent.id)}
-                    className={`absolute z-[1] flex items-center gap-2 overflow-hidden rounded-[10px] border bg-white px-2.5 text-left shadow-sm ${tone} ${active ? "ring-2 ring-amber-400" : ""}`}
+                    className={`absolute z-[1] flex items-center gap-2 overflow-hidden rounded-[10px] border bg-white px-2.5 text-left shadow-sm ${tone} ${active ? "ring-2 ring-amber-400" : ""} ${ent.uncorroborated || ent.provenanceTier === "secondary" ? "border-dashed border-amber-400" : ""}`}
                     style={{ left: pos.x, top: pos.y, width: pos.w, height: pos.h, opacity: hot ? 1 : 0.28 }}
                     title={`${ent.name} · ${formatRoleLabel(ent.classification || ent.role) || ent.type}`}
                   >

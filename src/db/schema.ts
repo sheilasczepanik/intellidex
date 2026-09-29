@@ -18,6 +18,8 @@ export interface CaseRecord {
   updatedAt: number;
   workingNotes?: string;
   jurisdiction?: string;
+  incidentStart?: string;
+  incidentEnd?: string;
 }
 
 export interface EntityRecord {
@@ -31,6 +33,9 @@ export interface EntityRecord {
   identifiers?: string[];
   metadata?: Record<string, string>;
   createdAt?: string;
+  /** Official (primary) vs media intelligence (secondary). */
+  provenanceTier?: "primary" | "secondary";
+  uncorroborated?: boolean;
 }
 
 export interface EvidenceRecord {
@@ -55,6 +60,9 @@ export interface EvidenceRecord {
   originalFileName?: string;
   mimeType?: string;
   sourceType?: "pdf" | "image" | "text" | "web_article";
+  /** Taxonomy requested as sourceType in the product spec (media format remains pdf|image|text|web_article). */
+  sourceClass?: "affidavit" | "police_report" | "forensic_record" | "news_article" | "press_release" | "note";
+  tier?: "primary" | "secondary";
   sourceUrl?: string;
   publishedDate?: string;
   wordCount?: number;
@@ -70,6 +78,7 @@ export interface TimelineEventRecord {
   sourceDocId: string;
   isVerified: boolean;
   sourceCitation?: SourceCitation;
+  tier?: "primary" | "secondary";
 }
 
 export type VerifyDraftStatus = "pending" | "confirmed" | "rejected";
@@ -316,6 +325,55 @@ export class DossierDB extends Dexie {
         }
         if (row.showTitle == null) row.showTitle = row.agency || "";
         if (!row.role?.trim()) row.role = "Host";
+      });
+    });
+    this.version(15).stores({
+      cases: "id, status, updatedAt, isArchived",
+    });
+    this.version(16).stores({
+      evidence: "id, caseId, status, fileType, sha256Hash, sourceType, tier",
+    }).upgrade(async (tx) => {
+      await tx.table("evidence").toCollection().modify((row: {
+        fileName?: string;
+        originalFileName?: string;
+        sourceType?: string;
+        sourceUrl?: string;
+        fileType?: string;
+        tier?: string;
+        sourceClass?: string;
+      }) => {
+        const web = row.sourceType === "web_article" || row.fileType === "web_article" || Boolean(row.sourceUrl);
+        if (!row.tier) row.tier = web ? "secondary" : "primary";
+        if (!row.sourceClass) {
+          const blob = `${row.fileName || ""} ${row.originalFileName || ""}`.toLowerCase();
+          if (web) row.sourceClass = /press|newswire|bulletin/.test(`${blob} ${row.sourceUrl || ""}`) ? "press_release" : "news_article";
+          else if (/affidavit|warrant/.test(blob)) row.sourceClass = "affidavit";
+          else if (/forensic|autopsy|ballistic/.test(blob)) row.sourceClass = "forensic_record";
+          else if (/\.(txt|md|csv|json|log)$/.test(blob) && !blob.includes(".pdf")) row.sourceClass = "note";
+          else row.sourceClass = "police_report";
+        }
+      });
+      await tx.table("entities").toCollection().modify((row: {
+        provenanceTier?: string;
+        uncorroborated?: boolean;
+      }) => {
+        if (!row.provenanceTier) row.provenanceTier = "primary";
+        if (typeof row.uncorroborated !== "boolean") row.uncorroborated = false;
+      });
+      const evidence = await tx.table("evidence").toArray();
+      const secondaryIds = new Set(
+        evidence.filter((e: { tier?: string }) => e.tier === "secondary").map((e: { id: string }) => e.id),
+      );
+      await tx.table("timelineEvents").toCollection().modify((row: {
+        sourceDocId?: string;
+        tier?: string;
+        isVerified?: boolean;
+      }) => {
+        if (row.sourceDocId && secondaryIds.has(row.sourceDocId)) {
+          row.tier = "secondary";
+        } else if (!row.tier) {
+          row.tier = "primary";
+        }
       });
     });
   }

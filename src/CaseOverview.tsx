@@ -1,24 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
-  AlertTriangle, Archive, ArchiveRestore, ArrowRight, Check, Clock, Copy, FileDown, FileText, GitCommitHorizontal, Inbox,
-  Loader2, MapPin, Pencil, Phone, Plus, Trash2, Truck, Upload, Users,
+  AlertTriangle, Archive, ArchiveRestore, ArrowRight, Check, Clock, Copy, Download, Eye, FileAudio, FileDown, FileText, GitCommitHorizontal, Globe, Image as ImageIcon, Inbox,
+  Loader2, MapPin, MoreHorizontal, Pencil, Phone, Plus, RefreshCw, Trash2, Truck, Upload, Users,
 } from "lucide-react";
 import {
-  CONTACT_AFFILIATIONS, createCaseContact, db, deleteCaseContact, formatBytes, updateCase,
+  CONTACT_AFFILIATIONS, createCaseContact, db, deleteCaseContact, deleteEvidence, formatBytes, promoteEntityToVerified, updateCase,
   updateCaseContact, addExternalIntelLead, patchIntelClaim, promoteIntelClaimToVerify,
   type CaseContactRecord, type CaseRecord, type CaseStatus,
-  type EntityRecord, type EvidenceRecord, type TimelineEventRecord,
+  type EntityRecord, type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
 import ArchiveCaseModal from "./ArchiveCaseModal";
 import IntelTriageCard, { INTEL_SOURCE_LABELS } from "./IntelTriageCard";
+import IngestDrawer from "./IngestDrawer";
+import Sha256Badge from "./Sha256Badge";
+import SourceDocumentViewer from "./SourceDocumentViewer";
 import { calculateSHA256 } from "./lib/cryptoUtils";
 import { parseExternalIntel } from "./lib/intelClient";
 import type { ExternalIntelLead, IntelClaim, IntelSourceType } from "./types";
-import { evidenceImageSrc } from "./lib/imageEvidence";
-import EvidenceThumb from "./EvidenceThumb";
+import { EVIDENCE_ACCEPT } from "./lib/pdfText";
+import { ingestElapsedSec, type IngestJob } from "./lib/ingestProgress";
 import { getCategoryColor } from "./utils/categoryColors";
 import { formatRoleLabel, roleDisplayClass } from "./utils/roleBadge";
+import { isSecondaryEvidence, isUncorroboratedEntity, sourceClassLabel } from "./lib/sourceTier";
+import MediaProvenanceBadge from "./MediaProvenanceBadge";
 
 const mono = "font-mono";
 
@@ -61,8 +66,71 @@ function formatRange(events: TimelineEventRecord[]) {
   return a === b ? a : `${a} — ${b}`;
 }
 
+function formatIncidentWindow(activeCase: CaseRecord, events: TimelineEventRecord[]) {
+  const start = activeCase.incidentStart?.trim();
+  const end = activeCase.incidentEnd?.trim();
+  const fmt = (iso: string) => {
+    const d = new Date(`${iso}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+  };
+  if (start && end && start !== end) return `${fmt(start)} — ${fmt(end)}`;
+  if (start) return fmt(start);
+  return formatRange(events);
+}
+
 function formatStamp(ts: number) {
   return new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function sourceKind(ev: EvidenceRecord): "PDF" | "TXT" | "DOCX" | "JPG/PNG" | "AUDIO" | "WEB" {
+  if (isSecondaryEvidence(ev) || ev.sourceType === "web_article" || ev.fileType === "web_article") return "WEB";
+  const blob = `${ev.sourceType || ""} ${ev.fileType || ""} ${ev.mediaType || ""} ${ev.fileName || ""}`.toLowerCase();
+  if (/\.(mp3|wav|m4a|aac|ogg)|audio\//.test(blob)) return "AUDIO";
+  if (/\.(docx?|rtf)|wordprocessing|msword/.test(blob)) return "DOCX";
+  if (ev.sourceType === "image" || /image\/|\.(png|jpe?g|webp|gif)$/.test(blob)) return "JPG/PNG";
+  if (ev.sourceType === "pdf" || blob.includes("pdf")) return "PDF";
+  return "TXT";
+}
+
+function ingestLabel(status: EvidenceRecord["status"]): { text: "Indexed" | "Processing" | "Needs Review"; cls: string } {
+  if (status === "indexed") return { text: "Indexed", cls: "border-emerald-200 bg-emerald-50 text-emerald-800" };
+  if (status === "ingesting" || status === "queued") return { text: "Processing", cls: "border-blue-200 bg-blue-50 text-blue-800" };
+  return { text: "Needs Review", cls: "border-amber-200 bg-amber-50 text-amber-900" };
+}
+
+function SourceKindIcon({ kind }: { kind: ReturnType<typeof sourceKind> }) {
+  const wrap = "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-500";
+  if (kind === "JPG/PNG") return <div className={wrap}><ImageIcon className="h-4 w-4" /></div>;
+  if (kind === "AUDIO") return <div className={wrap}><FileAudio className="h-4 w-4" /></div>;
+  if (kind === "WEB") return <div className={wrap}><Globe className="h-4 w-4" /></div>;
+  return <div className={wrap}><FileText className="h-4 w-4" /></div>;
+}
+
+function downloadOriginal(ev: EvidenceRecord) {
+  const name = ev.originalFileName || ev.fileName || "source";
+  const data = ev.fileBase64 || ev.imageBase64;
+  if (data) {
+    const a = document.createElement("a");
+    a.href = data.startsWith("data:") ? data : `data:application/octet-stream;base64,${data}`;
+    a.download = name;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    return;
+  }
+  if (ev.rawText) {
+    const url = URL.createObjectURL(new Blob([ev.rawText], { type: "text/plain" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
 }
 
 export default function CaseOverview({
@@ -72,7 +140,6 @@ export default function CaseOverview({
   events,
   pendingCount,
   conflictCount,
-  onAddEvidence,
   onOpenTimeline,
   onInspectContradiction,
   onOpenEntity,
@@ -81,6 +148,14 @@ export default function CaseOverview({
   onUnarchiveCase,
   onExportDossier,
   canExport = true,
+  onInspectSource,
+  onReextract,
+  ingestJob,
+  nowMs,
+  extractNotice,
+  extractError,
+  onIngestUrl,
+  onIngestPaste,
 }: {
   activeCase: CaseRecord | null;
   entities: EntityRecord[];
@@ -88,7 +163,6 @@ export default function CaseOverview({
   events: TimelineEventRecord[];
   pendingCount: number;
   conflictCount: number;
-  onAddEvidence: () => void;
   onOpenTimeline: () => void;
   onInspectContradiction?: () => void;
   onOpenEntity: (entity: EntityRecord) => void;
@@ -97,6 +171,14 @@ export default function CaseOverview({
   onUnarchiveCase: () => void;
   onExportDossier?: () => void;
   canExport?: boolean;
+  onInspectSource?: (evidenceId: string) => void;
+  onReextract?: (evidenceId: string) => void;
+  ingestJob?: IngestJob | null;
+  nowMs?: number;
+  extractNotice?: { fileName: string; entityCount: number } | null;
+  extractError?: string | null;
+  onIngestUrl?: (url: string, onProgress: (stage: "scraping" | "staging") => void) => Promise<void>;
+  onIngestPaste?: (text: string, kind?: "official" | "editorial") => void | Promise<void>;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
@@ -131,7 +213,7 @@ export default function CaseOverview({
     return (hot.length ? hot : persons).slice(0, 6);
   }, [persons]);
   const verified = events.filter((e) => e.isVerified).sort((a, b) => b.timestamp - a.timestamp);
-  const snapshot = (verified.length ? verified : [...events].sort((a, b) => b.timestamp - a.timestamp)).slice(0, 4);
+  const snapshot = [...events].sort((a, b) => b.timestamp - a.timestamp).slice(0, 4);
   const discrepancies = pendingCount + conflictCount + events.filter((e) => !e.isVerified).length;
 
   const contacts = useLiveQuery(
@@ -149,6 +231,10 @@ export default function CaseOverview({
   const [contactForm, setContactForm] = useState<null | Partial<CaseContactRecord> & { id?: string }>(null);
   const [copied, setCopied] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const [sourceMenuId, setSourceMenuId] = useState<string | null>(null);
+  const [registryTab, setRegistryTab] = useState<"official" | "news">("official");
+  const [ingestOpen, setIngestOpen] = useState(false);
   const [intelOpen, setIntelOpen] = useState(false);
   const [intelExpanded, setIntelExpanded] = useState<string | null>(null);
   const [intelBusy, setIntelBusy] = useState(false);
@@ -159,6 +245,41 @@ export default function CaseOverview({
     sourceUrl: "",
     rawContent: "",
   });
+
+  const verifyDrafts = useLiveQuery(
+    async () => {
+      if (!activeCase) return [] as VerifyDraftRecord[];
+      try {
+        return await db.verifyDrafts.where("caseId").equals(activeCase.id).toArray();
+      } catch {
+        return [] as VerifyDraftRecord[];
+      }
+    },
+    [activeCase?.id],
+  ) ?? [];
+
+  const mentionCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const ev of events) {
+      if (!ev.sourceDocId) continue;
+      map.set(ev.sourceDocId, (map.get(ev.sourceDocId) ?? 0) + 1);
+    }
+    for (const d of verifyDrafts) {
+      map.set(d.evidenceId, (map.get(d.evidenceId) ?? 0) + 1);
+    }
+    return map;
+  }, [events, verifyDrafts]);
+
+  const officialSources = evidence.filter((e) => !isSecondaryEvidence(e));
+  const newsSources = evidence.filter((e) => isSecondaryEvidence(e));
+  const registryRows = registryTab === "official" ? officialSources : newsSources;
+
+  useEffect(() => {
+    if (!sourceMenuId) return;
+    const close = () => setSourceMenuId(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [sourceMenuId]);
 
   const intelLeads = useLiveQuery(
     async () => {
@@ -292,7 +413,7 @@ export default function CaseOverview({
       <input
         ref={fileRef}
         type="file"
-        accept=".pdf,.txt,.md,.json,.csv,image/*"
+        accept={EVIDENCE_ACCEPT}
         multiple
         className="hidden"
         onChange={(e) => { void onFiles(e.target.files); e.target.value = ""; }}
@@ -308,7 +429,7 @@ export default function CaseOverview({
             <span className={`mt-2 inline-flex items-center rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-slate-500`}>ARCHIVED</span>
           )}
           <div className="mt-3 flex flex-wrap items-center gap-2.5 text-[13px] text-slate-500">
-            <span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />{formatRange(events)}</span>
+            <span className="inline-flex items-center gap-1.5"><Clock className="h-3.5 w-3.5" />{formatIncidentWindow(activeCase, events)}</span>
             <span className="text-slate-300">·</span>
             <span className="inline-flex items-center gap-1.5"><MapPin className="h-3.5 w-3.5" />{activeCase.jurisdiction?.trim() || "Jurisdiction unassigned"}</span>
             {activeCase.isArchived ? (
@@ -325,6 +446,18 @@ export default function CaseOverview({
                 ))}
               </select>
             )}
+            {ingestJob && ingestJob.stage !== "done" && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11.5px] font-medium text-amber-900">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+                Analyzing evidence: {evidence.find((e) => e.id === ingestJob.evidenceId)?.fileName || "source"} ({ingestElapsedSec(ingestJob, nowMs ?? Date.now())}s elapsed)
+              </span>
+            )}
+            {(!ingestJob || ingestJob.stage === "done") && extractNotice && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11.5px] font-medium text-emerald-800">
+                <Check className="h-3 w-3" />
+                Indexed {extractNotice.entityCount} {extractNotice.entityCount === 1 ? "entity" : "entities"} from {extractNotice.fileName}
+              </span>
+            )}
           </div>
         </div>
         <div className="flex flex-wrap gap-2.5">
@@ -340,7 +473,7 @@ export default function CaseOverview({
               <ArchiveRestore className="h-3.5 w-3.5" />Unarchive Case
             </button>
           ) : null}
-          <button type="button" onClick={onAddEvidence}
+          <button type="button" onClick={() => setIngestOpen(true)}
             className="inline-flex h-10 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-[13px] font-semibold text-white hover:bg-blue-700">
             <Upload className="h-3.5 w-3.5" />Add Evidence
           </button>
@@ -353,7 +486,7 @@ export default function CaseOverview({
 
       <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {[
-          { label: "Sources ingested", value: evidence.length, icon: FileText, onClick: onAddEvidence },
+          { label: "Sources ingested", value: evidence.length, icon: FileText, onClick: () => setIngestOpen(true) },
           { label: "Verified events", value: verified.length, icon: GitCommitHorizontal, onClick: onOpenTimeline },
           { label: "Unresolved gaps", value: discrepancies, icon: AlertTriangle, onClick: conflictCount ? onInspectContradiction : undefined },
           { label: "Persons of interest", value: poi.length, icon: Users, onClick: undefined },
@@ -375,13 +508,209 @@ export default function CaseOverview({
       </div>
 
       <div className="mb-8">
+        <div className="mb-3.5 flex flex-wrap items-center justify-between gap-3">
+          <h2 className={`${mono} text-[11px] tracking-[0.14em] text-slate-500`}>INGESTED EVIDENCE & SOURCES</h2>
+          <span className={`${mono} text-[11px] text-slate-400`}>{evidence.length} FILES INDEXED</span>
+        </div>
+        <div className="mb-3 grid grid-cols-2 gap-1 rounded-[10px] border border-slate-200 bg-slate-50 p-1">
+          <button
+            type="button"
+            onClick={() => setRegistryTab("official")}
+            className={`rounded-[8px] px-2 py-2 text-[12px] font-semibold ${registryTab === "official" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}
+          >
+            Official Records ({officialSources.length} files)
+          </button>
+          <button
+            type="button"
+            onClick={() => setRegistryTab("news")}
+            className={`rounded-[8px] px-2 py-2 text-[12px] font-semibold ${registryTab === "news" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}
+          >
+            News & Research Archive ({newsSources.length} articles)
+          </button>
+        </div>
+        <div className="rounded-xl border border-[#E2E8F0] bg-white p-5">
+          <div
+            onDragEnter={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              dragDepth.current += 1;
+              setDragging(true);
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              e.dataTransfer.dropEffect = "copy";
+              if (!dragging) setDragging(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              dragDepth.current = Math.max(0, dragDepth.current - 1);
+              if (dragDepth.current === 0) setDragging(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              dragDepth.current = 0;
+              setDragging(false);
+              void onFiles(e.dataTransfer.files);
+            }}
+            className={`mb-4 flex flex-col items-stretch gap-3 rounded-[10px] border-2 border-dashed px-3 py-3 transition-colors sm:flex-row sm:items-center sm:justify-between ${
+              ingestBusy
+                ? "border-blue-400 bg-blue-50/70"
+                : dragging
+                  ? "border-blue-600 bg-blue-50"
+                  : "border-slate-300 bg-slate-50/60"
+            }`}
+          >
+            <div className="min-w-0 text-[12.5px] text-slate-600">
+              {ingestBusy ? "Saving to local vault…" : dragging ? "Release to ingest onto this case." : "Drop files here or ingest a new source."}
+            </div>
+            <button
+              type="button"
+              disabled={ingestBusy}
+              onClick={() => { if (!ingestBusy) fileRef.current?.click(); }}
+              className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[10px] bg-blue-600 px-3 text-[12.5px] font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {ingestBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+              Ingest New Source
+            </button>
+          </div>
+
+          {registryRows.length === 0 ? (
+            <div className="rounded-[14px] border border-dashed border-slate-300 bg-white px-5 py-10 text-center text-[13px] text-slate-500">
+              {registryTab === "official"
+                ? "No official records ingested yet. Upload affidavits, police reports, or transcripts."
+                : "No news or research articles yet. Import a web link from External Intelligence & Press."}
+            </div>
+          ) : (
+            <ul className="divide-y divide-slate-100 overflow-hidden rounded-[10px] border border-slate-200">
+              {registryRows.map((ev) => {
+                const kind = sourceKind(ev);
+                const badge = ingestLabel(ev.status);
+                const refs = mentionCounts.get(ev.id) ?? 0;
+                const stamp = ev.ingestedAt ? formatStamp(new Date(ev.ingestedAt).getTime()) : formatStamp(activeCase.updatedAt);
+                const size = formatBytes(ev.byteSize ?? ev.fileSize);
+                return (
+                  <li key={ev.id} className="flex flex-col gap-3 px-3.5 py-3 sm:flex-row sm:items-start">
+                    <div className="flex min-w-0 flex-1 gap-3">
+                      <SourceKindIcon kind={kind} />
+                      <div className="min-w-0 flex-1">
+                        <div className="mb-1 flex flex-wrap items-center gap-2">
+                          <div className="min-w-0 truncate text-[13.5px] font-semibold text-slate-900">{ev.originalFileName || ev.fileName}</div>
+                          <span className={`rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] text-slate-600`}>
+                            {kind}
+                          </span>
+                          {sourceClassLabel(ev.sourceClass) ? (
+                            <span className={`rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] ${isSecondaryEvidence(ev) ? "border-amber-300 bg-amber-50 text-amber-900" : "text-slate-600"}`}>
+                              {sourceClassLabel(ev.sourceClass)}
+                            </span>
+                          ) : null}
+                          {isSecondaryEvidence(ev) ? (
+                            <span className={`rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] text-amber-900`}>
+                              SECONDARY
+                            </span>
+                          ) : (
+                            <span className={`rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] text-slate-600`}>
+                              PRIMARY
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-slate-500">
+                          <span>{stamp}</span>
+                          {size ? <span>· {size}</span> : null}
+                          <span className={`rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.04em] ${badge.cls}`}>{badge.text}</span>
+                          {ev.sha256Hash ? <Sha256Badge hash={ev.sha256Hash} /> : null}
+                          <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10.5px] font-medium text-slate-600">
+                            {refs} {refs === 1 ? "reference" : "references"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 flex-wrap items-center gap-1.5 sm:justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setPreviewId(ev.id)}
+                        className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 text-[11.5px] font-medium text-slate-700 hover:border-slate-300"
+                      >
+                        <Eye className="h-3.5 w-3.5" /> Preview
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onInspectSource?.(ev.id)}
+                        className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 text-[11.5px] font-medium text-slate-700 hover:border-slate-300"
+                      >
+                        Extracted Entities
+                      </button>
+                      <div className="relative">
+                        <button
+                          type="button"
+                          aria-label="Source actions"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSourceMenuId((id) => (id === ev.id ? null : ev.id));
+                          }}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-800"
+                        >
+                          <MoreHorizontal className="h-4 w-4" />
+                        </button>
+                        {sourceMenuId === ev.id && (
+                          <div
+                            role="menu"
+                            onClick={(e) => e.stopPropagation()}
+                            className="absolute right-0 z-20 mt-1 w-[240px] rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
+                          >
+                            <button
+                              type="button"
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-slate-700 hover:bg-slate-50"
+                              onClick={() => {
+                                downloadOriginal(ev);
+                                setSourceMenuId(null);
+                              }}
+                            >
+                              <Download className="h-3.5 w-3.5" /> Download Original
+                            </button>
+                            <button
+                              type="button"
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-slate-700 hover:bg-slate-50"
+                              onClick={() => {
+                                onReextract?.(ev.id);
+                                setSourceMenuId(null);
+                              }}
+                            >
+                              <RefreshCw className="h-3.5 w-3.5" /> Re-run Triage / Entity Extraction
+                            </button>
+                            <button
+                              type="button"
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-rose-700 hover:bg-rose-50"
+                              onClick={() => {
+                                setSourceMenuId(null);
+                                if (!window.confirm(`Disassociate “${ev.originalFileName || ev.fileName}” from this case?`)) return;
+                                void deleteEvidence(ev.id);
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" /> Delete / Disassociate
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <div className="mb-8">
         <div className="mb-3.5 flex items-baseline justify-between">
           <h2 className={`${mono} text-[11px] tracking-[0.14em] text-slate-500`}>PRIMARY SUSPECT & KEY ENTITIES</h2>
           <span className={`${mono} text-[11px] text-slate-400`}>{persons.length} PEOPLE ON CASE</span>
         </div>
         {poi.length === 0 ? (
           <div className="rounded-[14px] border border-dashed border-slate-300 bg-white px-5 py-10 text-center text-[13px] text-slate-500">
-            No people on this case yet. Add entities in Setup.
+            No people on this case yet. Ingest a source to extract entities.
           </div>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -400,6 +729,10 @@ export default function CaseOverview({
                       <span className={`shrink-0 rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] whitespace-nowrap ${roleDisplayClass(ent.role, getCategoryColor(cat, "badge"))}`}>
                         {formatRoleLabel(ent.role)}
                       </span>
+                      <MediaProvenanceBadge
+                        show={isUncorroboratedEntity(ent)}
+                        onPromote={() => void promoteEntityToVerified(ent.id)}
+                      />
                     </div>
                     {alibiLabel(ent) ? (
                       <div className="mb-1 text-[12px] text-slate-500">{alibiLabel(ent)}</div>
@@ -545,17 +878,25 @@ export default function CaseOverview({
             <h2 className={`${mono} text-[11px] tracking-[0.14em] text-slate-500`}>TIMELINE SNAPSHOT</h2>
             <button type="button" onClick={onOpenTimeline} className={`${mono} text-[11px] text-blue-600 hover:underline`}>OPEN CHRONOLOGY</button>
           </div>
-          <button type="button" onClick={onOpenTimeline}
-            className="w-full rounded-[14px] border border-slate-200 bg-white p-4 text-left shadow-sm transition-colors hover:border-blue-300">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={onOpenTimeline}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenTimeline(); } }}
+            className="w-full cursor-pointer rounded-[14px] border border-slate-200 bg-white p-4 text-left shadow-sm transition-colors hover:border-blue-300"
+          >
             {snapshot.length === 0 ? (
               <p className="py-8 text-center text-[13px] text-slate-500">No timeline events yet. Confirm facts in Verify.</p>
             ) : (
               <div className="flex flex-col gap-3">
                 {snapshot.map((ev, i) => {
                   const ent = entities.find((e) => e.id === ev.entityId);
+                  const src = evidence.find((row) => row.id === ev.sourceDocId);
+                  const secondary = ev.tier === "secondary" || Boolean(src && isSecondaryEvidence(src));
+                  const citeUrl = ev.sourceCitation?.sourceUrl || src?.sourceUrl;
                   const cat = { entityType: ent?.type, role: ent?.role, name: ent?.name, text: `${ev.title} ${ev.description}` };
                   return (
-                  <div key={ev.id} className="flex gap-3">
+                  <div key={ev.id} className={`flex gap-3 rounded-[10px] px-1 py-1 ${secondary ? "border border-dashed border-amber-400 bg-amber-50/40" : ""}`}>
                     <div className="flex w-4 flex-col items-center">
                       <span className={`mt-1.5 h-2 w-2 rounded-full ${getCategoryColor(cat, "dot")}`} />
                       {i < snapshot.length - 1 && <span className="mt-1 w-px flex-1 bg-slate-200" />}
@@ -564,13 +905,24 @@ export default function CaseOverview({
                       <div className={`${mono} text-[10.5px] text-slate-500`}>{formatStamp(ev.timestamp)}</div>
                       <div className="truncate text-[13.5px] font-medium">{ev.title}</div>
                       <div className="truncate text-[12px] text-slate-500">{ev.description}</div>
+                      {citeUrl ? (
+                        <a
+                          href={citeUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="mt-0.5 inline-block text-[11.5px] font-semibold text-amber-800 underline"
+                        >
+                          Source article
+                        </a>
+                      ) : null}
                     </div>
                   </div>
                   );
                 })}
               </div>
             )}
-          </button>
+          </div>
         </section>
 
         <section>
@@ -644,40 +996,11 @@ export default function CaseOverview({
             </span>
             <button
               type="button"
-              onClick={(e) => { e.stopPropagation(); onAddEvidence(); }}
+              onClick={(e) => { e.stopPropagation(); setIngestOpen(true); }}
               className="inline-flex items-center gap-1 font-semibold text-emerald-800 hover:underline"
             >
               Go to Intake <ArrowRight className="h-3.5 w-3.5" />
             </button>
-          </div>
-        )}
-
-        {(addedNotice || evidence.length > 0) && (
-          <div className="mt-3 divide-y divide-slate-100 overflow-hidden rounded-[12px] border border-slate-200 bg-white">
-            {(addedNotice?.names.length
-              ? evidence.filter((ev) => addedNotice.names.includes(ev.fileName)).concat(
-                  evidence.filter((ev) => !addedNotice.names.includes(ev.fileName)),
-                )
-              : evidence
-            ).slice(0, 8).map((ev) => (
-              <div key={ev.id} className="flex items-center gap-3 px-3.5 py-2.5">
-                {evidenceImageSrc(ev) ? (
-                  <EvidenceThumb src={evidenceImageSrc(ev)} alt={ev.fileName} className="h-8 w-8" />
-                ) : (
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-400">
-                    <FileText className="h-3.5 w-3.5" />
-                  </div>
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13px] font-medium text-slate-800">{ev.fileName}</div>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                    <span className={`${mono} text-[10.5px] text-slate-500`}>
-                      {ev.fileType.toUpperCase()}{formatBytes(ev.byteSize ?? ev.fileSize) ? ` · ${formatBytes(ev.byteSize ?? ev.fileSize)}` : ""} · {ev.status}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            ))}
           </div>
         )}
 
@@ -688,6 +1011,9 @@ export default function CaseOverview({
                 className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[12px] text-slate-600 hover:border-blue-300">
                 {e.type === "vehicle" ? <Truck className="h-3 w-3" /> : <MapPin className="h-3 w-3" />}
                 {e.name}
+                {isUncorroboratedEntity(e) ? (
+                  <span className="rounded border border-amber-300 bg-amber-50 px-1 text-[9.5px] font-semibold text-amber-900">Media</span>
+                ) : null}
               </button>
             ))}
           </div>
@@ -820,6 +1146,41 @@ export default function CaseOverview({
                 Stage & Parse with AI
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      <IngestDrawer
+        open={ingestOpen}
+        busy={ingestBusy}
+        error={extractError}
+        onClose={() => setIngestOpen(false)}
+        onDropFiles={async (files) => {
+          await onFiles(files);
+        }}
+        onPaste={async (text, kind) => {
+          if (onIngestPaste) await onIngestPaste(text, kind);
+        }}
+        onImportUrl={async (url, onProgress) => {
+          if (!onIngestUrl) throw new Error("Web ingest is unavailable.");
+          await onIngestUrl(url, onProgress);
+        }}
+      />
+
+      {previewId && (
+        <div
+          className="fixed inset-0 z-[70] flex items-stretch justify-end bg-slate-900/40 p-3 sm:p-6"
+          onClick={() => setPreviewId(null)}
+        >
+          <div
+            className="flex h-full min-h-0 w-full max-w-[720px] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <SourceDocumentViewer
+              evidence={evidence.find((row) => row.id === previewId) ?? null}
+              citation={null}
+              onClose={() => setPreviewId(null)}
+            />
           </div>
         </div>
       )}

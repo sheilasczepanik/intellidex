@@ -2,6 +2,7 @@ import type { ComponentType } from "react";
 import { Check, Link2, Trash2, X } from "lucide-react";
 import type { WizardFormState, EntityKind, KindSchema } from "./entityTypes";
 import { formatRoleButtonLabel, normalizePersonRole, roleBadgeClass } from "./utils/roleBadge";
+import MediaProvenanceBadge from "./MediaProvenanceBadge";
 
 const mono = "font-mono";
 
@@ -10,6 +11,8 @@ type Props = {
   schema: KindSchema;
   Icon: ComponentType<{ className?: string }>;
   inputCls: string;
+  uncorroborated?: boolean;
+  onPromote?: () => void;
   onChange: (next: WizardFormState) => void;
   onSave: () => void;
   onCancel: () => void;
@@ -17,7 +20,7 @@ type Props = {
 };
 
 export default function EditEntityDrawer({
-  form, schema, Icon, inputCls, onChange, onSave, onCancel, onRemove,
+  form, schema, Icon, inputCls, uncorroborated, onPromote, onChange, onSave, onCancel, onRemove,
 }: Props) {
   const setV = (k: string, val: string) => onChange({ ...form, v: { ...form.v, [k]: val } });
   const meta = schema.fields.map((f) => form.v[f.k]).filter(Boolean).join(" · ");
@@ -39,6 +42,9 @@ export default function EditEntityDrawer({
                 ? `New record in ${form.tab.toLowerCase()} — it joins the case the moment you save.`
                 : "Changes apply everywhere this entity is referenced."}
             </p>
+            <div className="mt-2">
+              <MediaProvenanceBadge show={uncorroborated} onPromote={onPromote} />
+            </div>
           </div>
           <button onClick={onCancel}
             className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-900">

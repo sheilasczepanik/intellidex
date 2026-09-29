@@ -28,6 +28,8 @@ const CASES: CaseRecord[] = [
     updatedAt: at(2 * hour),
     workingNotes: "",
     jurisdiction: "Three port authorities",
+    incidentStart: "2021-01-01",
+    incidentEnd: "2024-12-31",
   },
   {
     id: "CASE-0038",

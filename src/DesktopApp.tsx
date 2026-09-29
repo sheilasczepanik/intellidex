@@ -2,11 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
   addEvidence, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent,
-  db, DEFAULT_OPERATOR, deleteEntity, deleteEvidence, deleteTimelineEvent, formatBytes, formatTouched, hydrateUserProfile, isArchivedCase, listHubCases, parseEventTime, rejectVerifyDraft,
-  OPERATOR_ID, resetLocalVault, saveOperatorProfile, setCaseArchived, statusToTone, updateCase, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
+  db, DEFAULT_OPERATOR, deleteEntity, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft,
+  OPERATOR_ID, resetLocalVault, saveOperatorProfile, setCaseArchived, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord, type EntityRelationship,
 } from "./db";
-import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages, scoutEntitiesFromText } from "./lib/extractClient";
+import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
 import { renderPdfPagesToJpeg } from "./lib/pdfHelpers";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
 import { scrapeArticleFromUrl } from "./lib/scrapeClient";
@@ -15,6 +15,7 @@ import EntityGraph from "./EntityGraph";
 import { applyExtractedGraph } from "./lib/applyExtractGraph";
 import CaseOverview from "./CaseOverview";
 import ArchiveCaseModal from "./ArchiveCaseModal";
+import NewCaseForm from "./NewCaseForm";
 import EvidenceIntake, {
   STAGE_SIZE_ERROR,
   STAGE_TIMEOUT_ERROR,
@@ -26,7 +27,6 @@ import EvidenceIntake, {
 } from "./EvidenceIntake";
 import EditEntityDrawer from "./EditEntityDrawer";
 import EntityDossier from "./EntityDossier";
-import EvidenceThumb from "./EvidenceThumb";
 import ExportDossierModal from "./ExportDossierModal";
 import GlobalSearch from "./GlobalSearch";
 import ProfileSettings from "./ProfileSettings";
@@ -36,13 +36,14 @@ import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQ
 import WorkspacePreferences from "./WorkspacePreferences";
 import { ExtractSelectionTip, VERIFY_CATEGORIES } from "./Verify";
 import {
-  ingestElapsedSec, ingestStageLabel, type IngestJob,
+  ingestElapsedSec, type IngestJob,
 } from "./lib/ingestProgress";
 import { LOW_CLARITY_BADGE, UNREADABLE_SCAN_ALERT, assessTextClarity, isUnreadableScan, logExtractedText } from "./lib/textClarity";
-import { EVIDENCE_ACCEPT, isPdfFile, isTextFile } from "./lib/pdfText";
-import { evidenceImageSrc, isImageFile } from "./lib/imageEvidence";
-import type { ScoutedEntity } from "./lib/extractSchema";
+import { isPdfFile, isTextFile } from "./lib/pdfText";
+import { isImageFile } from "./lib/imageEvidence";
 import { inferSourceType, type SourceCitation } from "./types";
+import { isSecondaryEvidence, isUncorroboratedEntity } from "./lib/sourceTier";
+import MediaProvenanceBadge from "./MediaProvenanceBadge";
 import { CLAUDE_MAX_CHARS, CLAUDE_MAX_PAGES, CLAUDE_RETRY_PAGES, windowSourceText } from "./lib/extractSchema";
 import { collectQuoteSpans, narrativeSortKey, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
@@ -56,11 +57,11 @@ import { getCategoryColor, resolveSemanticCategory } from "./utils/categoryColor
 import { formatRoleLabel, normalizePersonRole, PERSON_ROLE_VALUES, roleDisplayClass } from "./utils/roleBadge";
 import type { SearchHit } from "./lib/globalSearch";
 import {
-  ArrowRight, Archive, ArchiveRestore, Check, CheckCheck, Clock, CloudUpload, FileDown,
-  FileText, FolderPlus, GitCommitHorizontal, GitFork, Inbox, KeyRound, LayoutDashboard, Loader2,
-  Link2, ListChecks, LayoutGrid, Lock, MapPin, MoreHorizontal, PanelLeftClose,
+  ArrowRight, Archive, ArchiveRestore, Check, CheckCheck, Clock, FileDown,
+  FileText, FolderPlus, GitCommitHorizontal, GitFork, Inbox, KeyRound, LayoutDashboard,
+  LayoutGrid, Lock, MapPin, MoreHorizontal, PanelLeftClose,
   PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, Trash2, Truck,
-  TriangleAlert, Upload, User, Users, UserRound, X, Box,
+  TriangleAlert, User, Users, UserRound, X, Box,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
@@ -71,28 +72,42 @@ export type Screen = "Hub" | "Setup" | "Overview" | "Intake" | "Verify" | "Timel
 export type Tone = "active" | "review" | "cold" | "ok" | "fail";
 export type EntityKind = "People" | "Places" | "Vehicles" | "Phones" | "Digital" | "Exhibits";
 
-function screenFromPath(pathname: string): Screen | null {
+function parseAppPath(pathname: string): { screen: Screen; caseId: string | null } {
   const path = pathname.replace(/\/+$/, "") || "/";
-  if (path === "/" || path === "/hub") return "Hub";
-  if (path === "/setup") return "Setup";
-  if (path === "/overview") return "Overview";
-  if (path === "/intake") return "Intake";
-  if (path === "/verify") return "Verify";
-  if (path === "/timeline") return "Timeline";
-  if (path === "/graph") return "Graph";
-  if (path.startsWith("/settings/profile")) return "Profile";
-  if (path.startsWith("/settings/workspace")) return "Preferences";
-  return null;
+  const caseMatch = path.match(/^\/cases\/([^/]+)(?:\/(overview|intake|verify|timeline|graph))?$/i);
+  if (caseMatch) {
+    const leaf = (caseMatch[2] || "overview").toLowerCase();
+    const screens: Record<string, Screen> = {
+      overview: "Overview",
+      intake: "Intake",
+      verify: "Verify",
+      timeline: "Timeline",
+      graph: "Graph",
+    };
+    return { screen: screens[leaf] ?? "Overview", caseId: decodeURIComponent(caseMatch[1]) };
+  }
+  if (path === "/" || path === "/hub") return { screen: "Hub", caseId: null };
+  if (path === "/setup") return { screen: "Setup", caseId: null };
+  if (path === "/overview") return { screen: "Overview", caseId: null };
+  if (path === "/intake") return { screen: "Intake", caseId: null };
+  if (path === "/verify") return { screen: "Verify", caseId: null };
+  if (path === "/timeline") return { screen: "Timeline", caseId: null };
+  if (path === "/graph") return { screen: "Graph", caseId: null };
+  if (path.startsWith("/settings/profile")) return { screen: "Profile", caseId: null };
+  if (path.startsWith("/settings/workspace")) return { screen: "Preferences", caseId: null };
+  return { screen: "Hub", caseId: null };
 }
 
-function pathFromScreen(screen: Screen) {
+function pathFromScreen(screen: Screen, caseId?: string | null) {
   if (screen === "Hub") return "/hub";
   if (screen === "Profile") return "/settings/profile";
   if (screen === "Preferences") return "/settings/workspace";
+  if (screen === "Setup") return "/setup";
+  if (caseId) return `/cases/${encodeURIComponent(caseId)}/${screen.toLowerCase()}`;
   return `/${screen.toLowerCase()}`;
 }
 
-const CASE_WORKSPACE: Screen[] = ["Setup", "Overview", "Intake", "Verify", "Timeline", "Graph"];
+const CASE_WORKSPACE: Screen[] = ["Overview", "Intake", "Verify", "Timeline", "Graph"];
 
 function NoActiveCase({ onHub }: { onHub: () => void }) {
   return (
@@ -199,14 +214,6 @@ export interface WizardFormState {
 /* ------------------------------------------------------------------ */
 
 const CASE_STATUSES: CaseStatus[] = ["ACTIVE", "REVIEW", "COLD", "FIELD"];
-
-const STEPS = [
-  { label: "Case details", hint: "Title, jurisdiction, dates" },
-  { label: "Sources", hint: "Upload or paste reports" },
-  { label: "Entities", hint: "Derived from sources" },
-  { label: "Review", hint: "Confirm and open case" },
-];
-const SETUP_CRUMB = ["DETAILS", "SOURCES", "ENTITIES", "REVIEW"];
 
 const SCHEMA: Record<EntityKind, KindSchema> = {
   People: {
@@ -325,9 +332,6 @@ const Chip = ({ tone, children, className = "" }: { tone: Tone; children: React.
 const ENTITY_ICON: Record<EntityKind, React.ComponentType<{ className?: string }>> = {
   People: User, Places: MapPin, Vehicles: Truck, Phones: Phone, Digital: Radio, Exhibits: Box,
 };
-const TAB_ICON: Record<EntityKind, React.ComponentType<{ className?: string }>> = {
-  People: Users, Places: MapPin, Vehicles: Truck, Phones: Phone, Digital: Radio, Exhibits: Box,
-};
 
 const notesFromForm = (v: Record<string, string>) =>
   [v.note, v.role, v.dob, v.contact, v.address, v.coords, v.refs, v.plate, v.owner, v.sightings]
@@ -340,39 +344,9 @@ function toDatetimeLocal(ts: number) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function evidenceMeta(q: EvidenceRecord) {
-  const bits = [q.fileType.toUpperCase()];
-  if (q.pageCount) bits.push(`${q.pageCount} page${q.pageCount === 1 ? "" : "s"}`);
-  const size = formatBytes(q.fileSize);
-  if (size) bits.push(size);
-  return bits.join(" · ");
-}
-
 function formatClock(ts: number) {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
-type SuggestedIdentity = ScoutedEntity & { id: string };
-
-function scoutRole(type: EntityType, raw: string) {
-  const s = raw.toUpperCase();
-  if (type === "person") {
-    if (s.includes("PERSON OF INTEREST") || s.includes("POI")) return "person_of_interest";
-    if (s.includes("SUSPECT") || s.includes("SUBJECT")) return "SUSPECT";
-    if (s.includes("VICTIM")) return "VICTIM";
-    if (s.includes("WITNESS")) return "WITNESS";
-    if (s.includes("ASSOCIATE") || s.includes("OFFICER") || s.includes("LAW")) return "ASSOCIATE";
-    return "UNVERIFIED";
-  }
-  if (type === "place") {
-    if (s.includes("PRIMARY")) return "PRIMARY";
-    if (s.includes("REGISTER")) return "REGISTERED";
-    return "UNVERIFIED";
-  }
-  if (s.includes("TRACK")) return "TRACKED";
-  if (s.includes("REGISTER")) return "REGISTERED";
-  return "UNVERIFIED";
 }
 
 function formatRangeLabel(start: number, end: number, allDates: boolean) {
@@ -392,25 +366,27 @@ const inputCls =
 /* ------------------------------------------------------------------ */
 
 export default function DesktopApp() {
-  const [screen, setScreen] = useState<Screen>(() => screenFromPath(window.location.pathname) ?? "Hub");
-  const [step, setStep] = useState(0);
-  const [tab, setTab] = useState<EntityKind>("People");
+  const boot = parseAppPath(window.location.pathname);
+  const [screen, setScreen] = useState<Screen>(boot.screen);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftSummary, setDraftSummary] = useState("");
+  const [draftJurisdiction, setDraftJurisdiction] = useState("");
+  const [draftIncidentStart, setDraftIncidentStart] = useState("");
+  const [draftIncidentEnd, setDraftIncidentEnd] = useState("");
   const [draftStatus, setDraftStatus] = useState<CaseStatus>("ACTIVE");
   const [savingCase, setSavingCase] = useState(false);
   const [hubTab, setHubTab] = useState<"active" | "archived">("active");
   const [hubCardMenuId, setHubCardMenuId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [archivePrompt, setArchivePrompt] = useState<{ id: string; title: string } | null>(null);
-  const [activeCaseId, setActiveCaseId] = useState<string | null>("CASE-0038");
+  const [activeCaseId, setActiveCaseId] = useState<string | null>(boot.caseId ?? "CASE-0038");
 
   const hubCases = useLiveQuery(listHubCases);
   const activeHubCases = (hubCases ?? []).filter((c) => !isArchivedCase(c));
   const archivedHubCases = (hubCases ?? []).filter((c) => isArchivedCase(c));
   const resolvedCaseId = activeCaseId === ""
     ? null
-    : (hubCases?.some((c) => c.id === activeCaseId) ? activeCaseId : null)
+    : activeCaseId
       ?? activeHubCases.find((c) => c.id === "CASE-0038")?.id
       ?? activeHubCases[0]?.id
       ?? null;
@@ -441,7 +417,7 @@ export default function DesktopApp() {
   ) ?? [];
 
   const fileRef = useRef<HTMLInputElement>(null);
-  const setupFileRef = useRef<HTMLInputElement>(null);
+  const extractChain = useRef(Promise.resolve());
   const [form, setForm] = useState<WizardFormState | null>(null);
   const [dragging, setDragging] = useState(false);
   const [activeHoveredCardId, setActiveHoveredCardId] = useState<string | null>(null);
@@ -476,15 +452,13 @@ export default function DesktopApp() {
   const [ingestJob, setIngestJob] = useState<IngestJob | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [extractNotice, setExtractNotice] = useState<{ fileName: string; entityCount: number } | null>(null);
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [extractTip, setExtractTip] = useState<{ text: string; x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [providerDraft, setProviderDraft] = useState<LlmProvider>("anthropic");
-  const [suggestedIdentities, setSuggestedIdentities] = useState<SuggestedIdentity[]>([]);
-  const [scoutingEntities, setScoutingEntities] = useState(false);
-  const [setupPaste, setSetupPaste] = useState("");
   const [viewDay, setViewDay] = useState("");
   const [viewAllDates, setViewAllDates] = useState(false);
   const [timeWindow, setTimeWindow] = useState<TimeWindow>("full");
@@ -518,22 +492,39 @@ export default function DesktopApp() {
   }, [operator.themePreference]);
 
   useEffect(() => {
-    const onPop = () => setScreen(screenFromPath(window.location.pathname) ?? "Hub");
+    if (screen === "Setup") setActiveCaseId("");
+  }, [screen]);
+
+  useEffect(() => {
+    const onPop = () => {
+      const loc = parseAppPath(window.location.pathname);
+      setScreen(loc.screen);
+      if (loc.caseId) setActiveCaseId(loc.caseId);
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  const goTo = (next: Screen) => {
+  const goTo = (next: Screen, caseId?: string | null) => {
+    if (caseId) setActiveCaseId(caseId);
+    if (caseId === "") setActiveCaseId("");
     setScreen(next);
     setOperatorMenu(false);
-    const path = pathFromScreen(next);
+    const id = caseId || (next === "Hub" || next === "Setup" || next === "Profile" || next === "Preferences" ? null : resolvedCaseId);
+    const path = pathFromScreen(next, id);
     if (window.location.pathname !== path) window.history.pushState({}, "", path);
   };
 
   useEffect(() => {
-    const path = pathFromScreen(screen);
+    if (screen === "Hub" || screen === "Setup" || screen === "Profile" || screen === "Preferences") {
+      const path = pathFromScreen(screen);
+      if (window.location.pathname !== path) window.history.replaceState({}, "", path);
+      return;
+    }
+    if (!resolvedCaseId) return;
+    const path = pathFromScreen(screen, resolvedCaseId);
     if (window.location.pathname !== path) window.history.replaceState({}, "", path);
-  }, [screen]);
+  }, [screen, resolvedCaseId]);
 
   useEffect(() => {
     if (!toast) return;
@@ -563,7 +554,6 @@ export default function DesktopApp() {
     { id: "Hub", icon: LayoutGrid },
   ];
   const CASE_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }>; badge?: number }[] = [
-    { id: "Setup", icon: ListChecks },
     { id: "Overview", icon: LayoutDashboard },
     { id: "Intake", icon: Inbox, badge: caseEvidence.length || undefined },
     { id: "Verify", icon: ShieldCheck, badge: pendingDrafts.length || undefined },
@@ -578,6 +568,9 @@ export default function DesktopApp() {
       title: draftTitle,
       summary: draftSummary,
       status: draftStatus,
+      jurisdiction: draftJurisdiction,
+      incidentStart: draftIncidentStart,
+      incidentEnd: draftIncidentEnd,
     });
     setActiveCaseId(row.id);
     return row.id;
@@ -601,7 +594,7 @@ export default function DesktopApp() {
     if (!form) return;
     const caseId = await ensureActiveCase();
     if (!caseId) {
-      setStep(0);
+      goTo("Setup");
       return;
     }
     const payload = {
@@ -709,9 +702,13 @@ export default function DesktopApp() {
       }
     }
 
+    const evidenceMap = new Map(caseEvidence.map((row) => [row.id, row]));
     const plotted = scoped.map((e) => {
       const laneId = entityMap.has(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID;
       const ent = entityMap.get(e.entityId);
+      const src = evidenceMap.get(e.sourceDocId);
+      const secondary = e.tier === "secondary" || Boolean(src && isSecondaryEvidence(src));
+      const citeUrl = e.sourceCitation?.sourceUrl || src?.sourceUrl || "";
       const semantic = resolveSemanticCategory({
         entityType: ent?.type,
         role: ent?.role,
@@ -729,6 +726,8 @@ export default function DesktopApp() {
         tag: e.isVerified ? "EVENT" : "UNVERIFIED",
         flag: conflictIds.has(e.id),
         verified: e.isVerified,
+        secondary,
+        citeUrl,
         semantic,
       };
     });
@@ -764,6 +763,8 @@ export default function DesktopApp() {
         border: getCategoryColor(semantic, "border"),
         semantic,
         tone: TONE_FOR[normalizePersonRole(ent?.role ?? "")] ?? TONE_FOR[ent?.role ?? ""] ?? ("cold" as Tone),
+        uncorroborated: ent ? isUncorroboratedEntity(ent) : false,
+        entityId: ent?.id,
       };
       const evs = plotted.filter((e) => e.entityId === id).sort((a, b) => a.timestamp - b.timestamp);
       const totalCount = caseEvents.filter((e) => (entityMap.has(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID) === id).length;
@@ -834,7 +835,7 @@ export default function DesktopApp() {
       dayLabel: viewAllDates ? "ALL DATES" : (activeDay ? formatDayHeading(activeDay) : "NO DATE"),
       timeLabel: formatClockRange(start, end),
     };
-  }, [caseEvents, caseEntities, viewDay, viewAllDates, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit]);
+  }, [caseEvents, caseEntities, caseEvidence, viewDay, viewAllDates, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit]);
 
   useEffect(() => {
     setViewDay("");
@@ -871,8 +872,6 @@ export default function DesktopApp() {
     setPxPerHour(fitPxPerHour(maxTime - minTime, el?.clientWidth ?? 960));
     requestAnimationFrame(() => el?.scrollTo({ left: 0, top: 0, behavior: "smooth" }));
   };
-
-  const list = caseEntities.filter((e) => e.type === KIND_TYPE[tab]);
 
   const inspectContradiction = (contradictionId?: string) => {
     setSelected(null);
@@ -995,11 +994,11 @@ export default function DesktopApp() {
     setActiveCaseId("");
     setDraftTitle("");
     setDraftSummary("");
+    setDraftJurisdiction("");
+    setDraftIncidentStart("");
+    setDraftIncidentEnd("");
     setDraftStatus("ACTIVE");
-    setStep(0);
-    setSuggestedIdentities([]);
-    setSetupPaste("");
-    setScreen("Setup");
+    goTo("Setup");
   };
 
   const openExistingCase = (id: string, title: string, summary: string, status: string) => {
@@ -1007,8 +1006,7 @@ export default function DesktopApp() {
     setDraftTitle(title);
     setDraftSummary(summary);
     setDraftStatus((CASE_STATUSES.includes(status as CaseStatus) ? status : "ACTIVE") as CaseStatus);
-    setStep(2);
-    setScreen("Overview");
+    goTo("Overview", id);
   };
 
   const unarchiveCase = async (id: string, title: string) => {
@@ -1033,19 +1031,18 @@ export default function DesktopApp() {
     if (!draftTitle.trim() || savingCase) return;
     setSavingCase(true);
     try {
-      if (activeCaseId && hubCases?.some((c) => c.id === activeCaseId)) {
-        await updateCase(activeCaseId, { title: draftTitle, summary: draftSummary, status: draftStatus });
-        setScreen("Overview");
-        return;
-      }
       const row = await createCase({
         title: draftTitle,
         summary: draftSummary,
         status: draftStatus,
+        jurisdiction: draftJurisdiction,
+        incidentStart: draftIncidentStart,
+        incidentEnd: draftIncidentEnd,
       });
       setActiveCaseId(row.id);
-      setScreen("Overview");
-      setStep(0);
+      goTo("Overview", row.id);
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : "Could not create the case.");
     } finally {
       setSavingCase(false);
     }
@@ -1143,6 +1140,8 @@ export default function DesktopApp() {
     sourceUrl?: string;
     publishedDate?: string;
     wordCount?: number;
+    fromPaste?: boolean;
+    fromEditorial?: boolean;
   }) => {
     let rowId: string | null = null;
     const startedAt = Date.now();
@@ -1150,7 +1149,7 @@ export default function DesktopApp() {
       const caseId = resolvedCaseId ?? await ensureActiveCase();
       if (!caseId) {
         setExtractError("Create or open a case before adding evidence.");
-        setScreen("Setup");
+        goTo("Setup");
         return null;
       }
       const sha256Hash = input.sha256Hash
@@ -1176,6 +1175,8 @@ export default function DesktopApp() {
         sourceUrl: input.sourceUrl,
         publishedDate: input.publishedDate,
         wordCount: input.wordCount,
+        fromPaste: input.fromPaste,
+        fromEditorial: input.fromEditorial,
       });
       rowId = row.id;
       if (Date.now() - startedAt > STAGE_TIMEOUT_MS) throw new Error(STAGE_TIMEOUT_ERROR);
@@ -1204,8 +1205,9 @@ export default function DesktopApp() {
     }
   };
 
-  const ingestFiles = async (files: FileList | File[], opts?: { extract?: boolean }) => {
-    const extract = opts?.extract ?? screen === "Intake";
+  const ingestFiles = async (files: FileList | File[], opts?: { extract?: boolean; background?: boolean }) => {
+    const extract = opts?.extract ?? true;
+    const background = opts?.background ?? (screen !== "Intake");
     for (const file of [...files]) {
       let rowId: string | null = null;
       try {
@@ -1216,7 +1218,12 @@ export default function DesktopApp() {
         const row = await stageEvidenceFile(file, (payload) => ingestText(payload));
         if (!row) continue;
         rowId = row.id;
-        if (extract) await runExtract(rowId);
+        if (extract) {
+          extractChain.current = extractChain.current.then(() =>
+            runExtract(rowId!, { stayOnWorkspace: background }),
+          );
+          if (!background) await extractChain.current;
+        }
       } catch (err) {
         const message = stagingFailureMessage(err);
         const fromPersist = err instanceof Error && "evidenceId" in err
@@ -1265,7 +1272,7 @@ export default function DesktopApp() {
       new TextEncoder().encode(article.content).buffer as ArrayBuffer,
     );
     const bytes = new TextEncoder().encode(article.content).length;
-    await ingestText({
+    const row = await ingestText({
       fileName: article.title,
       fileType: "web_article",
       rawText: article.content,
@@ -1278,6 +1285,12 @@ export default function DesktopApp() {
       publishedDate: article.publishedDate ?? undefined,
       wordCount: article.wordCount,
     });
+    if (row?.id) {
+      extractChain.current = extractChain.current.then(() =>
+        runExtract(row.id, { stayOnWorkspace: screen !== "Intake" }),
+      );
+      if (screen === "Intake") await extractChain.current;
+    }
   };
 
   const runOfficialExport = async (opts: DossierExportOptions) => {
@@ -1313,7 +1326,9 @@ export default function DesktopApp() {
     maxPages?: number;
     maxChars?: number;
     summary?: boolean;
+    stayOnWorkspace?: boolean;
   }) => {
+    const stayOnWorkspace = opts?.stayOnWorkspace ?? screen !== "Intake";
     const caseId = resolvedCaseId ?? await ensureActiveCase();
     if (!caseId) {
       setExtractError("Create or open a case first.");
@@ -1401,22 +1416,32 @@ export default function DesktopApp() {
         entities: bundle.entities,
         relationships: bundle.relationships,
       });
+      await ensureContactsForPeople(caseId);
+      const roster = await db.entities.where("caseId").equals(caseId).toArray();
+      setExtractNotice({ fileName: ev.fileName, entityCount: bundle.entities.length });
+      window.setTimeout(() => {
+        setExtractNotice((curr) => (curr?.fileName === ev.fileName ? null : curr));
+      }, 7000);
       setIngestJob((job) => (job && job.evidenceId === ev.id ? { ...job, stage: "events" } : job));
       const clarity = ev.textClarity ?? assessTextClarity(ev.rawText, ev.pageCount ?? 1);
       if (!events.length) {
         const message = "Claude returned no events. Try a shorter excerpt or paste narrative text.";
-        await db.evidence.update(ev.id, { status: "flagged", lastError: message, textClarity: clarity });
-        setExtractError(message);
+        await db.evidence.update(ev.id, {
+          status: bundle.entities.length ? "indexed" : "flagged",
+          lastError: bundle.entities.length ? "" : message,
+          textClarity: clarity,
+        });
+        if (!stayOnWorkspace) setExtractError(message);
         setIngestJob(null);
         return;
       }
       const matchEntity = (id: string | null, name: string) => {
-        if (id && caseEntities.some((e) => e.id === id)) return id;
+        if (id && roster.some((e) => e.id === id)) return id;
         const needle = name.trim().toLowerCase();
         if (!needle) return "";
-        return caseEntities.find((e) => e.name.trim().toLowerCase() === needle)?.id
-          ?? caseEntities.find((e) => namesLooselyMatch(e.name, name))?.id
-          ?? caseEntities.find((e) => {
+        return roster.find((e) => e.name.trim().toLowerCase() === needle)?.id
+          ?? roster.find((e) => namesLooselyMatch(e.name, name))?.id
+          ?? roster.find((e) => {
             const n = e.name.trim().toLowerCase();
             return n.includes(needle) || needle.includes(n);
           })?.id
@@ -1455,7 +1480,7 @@ export default function DesktopApp() {
       setIngestJob((job) => (job && job.evidenceId === ev.id ? { ...job, stage: "done" } : job));
       await new Promise((resolve) => window.setTimeout(resolve, 450));
       setActiveEvidenceId(ev.id);
-      setScreen("Verify");
+      if (!stayOnWorkspace) goTo("Verify", caseId);
       setIngestJob(null);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Extraction failed.";
@@ -1467,65 +1492,10 @@ export default function DesktopApp() {
     }
   };
 
-  const continueToEntities = async () => {
-    const sources = caseEvidence.filter((e) => e.rawText.trim());
-    if (!sources.length) {
-      setSuggestedIdentities([]);
-      setStep(2);
-      return;
-    }
-    setScoutingEntities(true);
-    setExtractError(null);
-    try {
-      const found = await scoutEntitiesFromText({
-        text: windowSourceText(sources.map((s) => `--- ${s.fileName} ---\n${s.rawText}`).join("\n\n")),
-        fileName: sources.map((s) => s.fileName).join(", "),
-        entities: caseEntities.map((e) => ({ id: e.id, name: e.name, type: e.type, role: e.role })),
-      });
-      const existing = new Set(caseEntities.map((e) => `${e.type}:${e.name.trim().toLowerCase()}`));
-      const seen = new Set<string>();
-      const next: SuggestedIdentity[] = [];
-      for (const f of found) {
-        const key = `${f.type}:${f.name.trim().toLowerCase()}`;
-        if (existing.has(key) || seen.has(key)) continue;
-        seen.add(key);
-        next.push({ ...f, id: crypto.randomUUID() });
-      }
-      setSuggestedIdentities(next);
-      setStep(2);
-    } catch (err) {
-      setExtractError(err instanceof Error ? err.message : "Could not scout entities from sources.");
-      setSuggestedIdentities([]);
-      setStep(2);
-    } finally {
-      setScoutingEntities(false);
-    }
-  };
-
-  const acceptSuggested = async (item: SuggestedIdentity) => {
-    const caseId = resolvedCaseId ?? await ensureActiveCase();
-    if (!caseId) {
-      setStep(0);
-      return;
-    }
-    await createEntity({
-      caseId,
-      name: item.name,
-      type: item.type,
-      role: scoutRole(item.type, item.role),
-      notes: [item.details, item.quote && `“${item.quote}”`, item.sourceFile && `Source: ${item.sourceFile}`]
-        .filter(Boolean)
-        .join("\n"),
-    });
-    setSuggestedIdentities((rows) => rows.filter((r) => r.id !== item.id));
-    setTab(TYPE_KIND[item.type]);
-  };
-
   const sourceEvidence = caseEvidence.find((e) => e.id === activeEvidenceId) ?? caseEvidence[0] ?? null;
   const drawerEvent = caseEvents.find((e) => e.id === drawerEventId) ?? null;
   const drawerEntity = drawerEvent ? caseEntities.find((e) => e.id === drawerEvent.entityId) : null;
   const drawerSource = drawerEvent ? caseEvidence.find((e) => e.id === drawerEvent.sourceDocId) : null;
-  const pdfProgress = ingestJob?.stage === "pdf" || ingestJob?.stage === "render" ? ingestStageLabel(ingestJob) : null;
   const jobElapsed = ingestJob ? ingestElapsedSec(ingestJob, nowMs) : 0;
   const busy = extracting || (ingestJob != null && ingestJob.stage !== "done");
 
@@ -1971,403 +1941,26 @@ export default function DesktopApp() {
               );
             })()}
 
-            {/* ---------------- SETUP ---------------- */}
-            {CASE_WORKSPACE.includes(screen) && screen !== "Setup" && !activeCase && (
+            {/* ---------------- SETUP (single-step create) ---------------- */}
+            {CASE_WORKSPACE.includes(screen) && !activeCase && (
               <NoActiveCase onHub={() => goTo("Hub")} />
             )}
             {screen === "Setup" && (
-              <div className="mx-auto w-full max-w-[1180px] px-10 pb-20 pt-12">
-                <div className="mb-8">
-                  <div className={`mb-2.5 ${mono} text-[11px] tracking-[0.14em] text-slate-500`}>
-                    {resolvedCaseId ? `${resolvedCaseId} / ${SETUP_CRUMB[step] ?? "SETUP"}` : "NEW CASE / LOCAL VAULT"}
-                  </div>
-                  <h1 className="text-[34px] font-semibold leading-tight tracking-tight">Case setup</h1>
-                </div>
-
-                <div className="flex flex-col items-stretch gap-5">
-                  <input ref={setupFileRef} type="file" accept={EVIDENCE_ACCEPT} multiple className="hidden"
-                    onChange={(e) => { if (e.target.files) void ingestFiles(e.target.files); e.target.value = ""; }} />
-                  <aside className="flex max-w-full flex-row flex-wrap gap-1.5">
-                    {STEPS.map((s, i) => {
-                      const active = i === step, done = i < step;
-                      return (
-                        <button key={s.label} onClick={() => setStep(i)}
-                          className={`flex shrink-0 items-center gap-3 whitespace-nowrap rounded-[10px] border px-3.5 py-2.5 text-left transition-colors ${active ? "border-blue-200 bg-blue-50 text-slate-900" : "border-slate-200 bg-white text-slate-500 hover:border-slate-300"}`}>
-                          <span className={`flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-full border ${mono} text-[11px] ${active ? "border-blue-600 bg-blue-600 text-white" : done ? "border-blue-300 text-blue-600" : "border-slate-300 text-slate-500"}`}>
-                            {done ? "✓" : i + 1}
-                          </span>
-                          <span className="flex flex-col gap-[3px]">
-                            <span className="text-[13.5px] font-medium">{s.label}</span>
-                            <span className="text-[11.5px] text-slate-500">{s.hint}</span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                    <div className={`ml-auto flex items-center gap-2 self-center whitespace-nowrap ${mono} text-[10.5px] tracking-[0.08em] text-slate-500`}>
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />STORED IN INDEXEDDB
-                    </div>
-                  </aside>
-
-                  {step === 0 && (
-                    <section className="overflow-hidden rounded-[14px] border border-slate-200 bg-white shadow-sm">
-                      <div className="border-b border-slate-200 px-[22px] py-[18px]">
-                        <h2 className="mb-1 text-[15px] font-semibold tracking-tight">Case details</h2>
-                        <p className="text-[12.5px] text-slate-500">This writes a real row to the local database. Refresh and it will still be here.</p>
-                      </div>
-                      <div className="flex flex-col gap-5 px-[22px] py-[22px]">
-                        <div className="flex flex-col gap-2">
-                          <label className="text-[12px] font-semibold text-slate-700">Title</label>
-                          <input
-                            value={draftTitle}
-                            onChange={(e) => setDraftTitle(e.target.value)}
-                            placeholder="e.g. North Quay transfers"
-                            className={`${inputCls} h-11 text-[15px] font-semibold`}
-                          />
-                        </div>
-                        <div className="flex flex-col gap-2">
-                          <label className="text-[12px] font-semibold text-slate-700">Summary</label>
-                          <textarea
-                            value={draftSummary}
-                            onChange={(e) => setDraftSummary(e.target.value)}
-                            placeholder="What this investigation is about"
-                            className={`${inputCls} h-[92px] resize-none py-2.5 text-[13.5px] leading-relaxed`}
-                          />
-                        </div>
-                        <div className="flex flex-col gap-2.5">
-                          <label className="text-[12px] font-semibold text-slate-700">Status</label>
-                          <div className="flex flex-wrap gap-2">
-                            {CASE_STATUSES.map((st) => {
-                              const on = st === draftStatus;
-                              return (
-                                <button key={st} type="button" onClick={() => setDraftStatus(st)}
-                                  className={`h-[30px] rounded-lg border px-3 ${mono} text-[10.5px] tracking-[0.08em] transition-colors ${on ? "border-blue-400 bg-blue-50 font-semibold text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:border-slate-300"}`}>
-                                  {st}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          <button
-                            type="button"
-                            disabled={!draftTitle.trim() || savingCase}
-                            onClick={() => void submitNewCase()}
-                            className="flex items-start gap-3 rounded-[12px] border border-slate-200 bg-slate-50 px-4 py-3.5 text-left transition-colors hover:border-slate-300 disabled:opacity-40"
-                          >
-                            <FolderPlus className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
-                            <span>
-                              <span className="mb-0.5 block text-[13.5px] font-semibold text-slate-900">Start from scratch</span>
-                              <span className="block text-[12px] leading-snug text-slate-500">Create the case and open it without importing files.</span>
-                            </span>
-                          </button>
-                          <button
-                            type="button"
-                            disabled={!draftTitle.trim() || savingCase}
-                            onClick={() => void ensureActiveCase().then((id) => { if (id) setStep(1); })}
-                            className="flex items-start gap-3 rounded-[12px] border border-slate-200 bg-slate-50 px-4 py-3.5 text-left transition-colors hover:border-blue-300 hover:bg-blue-50/40 disabled:opacity-40"
-                          >
-                            <Upload className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
-                            <span>
-                              <span className="mb-0.5 block text-[13.5px] font-semibold text-slate-900">Import existing case</span>
-                              <span className="block text-[12px] leading-snug text-slate-500">Upload or paste reports, narratives, and logs next.</span>
-                            </span>
-                          </button>
-                        </div>
-                        <div className="flex items-center justify-end gap-2.5 pt-1">
-                          <button type="button" onClick={() => setScreen("Hub")}
-                            className="h-9 rounded-[10px] border border-slate-300 px-4 text-[13px] text-slate-500 transition-colors hover:border-slate-400 hover:text-slate-900">
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    </section>
-                  )}
-
-                  {step === 1 && (
-                    <section className="overflow-hidden rounded-[14px] border border-slate-200 bg-white shadow-sm">
-                      <div className="border-b border-slate-200 px-[22px] py-[18px]">
-                        <h2 className="mb-1 text-[15px] font-semibold tracking-tight">Sources</h2>
-                        <p className="text-[12.5px] text-slate-500">Upload or paste initial reports, narratives, and logs. They stay in IndexedDB for this case.</p>
-                      </div>
-                      <div className="px-[22px] py-[22px]">
-                        <div
-                          onDragOver={(e) => { e.preventDefault(); if (!dragging) setDragging(true); }}
-                          onDragLeave={() => setDragging(false)}
-                          onDrop={(e) => { e.preventDefault(); setDragging(false); void ingestFiles(e.dataTransfer.files); }}
-                          onClick={() => { if (!busy) setupFileRef.current?.click(); }}
-                          className={`flex cursor-pointer flex-col items-center justify-center rounded-[10px] border border-dashed px-8 py-10 text-center transition-colors ${dragging ? "border-blue-600 bg-blue-50/60" : "border-slate-300 bg-slate-50"}`}>
-                          <CloudUpload className="mb-3 h-5 w-5 text-blue-600" />
-                          <div className="mb-1 text-[15px] font-semibold tracking-tight">
-                            {pdfProgress ? "Extracting PDF…" : dragging ? "Release to attach" : "Drop a report or click to upload"}
-                          </div>
-                          <p className={`${mono} text-[10.5px] tracking-[0.08em] text-slate-500`}>TXT · MD · CSV · JSON · PDF · PNG · JPG · WEBP</p>
-                          {pdfProgress && (
-                            <div className="mt-3 flex items-center justify-center gap-2 text-[12.5px] text-blue-700">
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />{pdfProgress}
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="mt-4">
-                          <label className="mb-2 block text-[12px] font-semibold text-slate-700">Or paste a narrative</label>
-                          <textarea
-                            value={setupPaste}
-                            onChange={(e) => setSetupPaste(e.target.value)}
-                            rows={4}
-                            placeholder="Paste a police narrative, interview notes, or field log…"
-                            className={`${inputCls} resize-y py-2.5 text-[13px] leading-relaxed`}
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                          <div className="mt-2 flex justify-end">
-                            <button
-                              type="button"
-                              disabled={!setupPaste.trim()}
-                              onClick={() => {
-                                void ingestText({ fileName: "setup-notes.txt", fileType: "txt", rawText: setupPaste, fileSize: new Blob([setupPaste]).size });
-                                setSetupPaste("");
-                              }}
-                              className="h-8 rounded-[10px] bg-blue-600 px-3.5 text-[12.5px] font-semibold text-white hover:bg-blue-700 disabled:opacity-40"
-                            >
-                              Save notes
-                            </button>
-                          </div>
-                        </div>
-
-                        {extractError && (
-                          <div className="mt-3 flex items-start gap-2 text-[12.5px] text-amber-700">
-                            <TriangleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" />{extractError}
-                          </div>
-                        )}
-
-                        <div className="mt-4 divide-y divide-slate-100">
-                          {caseEvidence.map((q) => (
-                            <div key={q.id} className="flex items-center gap-3 py-3">
-                              {evidenceImageSrc(q) ? (
-                                <EvidenceThumb src={evidenceImageSrc(q)} alt={q.fileName} className="h-10 w-10" />
-                              ) : (
-                              <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500">
-                                <FileText className="h-3.5 w-3.5" />
-                              </div>
-                              )}
-                              <div className="min-w-0 flex-1">
-                                <div className={`truncate ${mono} text-[12.5px]`}>{q.fileName}</div>
-                                <div className="truncate text-[11.5px] text-slate-500">
-                                  {evidenceMeta(q)}{q.rawText ? ` · ${q.rawText.slice(0, 60)}` : q.status === "flagged" ? " · No selectable text" : ""}
-                                </div>
-                              </div>
-                              <Chip tone={q.status === "indexed" ? "ok" : q.status === "failed" ? "fail" : q.status === "flagged" ? "review" : "active"}>
-                                {q.status === "failed" ? "FAILED" : q.status.toUpperCase()}
-                              </Chip>
-                              <button type="button" onClick={(e) => { e.stopPropagation(); void deleteEvidence(q.id); }} className="text-slate-400 hover:text-slate-700">
-                                <X className="h-4 w-4" />
-                              </button>
-                            </div>
-                          ))}
-                          {caseEvidence.length === 0 && (
-                            <p className="py-4 text-center text-[13px] text-slate-500">No sources yet — you can skip and add entities by hand.</p>
-                          )}
-                        </div>
-
-                        <div className="mt-5 flex items-center justify-between gap-4">
-                          <span className={`${mono} text-[11px] text-slate-500`}>{caseEvidence.length} FILES ATTACHED</span>
-                          <div className="flex gap-2.5">
-                            <button onClick={() => setStep(0)} className="h-9 rounded-[10px] border border-slate-300 px-4 text-[13px] text-slate-500 transition-colors hover:border-slate-400 hover:text-slate-900">Back</button>
-                            <button onClick={() => setupFileRef.current?.click()}
-                              className="inline-flex h-9 items-center gap-2 rounded-[10px] border border-slate-300 px-3.5 text-[13px] font-medium text-slate-600 hover:border-slate-400 hover:text-slate-900">
-                              <Upload className="h-3.5 w-3.5" />Upload file
-                            </button>
-                            <button
-                              onClick={() => void continueToEntities()}
-                              disabled={busy || scoutingEntities}
-                              className="inline-flex h-9 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
-                            >
-                              {scoutingEntities ? (
-                                <><Loader2 className="h-3.5 w-3.5 animate-spin" />Scouting identities…</>
-                              ) : caseEvidence.length === 0 ? (
-                                <>Skip to entities<ArrowRight className="h-3.5 w-3.5" /></>
-                              ) : (
-                                <>Continue to Entities<ArrowRight className="h-3.5 w-3.5" /></>
-                              )}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </section>
-                  )}
-
-                  {step === 2 && (
-                  <section className="overflow-hidden rounded-[14px] border border-slate-200 bg-white shadow-sm">
-                    <div className="flex items-center justify-between gap-4 border-b border-slate-200 px-[22px] py-[18px]">
-                      <div>
-                        <h2 className="mb-1 text-[15px] font-semibold tracking-tight">Entities</h2>
-                        <p className="text-[12.5px] text-slate-500">Suggested from sources, plus anyone you add by hand.</p>
-                      </div>
-                      <button onClick={() => openForm(tab, null)}
-                        className="inline-flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-[10px] bg-blue-600 px-3.5 text-[12.5px] font-semibold text-white transition-colors hover:bg-blue-700">
-                        <Plus className="h-3.5 w-3.5" />Add custom entity
-                      </button>
-                    </div>
-
-                    {suggestedIdentities.length > 0 && (
-                      <div className="border-b border-slate-200 bg-slate-50/70 px-[22px] py-4">
-                        <div className={`mb-3 ${mono} text-[10.5px] tracking-[0.14em] text-slate-500`}>SUGGESTED FROM SOURCES</div>
-                        <div className="flex flex-col gap-2.5">
-                          {suggestedIdentities.map((item) => {
-                            const kind = TYPE_KIND[item.type];
-                            const Icon = ENTITY_ICON[kind];
-                            const cat = item.type === "place" ? "location" : item.type;
-                            return (
-                              <div key={item.id} className="rounded-[10px] border border-slate-200 bg-white p-3.5">
-                                <div className="mb-2 flex flex-wrap items-center gap-2">
-                                  <Icon className={`h-3.5 w-3.5 ${getCategoryColor(cat, "text")}`} />
-                                  <span className="text-[14px] font-medium">{item.name}</span>
-                                  <span className={`inline-flex items-center rounded-md border px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] ${getCategoryColor(cat, "badge")}`}>
-                                    {cat === "location" ? "LOCATION" : cat === "vehicle" ? "VEHICLE" : "PERSON"}
-                                  </span>
-                                  <span className={`inline-flex max-w-full shrink-0 items-center rounded-md border px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] whitespace-nowrap ${roleDisplayClass(scoutRole(item.type, item.role), getCategoryColor(cat, "badge"))}`}>
-                                    {formatRoleLabel(scoutRole(item.type, item.role))}
-                                  </span>
-                                </div>
-                                {item.quote && <p className="mb-1.5 text-[12.5px] leading-relaxed text-slate-500">“{item.quote}”</p>}
-                                <div className="flex items-center justify-between gap-3">
-                                  <span className={`${mono} text-[10.5px] text-slate-400`}>{item.sourceFile || "Source quote"}</span>
-                                  <div className="flex gap-2">
-                                    <button type="button" onClick={() => setSuggestedIdentities((rows) => rows.filter((r) => r.id !== item.id))}
-                                      className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 text-[12px] text-slate-500 hover:text-slate-800">
-                                      <X className="h-3 w-3" />Dismiss
-                                    </button>
-                                    <button type="button" onClick={() => void acceptSuggested(item)}
-                                      className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-blue-300 bg-blue-600/5 px-2.5 text-[12px] font-medium text-blue-700 hover:bg-blue-600/15">
-                                      <Check className="h-3 w-3" />Accept
-                                    </button>
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="flex gap-1 overflow-x-auto border-b border-slate-200 px-[22px] pt-3">
-                      {(Object.keys(SCHEMA) as EntityKind[]).map((name) => {
-                        const active = name === tab;
-                        const Icon = TAB_ICON[name];
-                        return (
-                          <button key={name} onClick={() => setTab(name)}
-                            className={`inline-flex h-[38px] items-center gap-2 border-b-2 px-3.5 text-[13px] transition-colors ${active ? "border-blue-600 font-semibold text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
-                            <Icon className="h-3.5 w-3.5" />
-                            {name}
-                            <span className={`rounded-md bg-slate-100 px-1.5 py-px ${mono} text-[10.5px] ${active ? "text-blue-600" : "text-slate-500"}`}>
-                              {caseEntities.filter((e) => e.type === KIND_TYPE[name]).length}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <div className="px-[22px] pb-[22px] pt-2">
-                      {list.length === 0 && (
-                        <div className="rounded-[10px] border border-dashed border-slate-200 px-4 py-8 text-center text-[13px] text-slate-500">
-                          {suggestedIdentities.length
-                            ? `Accept suggestions above, or add a custom ${SCHEMA[tab].noun}.`
-                            : `No ${tab.toLowerCase()} yet. Skip sources or add a custom ${SCHEMA[tab].noun}.`}
-                        </div>
-                      )}
-                      {list.map((e) => {
-                        const Icon = ENTITY_ICON[TYPE_KIND[e.type]];
-                        return (
-                          <div key={e.id} onClick={() => openForm(tab, e)}
-                            className="-mx-2.5 grid cursor-pointer grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-3.5 rounded-[10px] border-b border-slate-100 px-2.5 py-[15px] transition-colors hover:bg-slate-50">
-                            <div className={`flex h-9 w-9 items-center justify-center rounded-[10px] border ${getCategoryColor({ entityType: e.type, role: e.role, name: e.name }, "badge")}`}>
-                              <Icon className={`h-4 w-4 ${getCategoryColor({ entityType: e.type }, "text")}`} />
-                            </div>
-                            <div className="min-w-0">
-                              <div className="mb-1 flex min-w-0 items-center gap-2.5">
-                                <span className="min-w-0 truncate text-[14px] font-medium">{e.name}</span>
-                                <span className={`inline-flex max-w-full shrink-0 items-center rounded-md border px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] whitespace-nowrap ${roleDisplayClass(e.role, getCategoryColor({ entityType: e.type, role: e.role, name: e.name, text: e.notes }, "badge"))}`}>{formatRoleLabel(e.role)}</span>
-                              </div>
-                              <div className={`truncate ${mono} text-[11.5px] text-slate-500`}>
-                                {e.notes || "No details recorded"}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2.5 text-slate-400">
-                              <Link2 className="h-[15px] w-[15px] cursor-pointer hover:text-slate-600" />
-                              <Pencil className="h-[15px] w-[15px] cursor-pointer hover:text-slate-600" />
-                              <MoreHorizontal className="h-[15px] w-[15px] cursor-pointer hover:text-slate-600" />
-                            </div>
-                          </div>
-                        );
-                      })}
-
-                      {caseEvidence.length > 0 && (
-                        <div className="mt-4 rounded-[10px] border border-slate-200 bg-slate-50 px-3 py-2.5">
-                          <div className={`mb-2 ${mono} text-[10px] tracking-[0.14em] text-slate-500`}>ATTACHED FILES</div>
-                          <div className="flex flex-col gap-1.5">
-                            {caseEvidence.slice(0, 4).map((q) => (
-                              <div key={q.id} className="flex items-center gap-2 text-[12.5px] text-slate-600">
-                                <FileText className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                                <span className="min-w-0 truncate">{q.fileName}</span>
-                              </div>
-                            ))}
-                            {caseEvidence.length > 4 && (
-                              <span className={`${mono} text-[10px] text-slate-400`}>+{caseEvidence.length - 4} MORE</span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
-                      {extractError && step === 2 && (
-                        <div className="mt-3 flex items-start gap-2 text-[12.5px] text-amber-700">
-                          <TriangleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" />{extractError}
-                        </div>
-                      )}
-
-                      <div className="flex items-center justify-between gap-4 pt-5">
-                        <span className={`${mono} text-[11px] text-slate-500`}>
-                          {caseEntities.length} ON CASE · {suggestedIdentities.length} SUGGESTED
-                        </span>
-                        <div className="flex gap-2.5">
-                          <button onClick={() => setStep(1)} className="h-9 rounded-[10px] border border-slate-300 px-4 text-[13px] text-slate-500 transition-colors hover:border-slate-400 hover:text-slate-900">Back</button>
-                          <button onClick={() => setStep(3)}
-                            className="inline-flex h-9 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700">
-                            Continue to review<ArrowRight className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-                  )}
-
-                  {step === 3 && (
-                    <section className="overflow-hidden rounded-[14px] border border-slate-200 bg-white shadow-sm">
-                      <div className="border-b border-slate-200 px-[22px] py-[18px]">
-                        <h2 className="mb-1 text-[15px] font-semibold tracking-tight">Review & confirm</h2>
-                        <p className="text-[12.5px] text-slate-500">Summary before this case opens on Overview.</p>
-                      </div>
-                      <div className="flex flex-col gap-4 px-[22px] py-[22px]">
-                        <div className="rounded-[10px] border border-slate-200 bg-slate-50 p-4">
-                          <div className={`mb-2 ${mono} text-[10px] tracking-[0.14em] text-slate-500`}>NEW CASE</div>
-                          <div className="mb-1 text-[18px] font-semibold tracking-tight">{draftTitle.trim() || "Untitled case"}</div>
-                          <p className="mb-3 text-[13px] leading-relaxed text-slate-500">{draftSummary.trim() || "No summary recorded."}</p>
-                          <Chip tone={statusToTone(draftStatus)}>{draftStatus}</Chip>
-                          <div className={`mt-3 ${mono} text-[11px] text-slate-500`}>
-                            {caseEvidence.length} SOURCES · {caseEntities.length} ENTITIES
-                          </div>
-                        </div>
-                        <div className="flex items-center justify-end gap-2.5">
-                          <button onClick={() => setStep(2)} className="h-9 rounded-[10px] border border-slate-300 px-4 text-[13px] text-slate-500 transition-colors hover:border-slate-400 hover:text-slate-900">Back</button>
-                          <button type="button" onClick={() => void submitNewCase()} disabled={!draftTitle.trim() || savingCase}
-                            className="inline-flex h-9 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-[13px] font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-40">
-                            {savingCase ? "Saving…" : "Confirm and open case"}
-                            <ArrowRight className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    </section>
-                  )}
-                </div>
-              </div>
+              <NewCaseForm
+                title={draftTitle}
+                jurisdiction={draftJurisdiction}
+                incidentStart={draftIncidentStart}
+                incidentEnd={draftIncidentEnd}
+                summary={draftSummary}
+                saving={savingCase}
+                onTitle={setDraftTitle}
+                onJurisdiction={setDraftJurisdiction}
+                onIncidentStart={setDraftIncidentStart}
+                onIncidentEnd={setDraftIncidentEnd}
+                onSummary={setDraftSummary}
+                onCancel={() => goTo("Hub")}
+                onSubmit={() => void submitNewCase()}
+              />
             )}
 
             {/* ---------------- OVERVIEW ---------------- */}
@@ -2379,15 +1972,37 @@ export default function DesktopApp() {
                 events={caseEvents}
                 pendingCount={pendingDrafts.length}
                 conflictCount={chrono.tether?.count ?? 0}
-                onAddEvidence={() => setScreen("Intake")}
-                onOpenTimeline={() => setScreen("Timeline")}
+                onOpenTimeline={() => goTo("Timeline")}
                 onInspectContradiction={() => inspectContradiction()}
                 onOpenEntity={(ent) => {
                   setSelected(ent.id);
-                  setTab(TYPE_KIND[ent.type]);
                   openForm(TYPE_KIND[ent.type], ent);
                 }}
-                onDropFiles={(files) => ingestFiles(files, { extract: false })}
+                onDropFiles={(files) => ingestFiles(files, { extract: true, background: true })}
+                ingestJob={ingestJob}
+                nowMs={nowMs}
+                extractNotice={extractNotice}
+                extractError={extractError}
+                onIngestUrl={async (url, onProgress) => {
+                  await ingestWebArticle(url, onProgress);
+                }}
+                onIngestPaste={async (text, kind) => {
+                  const editorial = kind === "editorial";
+                  const row = await ingestText({
+                    fileName: editorial ? "editorial-notes.txt" : "pasted-notes.txt",
+                    fileType: "txt",
+                    rawText: text,
+                    fileSize: new Blob([text]).size,
+                    sourceType: editorial ? "web_article" : "text",
+                    fromPaste: !editorial,
+                    fromEditorial: editorial,
+                  });
+                  if (row?.id) {
+                    extractChain.current = extractChain.current.then(() =>
+                      runExtract(row.id, { stayOnWorkspace: true }),
+                    );
+                  }
+                }}
                 onExportDossier={() => { setExportError(null); setExportOpen(true); }}
                 canExport={operator.permissions?.canExportDossier !== false}
                 onArchiveCase={async () => {
@@ -2402,6 +2017,11 @@ export default function DesktopApp() {
                   if (!activeCase) return;
                   void unarchiveCase(activeCase.id, activeCase.title);
                 }}
+                onInspectSource={(id) => {
+                  setActiveEvidenceId(id);
+                  goTo("Verify");
+                }}
+                onReextract={(id) => { void runExtract(id); }}
               />
             )}
 
@@ -2425,18 +2045,22 @@ export default function DesktopApp() {
                 inputCls={inputCls}
                 jobElapsed={jobElapsed}
                 onDropFiles={(files) => { void ingestFiles(files); }}
-                onPasteSave={() => {
-                  const text = pasteText;
-                  setPasteText("");
+                onPasteSave={(kind, overrideText) => {
+                  const editorial = kind === "editorial";
+                  const text = overrideText ?? pasteText;
+                  if (!editorial) setPasteText("");
                   void (async () => {
                     let rowId: string | null = null;
                     let extractStarted = false;
                     try {
                       const row = await withStageTimeout(ingestText({
-                        fileName: "pasted-notes.txt",
+                        fileName: editorial ? "editorial-notes.txt" : "pasted-notes.txt",
                         fileType: "txt",
                         rawText: text,
                         fileSize: new Blob([text]).size,
+                        sourceType: editorial ? "web_article" : "text",
+                        fromPaste: !editorial,
+                        fromEditorial: editorial,
                       })) as { id: string } | null;
                       if (!row) return;
                       rowId = row.id;
@@ -2628,6 +2252,7 @@ export default function DesktopApp() {
                   lanes={chrono.lanes}
                   onToggle={() => setSidebarOpen((v) => !v)}
                   onSelect={setSelected}
+                  onPromoteEntity={(id) => void promoteEntityToVerified(id)}
                   ToggleIcon={sidebarOpen ? PanelLeftClose : PanelLeftOpen}
                 />
 
@@ -2780,7 +2405,7 @@ export default function DesktopApp() {
                                 id={`timeline-node-${e.id}`}
                                 title={`${e.title} · ${formatRoleLabel(def.role) || def.name}`}
                                 onClick={() => openEventDrawer(e.id)}
-                                className={`absolute z-[2] flex items-center gap-2 overflow-hidden rounded-[10px] border border-l-2 bg-white px-2.5 text-left shadow-sm transition-colors hover:border-blue-300 ${e.flag ? "border-amber-300 border-l-amber-600 ring-[3px] ring-amber-500/10" : `border-slate-200 ${getCategoryColor(e.semantic, "border")}`} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
+                                className={`absolute z-[2] flex items-center gap-2 overflow-hidden rounded-[10px] border border-l-2 bg-white px-2.5 text-left shadow-sm transition-colors hover:border-blue-300 ${e.secondary ? "border-dashed border-amber-400 border-l-amber-500" : e.flag ? "border-amber-300 border-l-amber-600 ring-[3px] ring-amber-500/10" : `border-slate-200 ${getCategoryColor(e.semantic, "border")}`} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
                                 style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width: CARD_W, height: CARD_H }}
                               >
                                 <KindIcon className={`h-3.5 w-3.5 shrink-0 ${e.flag ? "text-amber-700" : getCategoryColor(e.semantic, "text")}`} />
@@ -2802,6 +2427,17 @@ export default function DesktopApp() {
                                   {e.time}
                                 </span>
                                 <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium leading-none text-slate-900">{e.title}</span>
+                                {e.citeUrl ? (
+                                  <a
+                                    href={e.citeUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(ev) => ev.stopPropagation()}
+                                    className="shrink-0 text-[10px] font-semibold text-amber-800 underline"
+                                  >
+                                    Article
+                                  </a>
+                                ) : null}
                                 {e.flag && <TriangleAlert className="h-3 w-3 shrink-0 text-amber-700" />}
                               </button>
                               );
@@ -2921,6 +2557,15 @@ export default function DesktopApp() {
             <div className="flex flex-1 flex-col gap-5 overflow-auto px-6 py-5">
               <div className="flex flex-wrap items-center gap-2">
                 <Chip tone={drawerEvent.isVerified ? "ok" : "review"}>{drawerEvent.isVerified ? "VERIFIED" : "UNVERIFIED"}</Chip>
+                {(drawerEvent.tier === "secondary" || (drawerSource && isSecondaryEvidence(drawerSource))) && (
+                  <span className={`rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 ${mono} text-[10px] tracking-[0.06em] text-amber-900`}>SECONDARY</span>
+                )}
+                {drawerEntity && (
+                  <MediaProvenanceBadge
+                    show={isUncorroboratedEntity(drawerEntity)}
+                    onPromote={() => void promoteEntityToVerified(drawerEntity.id)}
+                  />
+                )}
                 {drawerEntity && (
                   <span className={`inline-flex max-w-full shrink-0 items-center rounded-md border px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] whitespace-nowrap ${roleDisplayClass(drawerEntity.role, getCategoryColor({ entityType: drawerEntity.type, role: drawerEntity.role, name: drawerEntity.name }, "badge"))}`}>
                     {formatRoleLabel(drawerEntity.role) || drawerEntity.type.toUpperCase()}
@@ -2978,6 +2623,16 @@ export default function DesktopApp() {
                           citation: citationFromEvent(drawerEvent, drawerSource),
                         })}
                       />
+                      {(drawerEvent.sourceCitation?.sourceUrl || drawerSource?.sourceUrl) ? (
+                        <a
+                          href={drawerEvent.sourceCitation?.sourceUrl || drawerSource?.sourceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-2 inline-block text-[12.5px] font-semibold text-amber-800 underline"
+                        >
+                          Open source article
+                        </a>
+                      ) : null}
                     </div>
                   </div>
                 </>
@@ -3018,6 +2673,8 @@ export default function DesktopApp() {
           schema={SCHEMA[form.tab]}
           Icon={ENTITY_ICON[form.tab]}
           inputCls={inputCls}
+          uncorroborated={Boolean(form.id && caseEntities.some((e) => e.id === form.id && isUncorroboratedEntity(e)))}
+          onPromote={form.id ? () => void promoteEntityToVerified(form.id!) : undefined}
           onChange={(next) => setForm(next)}
           onSave={() => void saveForm()}
           onCancel={() => setForm(null)}

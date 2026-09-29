@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import { getCategoryColor, resolveSemanticCategory, type CategoryColorInput } from "./utils/categoryColors";
 import { formatRoleLabel, roleDisplayClass } from "./utils/roleBadge";
+import MediaProvenanceBadge from "./MediaProvenanceBadge";
 
 const mono = "font-mono";
 
@@ -12,6 +13,8 @@ export type DossierLane = {
     note: string;
     category: CategoryColorInput;
     dot: string;
+    uncorroborated?: boolean;
+    entityId?: string;
   };
   count: number;
 };
@@ -22,10 +25,11 @@ type Props = {
   lanes: DossierLane[];
   onToggle: () => void;
   onSelect: (id: string | null) => void;
+  onPromoteEntity?: (id: string) => void;
   ToggleIcon: ComponentType<{ className?: string }>;
 };
 
-export default function EntityDossier({ open, selected, lanes, onToggle, onSelect, ToggleIcon }: Props) {
+export default function EntityDossier({ open, selected, lanes, onToggle, onSelect, onPromoteEntity, ToggleIcon }: Props) {
   return (
     <aside className={`flex shrink-0 flex-col overflow-hidden border-r border-slate-200 bg-slate-50/60 transition-[width] duration-200 ${open ? "w-[268px]" : "w-[58px]"}`}>
       <div className="flex h-12 shrink-0 items-center justify-between gap-2.5 border-b border-slate-200 pl-[18px] pr-3.5">
@@ -58,6 +62,10 @@ export default function EntityDossier({ open, selected, lanes, onToggle, onSelec
                   <span className={`inline-flex max-w-full shrink-0 items-center rounded-md border px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] whitespace-nowrap ${roleDisplayClass(def.role, getCategoryColor(semantic, "badge"))}`}>
                     {formatRoleLabel(def.role || "OPEN")}
                   </span>
+                  <MediaProvenanceBadge
+                    show={def.uncorroborated}
+                    onPromote={def.entityId && onPromoteEntity ? () => onPromoteEntity(def.entityId!) : undefined}
+                  />
                 </div>
               </div>
             );
