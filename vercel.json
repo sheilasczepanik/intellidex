@@ -1,0 +1,16 @@
+{
+  "functions": {
+    "api/extract.ts": {
+      "maxDuration": 60
+    },
+    "api/scrape-url.ts": {
+      "maxDuration": 30
+    },
+    "api/parse-intel.ts": {
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ]
+}

@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+body {
+  margin: 0;
+  background-color: #121316;
+  color: #f4f4f5;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+@keyframes contradiction-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(245 158 11 / 0); }
+  35% { box-shadow: 0 0 0 7px rgb(245 158 11 / 0.38); }
+}
+
+@keyframes contradiction-bridge-pulse {
+  0%, 100% { opacity: 0.7; filter: none; }
+  50% { opacity: 1; filter: drop-shadow(0 0 5px rgb(245 158 11 / 0.85)); }
+}
+
+.contradiction-pulse {
+  animation: contradiction-pulse 0.65s ease-in-out 3;
+}
+
+.contradiction-bridge-pulse {
+  animation: contradiction-bridge-pulse 0.65s ease-in-out 3;
+}
