@@ -6,8 +6,11 @@
     "api/scrape-url.ts": {
       "maxDuration": 30
     },
-    "api/parse-intel.ts": {
-      "maxDuration": 60
+    "api/parseMetadata.ts": {
+      "maxDuration": 30
+    },
+    "api/alerts/missing.ts": {
+      "maxDuration": 30
     }
   },
   "rewrites": [

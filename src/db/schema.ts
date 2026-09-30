@@ -120,6 +120,8 @@ export interface TimelineEventRecord {
   sourceCitation?: SourceCitation;
   tier?: "primary" | "secondary";
   origin?: "manual" | "ai";
+  contentHash?: string;
+  mergedFrom?: string[];
 }
 
 export type VerifyDraftStatus = "pending" | "confirmed" | "rejected";
@@ -195,13 +197,17 @@ export const OPERATOR_ROLES = [
 export type OperatorRole = (typeof OPERATOR_ROLES)[number] | string;
 
 export const CASE_MEDIA_CATEGORIES = [
-  "subject",
+  "subject_flyer",
   "surveillance",
-  "evidence",
-  "search_maps",
+  "ping_data",
+  "witness_photo",
+  "search_log",
+  "uncategorized",
 ] as const;
 
 export type CaseMediaCategory = (typeof CASE_MEDIA_CATEGORIES)[number];
+
+export type CaseMediaType = "image" | "pdf" | "url";
 
 export interface CaseMediaRecord {
   id: string;
@@ -213,6 +219,15 @@ export interface CaseMediaRecord {
   tags: string[];
   sourceId?: string;
   originalFileName?: string;
+  type: CaseMediaType;
+  thumbnailUrl?: string;
+  sha256Hash?: string;
+  sourceUrl?: string;
+  description?: string;
+  author?: string;
+  faviconUrl?: string;
+  summary?: string;
+  mergedFrom?: string[];
 }
 
 export type ThemePreference = "system" | "dark" | "light";
@@ -479,6 +494,33 @@ export class DossierDB extends Dexie {
           row.imageBase64 = PLACEHOLDER_CCTV_STILL;
           if (!row.fileType) row.fileType = "image";
         }
+      });
+    });
+    this.version(20).stores({
+      caseMedia: "id, caseId, category, dateAdded, type, sha256Hash",
+    }).upgrade(async (tx) => {
+      const legacy: Record<string, CaseMediaCategory> = {
+        subject: "subject_flyer",
+        evidence: "uncategorized",
+        search_maps: "search_log",
+        surveillance: "surveillance",
+      };
+      await tx.table("caseMedia").toCollection().modify((row: {
+        category?: string;
+        type?: string;
+        dataUrl?: string;
+        thumbnailUrl?: string;
+        sourceUrl?: string;
+      }) => {
+        const mapped = legacy[row.category || ""];
+        if (mapped) row.category = mapped;
+        else if (!CASE_MEDIA_CATEGORIES.includes(row.category as CaseMediaCategory)) row.category = "uncategorized";
+        if (!row.type) {
+          if (row.sourceUrl && !row.dataUrl) row.type = "url";
+          else if ((row.dataUrl || "").startsWith("data:application/pdf")) row.type = "pdf";
+          else row.type = "image";
+        }
+        if (!row.thumbnailUrl && row.type === "image") row.thumbnailUrl = row.dataUrl;
       });
     });
   }

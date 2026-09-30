@@ -12,6 +12,7 @@ import {
   type CaseContactRecord,
   type CaseMediaCategory,
   type CaseMediaRecord,
+  type CaseMediaType,
   type CaseRecord,
   type CaseStatus,
   type EntityRecord,
@@ -184,23 +185,42 @@ export async function reopenLocatedCase(id: string) {
 
 export async function addCaseMedia(input: {
   caseId: string;
-  dataUrl: string;
+  dataUrl?: string;
   title: string;
   category: CaseMediaCategory;
   tags?: string[];
   sourceId?: string;
   originalFileName?: string;
+  type?: CaseMediaType;
+  thumbnailUrl?: string;
+  sha256Hash?: string;
+  sourceUrl?: string;
+  description?: string;
+  author?: string;
+  faviconUrl?: string;
+  summary?: string;
+  mergedFrom?: string[];
 }) {
+  const type = input.type ?? (input.sourceUrl && !input.dataUrl ? "url" : (input.dataUrl || "").startsWith("data:application/pdf") ? "pdf" : "image");
   const row: CaseMediaRecord = {
     id: crypto.randomUUID(),
     caseId: input.caseId,
-    dataUrl: input.dataUrl,
-    title: input.title.trim() || "Untitled image",
+    dataUrl: input.dataUrl || "",
+    title: input.title.trim() || "Untitled media",
     category: input.category,
     dateAdded: Date.now(),
     tags: input.tags ?? [],
     sourceId: input.sourceId,
     originalFileName: input.originalFileName,
+    type,
+    thumbnailUrl: input.thumbnailUrl || (type === "image" ? input.dataUrl : ""),
+    sha256Hash: input.sha256Hash,
+    sourceUrl: input.sourceUrl,
+    description: input.description,
+    author: input.author,
+    faviconUrl: input.faviconUrl,
+    summary: input.summary,
+    mergedFrom: input.mergedFrom,
   };
   await db.caseMedia.add(row);
   await touchCase(input.caseId);
@@ -209,7 +229,7 @@ export async function addCaseMedia(input: {
 
 export async function updateCaseMedia(
   id: string,
-  patch: Partial<Pick<CaseMediaRecord, "title" | "category" | "tags">>,
+  patch: Partial<Pick<CaseMediaRecord, "title" | "category" | "tags" | "summary" | "description" | "mergedFrom" | "thumbnailUrl" | "author">>,
 ) {
   await db.caseMedia.update(id, patch);
 }
@@ -388,6 +408,8 @@ export async function createTimelineEvent(input: {
   sourceCitation?: SourceCitation;
   tier?: "primary" | "secondary";
   origin?: "manual" | "ai";
+  contentHash?: string;
+  mergedFrom?: string[];
 }) {
   const row: TimelineEventRecord = {
     id: crypto.randomUUID(),
@@ -401,6 +423,8 @@ export async function createTimelineEvent(input: {
     sourceCitation: input.sourceCitation,
     tier: input.tier ?? "primary",
     origin: input.origin,
+    contentHash: input.contentHash,
+    mergedFrom: input.mergedFrom,
   };
   await db.timelineEvents.add(row);
   await touchCase(input.caseId);

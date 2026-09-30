@@ -197,3 +197,94 @@ export async function scrapePublicArticle(rawUrl: string): Promise<ScrapedArticl
     wordCount: words.length,
   };
 }
+
+export type PageMetadata = {
+  url: string;
+  title: string;
+  description: string;
+  author: string;
+  favicon: string;
+  image: string;
+  publishedDate: string | null;
+};
+
+function extractAuthor(html: string) {
+  return attrMatch(html, ["article:author", "author", "og:article:author", "twitter:creator", "parsely-author"]) || "";
+}
+
+function extractDescription(html: string) {
+  return attrMatch(html, ["og:description", "twitter:description", "description"]) || "";
+}
+
+function extractOgImage(html: string, base: URL) {
+  const raw = attrMatch(html, ["og:image", "twitter:image", "twitter:image:src"]);
+  if (!raw) return "";
+  try {
+    return new URL(raw, base).toString();
+  } catch {
+    return raw;
+  }
+}
+
+function extractFavicon(html: string, base: URL) {
+  const link = html.match(/<link[^>]+rel=["'](?:shortcut icon|icon|apple-touch-icon)["'][^>]*>/i)?.[0]
+    || html.match(/<link[^>]+rel=["'](?:shortcut icon|icon)["'][^>]*>/i)?.[0]
+    || "";
+  const href = link.match(/href=["']([^"']+)["']/i)?.[1] || "";
+  try {
+    if (href) return new URL(href, base).toString();
+  } catch {
+    /* fall through */
+  }
+  return new URL("/favicon.ico", base).toString();
+}
+
+/** Lightweight metadata parse for Media Vault URL cards — does not require article body. */
+export async function parsePageMetadata(rawUrl: string): Promise<PageMetadata> {
+  const parsed = assertPublicHttpUrl(rawUrl);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12_000);
+  let res: Response;
+  try {
+    res = await fetch(parsed.toString(), {
+      method: "GET",
+      redirect: "follow",
+      signal: ctrl.signal,
+      headers: {
+        "User-Agent": BROWSER_UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+  } catch {
+    return {
+      url: parsed.toString(),
+      title: parsed.hostname.replace(/^www\./, ""),
+      description: "",
+      author: "",
+      favicon: new URL("/favicon.ico", parsed).toString(),
+      image: "",
+      publishedDate: null,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+  const html = await res.text().catch(() => "");
+  const finalUrl = res.url || parsed.toString();
+  let base: URL;
+  try {
+    base = new URL(finalUrl);
+  } catch {
+    base = parsed;
+  }
+  const title = extractTitle(html).slice(0, 240) || base.hostname.replace(/^www\./, "");
+  return {
+    url: finalUrl,
+    title,
+    description: extractDescription(html).slice(0, 400),
+    author: extractAuthor(html).slice(0, 160),
+    favicon: extractFavicon(html, base),
+    image: extractOgImage(html, base),
+    publishedDate: extractDate(html),
+  };
+}

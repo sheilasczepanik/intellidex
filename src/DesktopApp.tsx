@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
   addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent,
-  db, DEFAULT_OPERATOR, deleteEntity, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isLocatedCase, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft,
+  db, DEFAULT_OPERATOR, deleteEntity, deleteEvidence, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isLocatedCase, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft,
   OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveManualEvidence, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
@@ -18,6 +18,8 @@ import { applyExtractedGraph } from "./lib/applyExtractGraph";
 import CaseOverview from "./CaseOverview";
 import LocationsMap from "./LocationsMap";
 import MediaGallery from "./MediaGallery";
+import IngestChooser from "./IngestChooser";
+import DuplicateArbitrationModal from "./DuplicateArbitrationModal";
 import ArchiveCaseModal from "./ArchiveCaseModal";
 import NewCaseForm from "./NewCaseForm";
 import EvidenceIntake, {
@@ -43,7 +45,7 @@ import {
   ingestElapsedSec, type IngestJob,
 } from "./lib/ingestProgress";
 import { LOW_CLARITY_BADGE, UNREADABLE_SCAN_ALERT, assessTextClarity, isUnreadableScan, logExtractedText } from "./lib/textClarity";
-import { isPdfFile, isTextFile } from "./lib/pdfText";
+import { isPdfFile, isTextFile, EVIDENCE_ACCEPT } from "./lib/pdfText";
 import { isImageFile } from "./lib/imageEvidence";
 import { inferSourceType, type SourceBoundingBox, type SourceCitation } from "./types";
 import { isSecondaryEvidence, isUncorroboratedEntity } from "./lib/sourceTier";
@@ -58,6 +60,7 @@ import {
   type ExtractedEvent,
 } from "./lib/extractSchema";
 import { collectQuoteSpans, narrativeSortKey, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
+import { applyDupDecision, evidenceToSide, eventToSide, findDuplicateEvidence, findDuplicateEvent, hashNormalizedText, type DupDecision, type DupMatch } from "./lib/duplicates";
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
 import { joinLocalDateTime, localDayKey, namesLooselyMatch, splitLocalDateTime } from "./lib/eventTime";
 import {
@@ -69,9 +72,11 @@ import { getCategoryColor, resolveSemanticCategory } from "./utils/categoryColor
 import { formatRoleLabel, normalizePersonRole, PERSON_ROLE_VALUES, roleDisplayClass } from "./utils/roleBadge";
 import type { SearchHit } from "./lib/globalSearch";
 import { formatAlertLabel, ALERT_LEVELS } from "./lib/missingPerson";
+import LiveAlertsFeed from "./LiveAlertsFeed";
+import { alertTypeToCaseStatus, parseAlertMissingAt, type LiveMissingAlert } from "./lib/liveMissingAlert";
 import type { SubjectProfile } from "./db/schema";
 import {
-  ArrowRight, Archive, ArchiveRestore, Check, CheckCheck, Clock, FileDown,
+  ArrowLeft, ArrowRight, Archive, ArchiveRestore, Check, CheckCheck, Clock, FileDown,
   FileText, FolderPlus, GitCommitHorizontal, HeartHandshake, Inbox, KeyRound, LayoutDashboard,
   LayoutGrid, Lock, MapPin, Menu, MoreHorizontal, PanelLeftClose,
   PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, StickyNote, Trash2, Truck,
@@ -82,7 +87,7 @@ import {
 /* types                                                               */
 /* ------------------------------------------------------------------ */
 
-export type Screen = "Hub" | "Setup" | "Overview" | "Intake" | "Media" | "Verify" | "Timeline" | "Locations" | "WorkingTheory" | "Profile" | "Preferences";
+export type Screen = "Hub" | "Alerts" | "Setup" | "Overview" | "Intake" | "Media" | "Verify" | "Timeline" | "Locations" | "WorkingTheory" | "Profile" | "Preferences";
 export type Tone = "active" | "review" | "cold" | "ok" | "fail";
 export type EntityKind = "People" | "Places" | "Vehicles" | "Phones" | "Digital" | "Exhibits";
 
@@ -104,6 +109,7 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
     return { screen: screens[leaf] ?? "Overview", caseId: decodeURIComponent(caseMatch[1]) };
   }
   if (path === "/" || path === "/hub") return { screen: "Hub", caseId: null };
+  if (path === "/hub/alerts" || path === "/alerts") return { screen: "Alerts", caseId: null };
   if (path === "/setup") return { screen: "Setup", caseId: null };
   if (path === "/overview") return { screen: "Overview", caseId: null };
   if (path === "/intake") return { screen: "Intake", caseId: null };
@@ -120,6 +126,7 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
 
 function pathFromScreen(screen: Screen, caseId?: string | null) {
   if (screen === "Hub") return "/hub";
+  if (screen === "Alerts") return "/hub/alerts";
   if (screen === "Profile") return "/settings/profile";
   if (screen === "Preferences") return "/settings/workspace";
   if (screen === "Setup") return "/setup";
@@ -496,6 +503,10 @@ export default function DesktopApp() {
     previewDataUrl?: string;
     box?: SourceBoundingBox;
   } | null>(null);
+  const [ingestChooser, setIngestChooser] = useState(false);
+  const [archiveFocus, setArchiveFocus] = useState(false);
+  const [dupMatch, setDupMatch] = useState<DupMatch | null>(null);
+  const dupResolver = useRef<((decision: DupDecision) => void) | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [providerDraft, setProviderDraft] = useState<LlmProvider>(getLocalProvider);
@@ -551,15 +562,19 @@ export default function DesktopApp() {
     setScreen(next);
     setOperatorMenu(false);
     setNavOpen(false);
-    const id = caseId || (next === "Hub" || next === "Setup" || next === "Profile" || next === "Preferences" ? null : resolvedCaseId);
+    const id = caseId || (next === "Hub" || next === "Alerts" || next === "Setup" || next === "Profile" || next === "Preferences" ? null : resolvedCaseId);
     const path = pathFromScreen(next, id);
     if (window.location.pathname !== path) window.history.pushState({}, "", path);
   };
 
   const openIntakePicker = () => {
-    setIntakeHighlight(true);
-    goTo("Intake");
+    setIngestChooser(true);
   };
+
+  const requestDup = (match: DupMatch) => new Promise<DupDecision>((resolve) => {
+    dupResolver.current = resolve;
+    setDupMatch(match);
+  });
 
   useEffect(() => {
     if (!navOpen) return;
@@ -571,7 +586,7 @@ export default function DesktopApp() {
   }, [navOpen]);
 
   useEffect(() => {
-    if (screen === "Hub" || screen === "Setup" || screen === "Profile" || screen === "Preferences") {
+    if (screen === "Hub" || screen === "Alerts" || screen === "Setup" || screen === "Profile" || screen === "Preferences") {
       const path = pathFromScreen(screen);
       if (window.location.pathname !== path) window.history.replaceState({}, "", path);
       return;
@@ -605,14 +620,15 @@ export default function DesktopApp() {
     return () => window.removeEventListener("keydown", onKey);
   }, [drawerEventId]);
 
-  const GLOBAL_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }> }[] = [
+  const GLOBAL_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }>; label?: string; indent?: boolean }[] = [
     { id: "Hub", icon: LayoutGrid },
+    { id: "Alerts", icon: Radio, label: "Live alerts", indent: true },
   ];
   const CASE_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }>; badge?: number; label?: string }[] = [
     { id: "Overview", icon: LayoutDashboard },
     { id: "Locations", icon: MapPin, label: "Locations & Map" },
     { id: "Intake", icon: Inbox, badge: caseEvidence.length || undefined },
-    { id: "Media", icon: ImageIcon, label: "Media & Images" },
+    { id: "Media", icon: ImageIcon, label: "Case Media Vault" },
     { id: "Verify", icon: ShieldCheck, badge: pendingDrafts.length || undefined },
     { id: "Timeline", icon: GitCommitHorizontal },
     { id: "WorkingTheory", icon: StickyNote, label: "Working Theory" },
@@ -1081,6 +1097,24 @@ export default function DesktopApp() {
     goTo("Setup");
   };
 
+  const openCaseFromAlert = (alert: LiveMissingAlert) => {
+    const lksAt = parseAlertMissingAt(alert.summary);
+    setActiveCaseId("");
+    setDraftTitle(alert.name);
+    setDraftSummary(alert.summary);
+    setDraftJurisdiction(alert.location);
+    setDraftIncidentStart(lksAt ? lksAt.slice(0, 10) : "");
+    setDraftIncidentEnd("");
+    setDraftFileId(alert.id);
+    setDraftLksAt(lksAt);
+    setDraftProfile({
+      currentEstimatedAge: alert.age || undefined,
+      photoUrl: alert.photoUrl,
+    });
+    setDraftStatus(alertTypeToCaseStatus(alert.alertType));
+    goTo("Setup");
+  };
+
   const openExistingCase = (id: string, title: string, summary: string, status: string) => {
     setActiveCaseId(id);
     setDraftTitle(title);
@@ -1165,12 +1199,38 @@ export default function DesktopApp() {
     if (!resolvedCaseId || !eventEntityId || !eventTitle.trim() || !eventWhen || savingEvent) return;
     setSavingEvent(true);
     try {
+      const timestamp = new Date(eventWhen).getTime();
+      const contentHash = await hashNormalizedText(`${eventTitle} ${eventDesc}`);
+      const hit = await findDuplicateEvent(resolvedCaseId, {
+        title: eventTitle,
+        description: eventDesc,
+        timestamp,
+        entityId: eventEntityId,
+      });
+      if (hit) {
+        const decision = await requestDup({
+          kind: "event",
+          existingId: hit.id,
+          existing: eventToSide(hit),
+          incoming: eventToSide({ ...hit, id: "incoming", title: eventTitle, description: eventDesc, timestamp }, true),
+        });
+        const applied = await applyDupDecision(
+          { kind: "event", existingId: hit.id, existing: eventToSide(hit), incoming: eventToSide(hit, true) },
+          decision,
+          { ...hit, title: eventTitle, description: eventDesc, timestamp },
+        );
+        if (applied.action !== "replace") {
+          setEventOpen(false);
+          return;
+        }
+      }
       await createTimelineEvent({
         caseId: resolvedCaseId,
         entityId: eventEntityId,
-        timestamp: new Date(eventWhen).getTime(),
+        timestamp,
         title: eventTitle,
         description: eventDesc,
+        contentHash,
       });
       setSelected(eventEntityId);
       setEventOpen(false);
@@ -1320,6 +1380,24 @@ export default function DesktopApp() {
         if (!isPdfFile(file) && !isImageFile(file) && !isTextFile(file)) {
           setExtractError(`Skipped ${file.name} — use PDF, image (PNG, JPG, WEBP), TXT, MD, CSV, or JSON.`);
           continue;
+        }
+        const caseId = resolvedCaseId ?? await ensureActiveCase();
+        if (!caseId) continue;
+        const sha = await calculateSHA256(file);
+        const dup = await findDuplicateEvidence(caseId, sha);
+        if (dup) {
+          const decision = await requestDup({
+            kind: "evidence",
+            existingId: dup.id,
+            existing: evidenceToSide(dup),
+            incoming: evidenceToSide({ ...dup, id: "incoming", fileName: file.name, originalFileName: file.name, sha256Hash: sha }, true),
+          });
+          const applied = await applyDupDecision(
+            { kind: "evidence", existingId: dup.id, existing: evidenceToSide(dup), incoming: evidenceToSide(dup, true) },
+            decision,
+            { ...dup, fileName: file.name },
+          );
+          if (applied.action !== "replace") continue;
         }
         const row = await stageEvidenceFile(file, (payload) => ingestText(payload));
         if (!row) continue;
@@ -2016,7 +2094,8 @@ export default function DesktopApp() {
         caseId,
         dataUrl: logModal.previewDataUrl,
         title: (input.quote || logModal.quote).slice(0, 72) || "Visual observation",
-        category: input.category === "location" ? "search_maps" : input.category === "vehicle" ? "surveillance" : "evidence",
+        category: input.category === "location" ? "ping_data" : input.category === "vehicle" ? "surveillance" : "uncategorized",
+        type: "image",
         sourceId: sourceEvidence.id,
         tags: ["manual"],
       });
@@ -2113,20 +2192,20 @@ export default function DesktopApp() {
           </div>
           <nav className="flex flex-1 flex-col gap-[3px] p-3 pt-4">
             <div className={`px-2.5 pb-2 pt-1.5 ${mono} text-[10px] tracking-[0.14em] text-slate-500`}>GLOBAL</div>
-            {GLOBAL_NAV.map(({ id, icon: Icon }) => {
+            {GLOBAL_NAV.map(({ id, icon: Icon, label, indent }) => {
               const on = screen === id;
               return (
                 <button key={id} type="button" onClick={() => goTo(id)}
-                  className={`flex h-[38px] w-full items-center gap-3 rounded-[10px] px-2.5 text-left text-[13.5px] transition-colors ${on ? "bg-blue-50 font-semibold text-blue-700" : "font-medium text-slate-600 hover:bg-slate-50"}`}>
+                  className={`flex h-[38px] w-full items-center gap-3 rounded-[10px] text-left text-[13.5px] transition-colors ${indent ? "pl-7 pr-2.5" : "px-2.5"} ${on ? "bg-blue-50 font-semibold text-blue-700" : "font-medium text-slate-600 hover:bg-slate-50"}`}>
                   <Icon className="h-[17px] w-[17px] shrink-0" />
-                  {id}
+                  {label ?? id}
                 </button>
               );
             })}
             <div className={`mt-3 px-2.5 pb-2 pt-1.5 ${mono} text-[10px] tracking-[0.14em] text-slate-500`}>CASE WORKSPACE</div>
             {CASE_NAV.map(({ id, icon: Icon, badge, label }) => {
               const on = screen === id;
-              const locked = screen === "Hub" || !activeCase;
+              const locked = screen === "Hub" || screen === "Alerts" || !activeCase;
               return (
                 <div key={id} title={locked ? "Select a case from the Hub to view" : undefined}>
                   <button
@@ -2285,6 +2364,14 @@ export default function DesktopApp() {
               />
             )}
 
+            {screen === "Alerts" && (
+              <LiveAlertsFeed
+                creatorLabel={creatorLabel}
+                onBack={() => goTo("Hub")}
+                onOpenAsCase={openCaseFromAlert}
+              />
+            )}
+
             {/* ---------------- HUB ---------------- */}
             {screen === "Hub" && (() => {
               const locatedCount = locatedHubCases.length;
@@ -2312,13 +2399,16 @@ export default function DesktopApp() {
                 <p className="mb-8 w-full max-w-4xl text-[15px] leading-relaxed text-slate-500">
                   {hubCopy}
                 </p>
-                {hubTab === "active" && (
-                  <div className="flex flex-wrap gap-3">
+                <div className="flex flex-wrap gap-3">
+                  {hubTab === "active" && (
                     <button onClick={openNewCase} className="inline-flex h-10 items-center gap-2.5 rounded-[10px] bg-blue-600 px-[18px] text-[13.5px] font-semibold text-white transition-colors hover:bg-blue-700">
                       <FolderPlus className="h-[15px] w-[15px]" />New case
                     </button>
-                  </div>
-                )}
+                  )}
+                  <button type="button" onClick={() => goTo("Alerts")} className="inline-flex h-10 items-center gap-2.5 rounded-[10px] border border-slate-300 bg-white px-[18px] text-[13.5px] font-semibold text-slate-800 transition-colors hover:bg-slate-50">
+                    <Radio className="h-[15px] w-[15px]" />Live alerts
+                  </button>
+                </div>
 
                 <div className="mb-5 mt-10 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3.5 sm:mt-16">
                   <div className="flex flex-wrap items-center gap-1 rounded-full border border-slate-200 bg-slate-100 p-0.5">
@@ -2523,7 +2613,7 @@ export default function DesktopApp() {
                 onOpenTimeline={() => goTo("Timeline")}
                 onOpenLocations={() => goTo("Locations")}
                 onAddEvidence={openIntakePicker}
-                onLogTip={() => goTo("Verify")}
+                onLogTip={() => { setArchiveFocus(true); goTo("Media"); }}
                 onInspectContradiction={() => inspectContradiction()}
                 onOpenEntity={(ent) => {
                   setSelected(ent.id);
@@ -2598,12 +2688,13 @@ export default function DesktopApp() {
                   activeCase={activeCase}
                   places={caseEntities.filter((e) => e.type === "place" || e.type === "location")}
                   events={caseEvents}
+                  onArbitrate={requestDup}
                 />
               </div>
             )}
 
             {screen === "Media" && activeCase && (
-              <MediaGallery activeCase={activeCase} />
+              <MediaGallery activeCase={activeCase} onArbitrate={requestDup} focusArchive={archiveFocus} />
             )}
 
             {/* ---------------- INTAKE ---------------- */}
@@ -3355,6 +3446,45 @@ export default function DesktopApp() {
           </div>
         </div>
       )}
+
+      {ingestChooser && (
+        <IngestChooser
+          onDismiss={() => setIngestChooser(false)}
+          onInvestigative={() => {
+            setIngestChooser(false);
+            goTo("Verify");
+            window.setTimeout(() => fileRef.current?.click(), 80);
+          }}
+          onArchive={() => {
+            setIngestChooser(false);
+            setArchiveFocus(true);
+            goTo("Media");
+          }}
+        />
+      )}
+      {dupMatch && (
+        <DuplicateArbitrationModal
+          match={dupMatch}
+          onDecide={(decision) => {
+            dupResolver.current?.(decision);
+            dupResolver.current = null;
+            setDupMatch(null);
+          }}
+        />
+      )}
+      <input
+        ref={fileRef}
+        type="file"
+        accept={EVIDENCE_ACCEPT}
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files?.length) {
+            void ingestFiles(e.target.files, { extract: true, background: false }).then(() => goTo("Verify"));
+          }
+          e.target.value = "";
+        }}
+      />
 
       {resetPrompt && (
         <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/30 p-4 backdrop-blur-[2px]">

@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { MapPin, Radar, Search } from "lucide-react";
+import { MapPin, Plus, Radar, Search } from "lucide-react";
 import type { CaseRecord, EntityRecord, TimelineEventRecord } from "./db";
+import { createEntity } from "./db";
 import { geocodeQuery, jitterLatLng, parseCoordinates, type LatLng } from "./lib/geo";
+import { applyDupDecision, entityToSide, findDuplicateLocation, type DupDecision, type DupMatch } from "./lib/duplicates";
 import { formatTag } from "./lib/formatTag";
 import {
   formatLocationKindLabel,
@@ -49,10 +51,12 @@ export default function LocationsMap({
   activeCase,
   places,
   events,
+  onArbitrate,
 }: {
   activeCase: CaseRecord;
   places: EntityRecord[];
   events: TimelineEventRecord[];
+  onArbitrate?: (match: DupMatch) => Promise<DupDecision>;
 }) {
   const mapEl = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -62,6 +66,13 @@ export default function LocationsMap({
   const [mapped, setMapped] = useState<MappedPlace[]>([]);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [geoBusy, setGeoBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [placeName, setPlaceName] = useState("");
+  const [placeAddress, setPlaceAddress] = useState("");
+  const [placeCoords, setPlaceCoords] = useState("");
+  const [placeKind, setPlaceKind] = useState<SearchLocationKind>("last_seen");
+  const [placeError, setPlaceError] = useState<string | null>(null);
+  const [savingPlace, setSavingPlace] = useState(false);
 
   const lksMs = parseLksTimestamp(activeCase);
   const placeKey = places.map((p) => p.id).join("|");
@@ -161,6 +172,87 @@ export default function LocationsMap({
     else if (bounds.length > 1) map.fitBounds(L.latLngBounds(bounds), { padding: [36, 36], maxZoom: 14 });
   }, [filtered]);
 
+  const submitPlace = async () => {
+    if (!placeName.trim() || savingPlace) return;
+    setSavingPlace(true);
+    setPlaceError(null);
+    try {
+      const parsed = parseCoordinates(placeCoords);
+      const nameHit = await findDuplicateLocation(activeCase.id, { name: placeName.trim(), address: placeAddress.trim(), latlng: parsed });
+      if (nameHit) {
+        if (!onArbitrate) {
+          setPlaceError("A nearby or matching location already exists.");
+          return;
+        }
+        const decision = await onArbitrate({
+          kind: "location",
+          existingId: nameHit.id,
+          existing: entityToSide(nameHit),
+          incoming: entityToSide({ ...nameHit, id: "incoming", name: placeName.trim(), notes: placeAddress.trim() }, true),
+        });
+        const applied = await applyDupDecision(
+          { kind: "location", existingId: nameHit.id, existing: entityToSide(nameHit), incoming: entityToSide(nameHit, true) },
+          decision,
+          { ...nameHit, name: placeName.trim(), notes: placeAddress.trim() },
+        );
+        if (applied.action !== "replace") {
+          setAdding(false);
+          setPlaceName("");
+          setPlaceAddress("");
+          setPlaceCoords("");
+          return;
+        }
+      }
+      const latlng = parsed || await geocodeQuery([placeName, placeAddress, activeCase.jurisdiction].filter(Boolean).join(", "));
+      const draft = {
+        caseId: activeCase.id,
+        name: placeName.trim(),
+        type: "place" as const,
+        role: "UNVERIFIED",
+        notes: placeAddress.trim(),
+        classification: "UNVERIFIED",
+        metadata: {
+          address: placeAddress.trim(),
+          coordinates: latlng ? `${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}` : placeCoords.trim(),
+          locationKind: placeKind,
+          searchStatus: "Unchecked",
+        },
+      };
+      if (!nameHit && latlng) {
+        const near = await findDuplicateLocation(activeCase.id, { name: draft.name, address: draft.notes, latlng });
+        if (near && onArbitrate) {
+          const decision = await onArbitrate({
+            kind: "location",
+            existingId: near.id,
+            existing: entityToSide(near),
+            incoming: entityToSide({ ...near, id: "incoming", name: draft.name, notes: draft.notes, metadata: draft.metadata }, true),
+          });
+          const applied = await applyDupDecision(
+            { kind: "location", existingId: near.id, existing: entityToSide(near), incoming: entityToSide(near, true) },
+            decision,
+            { ...near, name: draft.name, notes: draft.notes, metadata: draft.metadata },
+          );
+          if (applied.action !== "replace") {
+            setAdding(false);
+            setPlaceName("");
+            setPlaceAddress("");
+            setPlaceCoords("");
+            return;
+          }
+        }
+      }
+      await createEntity(draft);
+      setAdding(false);
+      setPlaceName("");
+      setPlaceAddress("");
+      setPlaceCoords("");
+    } catch (err) {
+      setPlaceError(err instanceof Error ? err.message : "Could not add that point.");
+    } finally {
+      setSavingPlace(false);
+    }
+  };
+
   const focusOn = (id: string, zoom = false) => {
     const row = mapped.find((r) => r.entity.id === id);
     const map = mapRef.current;
@@ -182,8 +274,32 @@ export default function LocationsMap({
       </div>
       <aside className="flex max-h-[46vh] w-full shrink-0 flex-col border-t border-slate-200 bg-white lg:max-h-none lg:h-auto lg:w-[360px] lg:border-l lg:border-t-0">
         <div className="border-b border-slate-200 px-4 py-3">
-          <h1 className="text-[18px] font-semibold tracking-tight text-slate-900">Locations & Map</h1>
-          <p className="mt-1 text-[12.5px] text-slate-500">Filter the registry to center the map on a last-seen point, ping, recovery, or search grid.</p>
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h1 className="text-[18px] font-semibold tracking-tight text-slate-900">Locations & Map</h1>
+              <p className="mt-1 text-[12.5px] text-slate-500">Filter the registry or add a search point. Nearby duplicates (within 50m) pause for review.</p>
+            </div>
+            <button type="button" onClick={() => setAdding((v) => !v)} className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-300 px-2 text-[12px] font-medium text-slate-700 hover:border-blue-500">
+              <Plus className="h-3.5 w-3.5" />Add
+            </button>
+          </div>
+          {adding ? (
+            <div className="mt-3 space-y-2 rounded-[12px] border border-slate-200 bg-slate-50 p-3">
+              <input value={placeName} onChange={(e) => setPlaceName(e.target.value)} placeholder="Location name" className="h-9 w-full rounded-lg border border-slate-300 px-2 text-[13px]" />
+              <input value={placeAddress} onChange={(e) => setPlaceAddress(e.target.value)} placeholder="Address" className="h-9 w-full rounded-lg border border-slate-300 px-2 text-[13px]" />
+              <input value={placeCoords} onChange={(e) => setPlaceCoords(e.target.value)} placeholder="Lat, lng (optional)" className="h-9 w-full rounded-lg border border-slate-300 px-2 text-[13px]" />
+              <select value={placeKind} onChange={(e) => setPlaceKind(e.target.value as SearchLocationKind)} className="h-9 w-full rounded-lg border border-slate-300 px-2 text-[13px]">
+                <option value="last_seen">Last seen</option>
+                <option value="item_recovered">Item recovered</option>
+                <option value="cell_ping">Cell ping</option>
+                <option value="search_grid">Search grid</option>
+              </select>
+              {placeError ? <p className="text-[12px] text-rose-700">{placeError}</p> : null}
+              <button type="button" disabled={savingPlace || !placeName.trim()} onClick={() => void submitPlace()} className="h-9 w-full rounded-lg bg-blue-600 text-[12.5px] font-semibold text-white disabled:opacity-40">
+                {savingPlace ? "Checking…" : "Save search point"}
+              </button>
+            </div>
+          ) : null}
           <div className="relative mt-3">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <input

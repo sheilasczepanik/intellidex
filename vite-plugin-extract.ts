@@ -1,9 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import { dispatchExtract, ExtractHttpError } from "./server/extract.ts";
-import { scrapePublicArticle, ScrapeHttpError } from "./server/scrapeUrl.ts";
+import { scrapePublicArticle, parsePageMetadata, ScrapeHttpError } from "./server/scrapeUrl.ts";
 import { parseIntelWithAnthropic, IntelParseError } from "./server/parseIntel.ts";
 import { EXTRACT_MAX_CHARS, prioritizeLegalFacts } from "./src/lib/extractSchema.ts";
+import { getMissingAlerts } from "./server/missingAlerts.ts";
 
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -61,6 +62,33 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
         return;
       }
       send(res, 200, { engine: "gpt-4o", events: [], items: [], entities: [], relationships: [], warning: message });
+    }
+  };
+
+  const metadataHandler = async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    if (req.method !== "POST") {
+      send(res, 405, { error: "POST only" });
+      return;
+    }
+    try {
+      const rawBody = await readBody(req);
+      let payload: { url?: string } = {};
+      try {
+        payload = JSON.parse(rawBody || "{}") as { url?: string };
+      } catch {
+        payload = {};
+      }
+      const meta = await parsePageMetadata(payload.url || "");
+      send(res, 200, meta);
+    } catch (err) {
+      const status = err instanceof ScrapeHttpError ? err.status : 500;
+      const message = err instanceof Error ? err.message : "Metadata parse failed.";
+      send(res, status, { error: message });
     }
   };
 
@@ -132,29 +160,52 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
     }
   };
 
+  const alertsHandler = async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    if (req.method !== "GET") {
+      send(res, 405, { error: "GET only" });
+      return;
+    }
+    try {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      const body = await getMissingAlerts({
+        state: url.searchParams.get("state") || "",
+        env,
+        bypassCache: url.searchParams.get("refresh") === "1" || url.searchParams.get("refresh") === "true",
+      });
+      send(res, 200, body);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Alert feed failed.";
+      send(res, 200, {
+        alerts: [],
+        fetchedAt: new Date().toISOString(),
+        cached: false,
+        sources: [],
+        warning: message,
+      });
+    }
+  };
+
+  const mountApis = (server: { middlewares: { use: (path: string, fn: (req: IncomingMessage, res: ServerResponse) => void) => void } }) => {
+    server.middlewares.use("/api/extract", (req, res) => { void handler(req, res); });
+    server.middlewares.use("/api/scrape-url", (req, res) => { void scrapeHandler(req, res); });
+    server.middlewares.use("/api/parseMetadata", (req, res) => { void metadataHandler(req, res); });
+    server.middlewares.use("/api/parse-metadata", (req, res) => { void metadataHandler(req, res); });
+    server.middlewares.use("/api/parse-intel", (req, res) => { void intelHandler(req, res); });
+    server.middlewares.use("/api/alerts/missing", (req, res) => { void alertsHandler(req, res); });
+  };
+
   return {
     name: "dossier-extract-api",
     configureServer(server) {
-      server.middlewares.use("/api/extract", (req, res) => {
-        void handler(req, res);
-      });
-      server.middlewares.use("/api/scrape-url", (req, res) => {
-        void scrapeHandler(req, res);
-      });
-      server.middlewares.use("/api/parse-intel", (req, res) => {
-        void intelHandler(req, res);
-      });
+      mountApis(server);
     },
     configurePreviewServer(server) {
-      server.middlewares.use("/api/extract", (req, res) => {
-        void handler(req, res);
-      });
-      server.middlewares.use("/api/scrape-url", (req, res) => {
-        void scrapeHandler(req, res);
-      });
-      server.middlewares.use("/api/parse-intel", (req, res) => {
-        void intelHandler(req, res);
-      });
+      mountApis(server);
     },
   };
 }

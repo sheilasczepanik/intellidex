@@ -6,6 +6,16 @@ export type ScrapedArticle = {
   wordCount: number;
 };
 
+export type PageMetadata = {
+  url: string;
+  title: string;
+  description: string;
+  author: string;
+  favicon: string;
+  image: string;
+  publishedDate: string | null;
+};
+
 export function parseArticleUrl(raw: string): string | null {
   const trimmed = raw.trim();
   try {
@@ -47,5 +57,33 @@ export async function scrapeArticleFromUrl(url: string): Promise<ScrapedArticle>
     publishedDate: typeof json.publishedDate === "string" && json.publishedDate.trim() ? json.publishedDate : null,
     content,
     wordCount: typeof json.wordCount === "number" ? json.wordCount : content.split(/\s+/).filter(Boolean).length,
+  };
+}
+
+export async function parseMetadataFromUrl(url: string): Promise<PageMetadata> {
+  const res = await fetch("/api/parseMetadata", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  const rawText = await res.text();
+  let json: Record<string, unknown> = {};
+  try {
+    json = rawText ? JSON.parse(rawText) as Record<string, unknown> : {};
+  } catch {
+    json = {};
+  }
+  if (!res.ok) {
+    throw new Error(typeof json.error === "string" ? json.error : `Could not parse metadata (${res.status})`);
+  }
+  const parsed = parseArticleUrl(url) || url;
+  return {
+    url: typeof json.url === "string" && json.url.trim() ? json.url : parsed,
+    title: typeof json.title === "string" && json.title.trim() ? json.title : parsed,
+    description: typeof json.description === "string" ? json.description : "",
+    author: typeof json.author === "string" ? json.author : "",
+    favicon: typeof json.favicon === "string" ? json.favicon : "",
+    image: typeof json.image === "string" ? json.image : "",
+    publishedDate: typeof json.publishedDate === "string" && json.publishedDate.trim() ? json.publishedDate : null,
   };
 }
