@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
-  addEvidence, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent,
-  db, DEFAULT_OPERATOR, deleteEntity, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft,
-  OPERATOR_ID, resetLocalVault, saveOperatorProfile, setCaseArchived, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
+  addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent,
+  db, DEFAULT_OPERATOR, deleteEntity, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isLocatedCase, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft,
+  OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
 import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
@@ -17,6 +17,7 @@ import WorkingTheory from "./WorkingTheory";
 import { applyExtractedGraph } from "./lib/applyExtractGraph";
 import CaseOverview from "./CaseOverview";
 import LocationsMap from "./LocationsMap";
+import MediaGallery from "./MediaGallery";
 import ArchiveCaseModal from "./ArchiveCaseModal";
 import NewCaseForm from "./NewCaseForm";
 import EvidenceIntake, {
@@ -37,14 +38,14 @@ import SourceDocumentViewer, { CitationPill } from "./SourceDocumentViewer";
 import TimelineToolbar from "./Timeline";
 import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQueueCard";
 import WorkspacePreferences from "./WorkspacePreferences";
-import { ExtractSelectionTip, VERIFY_CATEGORIES } from "./Verify";
+import { ExtractSelectionTip, IMAGE_OBS_CATEGORIES, ImageExtractPopover, VERIFY_CATEGORIES } from "./Verify";
 import {
   ingestElapsedSec, type IngestJob,
 } from "./lib/ingestProgress";
 import { LOW_CLARITY_BADGE, UNREADABLE_SCAN_ALERT, assessTextClarity, isUnreadableScan, logExtractedText } from "./lib/textClarity";
 import { isPdfFile, isTextFile } from "./lib/pdfText";
 import { isImageFile } from "./lib/imageEvidence";
-import { inferSourceType, type SourceCitation } from "./types";
+import { inferSourceType, type SourceBoundingBox, type SourceCitation } from "./types";
 import { isSecondaryEvidence, isUncorroboratedEntity } from "./lib/sourceTier";
 import MediaProvenanceBadge from "./MediaProvenanceBadge";
 import {
@@ -71,28 +72,29 @@ import { formatAlertLabel, ALERT_LEVELS } from "./lib/missingPerson";
 import type { SubjectProfile } from "./db/schema";
 import {
   ArrowRight, Archive, ArchiveRestore, Check, CheckCheck, Clock, FileDown,
-  FileText, FolderPlus, GitCommitHorizontal, Inbox, KeyRound, LayoutDashboard,
+  FileText, FolderPlus, GitCommitHorizontal, HeartHandshake, Inbox, KeyRound, LayoutDashboard,
   LayoutGrid, Lock, MapPin, Menu, MoreHorizontal, PanelLeftClose,
   PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, StickyNote, Trash2, Truck,
-  TriangleAlert, User, Users, UserRound, X, Box,
+  TriangleAlert, User, Users, UserRound, X, Box, Image as ImageIcon,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
 /* types                                                               */
 /* ------------------------------------------------------------------ */
 
-export type Screen = "Hub" | "Setup" | "Overview" | "Intake" | "Verify" | "Timeline" | "Locations" | "WorkingTheory" | "Profile" | "Preferences";
+export type Screen = "Hub" | "Setup" | "Overview" | "Intake" | "Media" | "Verify" | "Timeline" | "Locations" | "WorkingTheory" | "Profile" | "Preferences";
 export type Tone = "active" | "review" | "cold" | "ok" | "fail";
 export type EntityKind = "People" | "Places" | "Vehicles" | "Phones" | "Digital" | "Exhibits";
 
 function parseAppPath(pathname: string): { screen: Screen; caseId: string | null } {
   const path = pathname.replace(/\/+$/, "") || "/";
-  const caseMatch = path.match(/^\/cases\/([^/]+)(?:\/(overview|intake|verify|timeline|locations|graph|working-theory))?$/i);
+  const caseMatch = path.match(/^\/cases\/([^/]+)(?:\/(overview|intake|media|verify|timeline|locations|graph|working-theory))?$/i);
   if (caseMatch) {
     const leaf = (caseMatch[2] || "overview").toLowerCase();
     const screens: Record<string, Screen> = {
       overview: "Overview",
       intake: "Intake",
+      media: "Media",
       verify: "Verify",
       timeline: "Timeline",
       locations: "Locations",
@@ -105,6 +107,7 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
   if (path === "/setup") return { screen: "Setup", caseId: null };
   if (path === "/overview") return { screen: "Overview", caseId: null };
   if (path === "/intake") return { screen: "Intake", caseId: null };
+  if (path === "/media") return { screen: "Media", caseId: null };
   if (path === "/verify") return { screen: "Verify", caseId: null };
   if (path === "/timeline") return { screen: "Timeline", caseId: null };
   if (path === "/locations") return { screen: "Locations", caseId: null };
@@ -125,7 +128,7 @@ function pathFromScreen(screen: Screen, caseId?: string | null) {
   return `/${leaf}`;
 }
 
-const CASE_WORKSPACE: Screen[] = ["Overview", "Intake", "Verify", "Timeline", "Locations", "WorkingTheory"];
+const CASE_WORKSPACE: Screen[] = ["Overview", "Intake", "Media", "Verify", "Timeline", "Locations", "WorkingTheory"];
 
 function NoActiveCase({ onHub }: { onHub: () => void }) {
   return (
@@ -396,7 +399,7 @@ export default function DesktopApp() {
   const [draftLksAt, setDraftLksAt] = useState("");
   const [draftProfile, setDraftProfile] = useState<SubjectProfile>({});
   const [savingCase, setSavingCase] = useState(false);
-  const [hubTab, setHubTab] = useState<"active" | "archived">("active");
+  const [hubTab, setHubTab] = useState<"active" | "located" | "archived">("active");
   const [hubCardMenuId, setHubCardMenuId] = useState<string | null>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -404,8 +407,9 @@ export default function DesktopApp() {
   const [activeCaseId, setActiveCaseId] = useState<string | null>(boot.caseId ?? "CASE-0038");
 
   const hubCases = useLiveQuery(listHubCases);
-  const activeHubCases = (hubCases ?? []).filter((c) => !isArchivedCase(c));
+  const locatedHubCases = (hubCases ?? []).filter((c) => isLocatedCase(c));
   const archivedHubCases = (hubCases ?? []).filter((c) => isArchivedCase(c));
+  const activeHubCases = (hubCases ?? []).filter((c) => !isArchivedCase(c) && !isLocatedCase(c));
   const resolvedCaseId = activeCaseId === ""
     ? null
     : activeCaseId
@@ -480,6 +484,12 @@ export default function DesktopApp() {
   const [intakeHighlight, setIntakeHighlight] = useState(false);
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [extractTip, setExtractTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const [imageExtract, setImageExtract] = useState<{
+    box: SourceBoundingBox;
+    previewDataUrl: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [providerDraft, setProviderDraft] = useState<LlmProvider>(getLocalProvider);
@@ -596,6 +606,7 @@ export default function DesktopApp() {
     { id: "Overview", icon: LayoutDashboard },
     { id: "Locations", icon: MapPin, label: "Locations & Map" },
     { id: "Intake", icon: Inbox, badge: caseEvidence.length || undefined },
+    { id: "Media", icon: ImageIcon, label: "Media & Images" },
     { id: "Verify", icon: ShieldCheck, badge: pendingDrafts.length || undefined },
     { id: "Timeline", icon: GitCommitHorizontal },
     { id: "WorkingTheory", icon: StickyNote, label: "Working Theory" },
@@ -1076,6 +1087,20 @@ export default function DesktopApp() {
     await setCaseArchived(id, false);
     setHubCardMenuId(null);
     setToast(`${title} restored to active cases.`);
+  };
+
+  const markCaseLocated = async (id: string, title: string) => {
+    await setCaseLocated(id);
+    setHubCardMenuId(null);
+    setHubTab("located");
+    setToast(`${title} marked located and moved to Located & Reunited.`);
+  };
+
+  const reopenLocatedSearch = async (id: string, title: string) => {
+    await reopenLocatedCase(id);
+    setHubCardMenuId(null);
+    setHubTab("active");
+    setToast(`${title} reopened as an active search.`);
   };
 
   const confirmArchiveCase = async () => {
@@ -1947,6 +1972,60 @@ export default function DesktopApp() {
     setScreen("Verify");
   };
 
+  const addImageSelectionToCase = async (input: { name: string; category: (typeof IMAGE_OBS_CATEGORIES)[number]["id"]; notes: string }) => {
+    if (!imageExtract || !sourceEvidence) return;
+    const caseId = resolvedCaseId ?? await ensureActiveCase();
+    if (!caseId) return;
+    const spec = IMAGE_OBS_CATEGORIES.find((c) => c.id === input.category) ?? IMAGE_OBS_CATEGORIES[0];
+    const entity = await createEntity({
+      caseId,
+      name: input.name,
+      type: spec.entityType,
+      role: spec.role,
+      notes: input.notes,
+      classification: spec.role,
+      metadata: {
+        visualSnippet: imageExtract.previewDataUrl,
+        bbox: JSON.stringify(imageExtract.box),
+        sourceId: sourceEvidence.id,
+        observationCategory: spec.label,
+      },
+    });
+    await addVerifyDrafts([{
+      caseId,
+      evidenceId: sourceEvidence.id,
+      timestamp: Date.now(),
+      timestampLabel: "Visual selection",
+      entityId: entity.id,
+      entityName: entity.name,
+      suggestNewEntity: false,
+      newEntityType: spec.entityType,
+      category: spec.extract,
+      title: input.name,
+      snippet: input.notes || input.name,
+      details: input.notes || `Manual bounding box on ${sourceEvidence.fileName}`,
+      confidence: 1,
+      citation: "visual-selection",
+      sourceCitation: {
+        sourceId: sourceEvidence.id,
+        sourceName: sourceEvidence.fileName,
+        sourceType: inferSourceType(sourceEvidence),
+        exactQuote: input.notes ? `${input.name}: ${input.notes}` : input.name,
+        boundingBox: imageExtract.box,
+      },
+    }]);
+    await addCaseMedia({
+      caseId,
+      dataUrl: imageExtract.previewDataUrl,
+      title: input.name,
+      category: spec.entityType === "exhibit" ? "evidence" : spec.entityType === "location" ? "search_maps" : "surveillance",
+      sourceId: sourceEvidence.id,
+      tags: [spec.label],
+    });
+    setImageExtract(null);
+    setToast(`${input.name} added to the case.`);
+  };
+
   const setHoveredCard = (id: string | null, origin: "card" | "doc") => {
     hoverOriginRef.current = id ? origin : null;
     setActiveHoveredCardId(id);
@@ -2109,7 +2188,7 @@ export default function DesktopApp() {
                   className="inline-flex h-[34px] items-center gap-1.5 rounded-[10px] bg-blue-600 px-2.5 text-xs font-semibold tracking-wide text-white hover:bg-blue-700 sm:px-3"
                 >
                   <Plus className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">+ Add Evidence</span>
+                  <span className="hidden sm:inline">Add Evidence</span>
                   <span className="sm:hidden">Evidence</span>
                 </button>
               )}
@@ -2202,23 +2281,30 @@ export default function DesktopApp() {
 
             {/* ---------------- HUB ---------------- */}
             {screen === "Hub" && (() => {
-              const shownCases = hubTab === "archived" ? archivedHubCases : activeHubCases;
-              const waitingCount = activeHubCases.length;
+              const locatedCount = locatedHubCases.length;
               const archivedCount = archivedHubCases.length;
+              const waitingCount = activeHubCases.length;
+              const shownCases = hubTab === "archived" ? archivedHubCases : hubTab === "located" ? locatedHubCases : activeHubCases;
+              const hubHeading = hubTab === "archived"
+                ? (archivedCount === 1 ? "1 archived case" : `${archivedCount} archived cases`)
+                : hubTab === "located"
+                  ? (locatedCount === 1 ? "One person located and reunited." : `${locatedCount} people located and reunited.`)
+                  : waitingCount === 1
+                    ? "One case is waiting on you."
+                    : `${waitingCount} cases are waiting on you.`;
+              const hubCopy = hubTab === "archived"
+                ? "Closed investigations stay on this machine. Restore one to bring it back to the active list."
+                : hubTab === "located"
+                  ? "Resolved searches live here — not in the archive. Open a case to review the reunion record, or reopen the search if the status was premature."
+                  : "Open a missing-person search workspace, or start a new case and bring in official records and tips. Everything stays on this machine until you export it.";
               return (
               <div className="mx-auto w-full max-w-[1180px] px-4 pb-16 pt-8 sm:px-6 sm:pt-13 lg:px-10" onClick={() => setHubCardMenuId(null)}>
                 <div className={`mb-5 ${mono} text-[11px] tracking-[0.14em] text-slate-500`}>CREATOR // {creatorLabel}</div>
                 <h1 className="mb-3.5 w-full max-w-none text-[28px] font-semibold leading-tight tracking-tight sm:text-[40px]">
-                  {hubTab === "archived"
-                    ? (archivedCount === 1 ? "1 archived case" : `${archivedCount} archived cases`)
-                    : waitingCount === 1
-                      ? "One case is waiting on you."
-                      : `${waitingCount} cases are waiting on you.`}
+                  {hubHeading}
                 </h1>
                 <p className="mb-8 w-full max-w-4xl text-[15px] leading-relaxed text-slate-500">
-                  {hubTab === "archived"
-                    ? "Closed investigations stay on this machine. Restore one to bring it back to the active list."
-                    : "Open a missing-person search workspace, or start a new case and bring in official records and tips. Everything stays on this machine until you export it."}
+                  {hubCopy}
                 </p>
                 {hubTab === "active" && (
                   <div className="flex flex-wrap gap-3">
@@ -2229,23 +2315,27 @@ export default function DesktopApp() {
                 )}
 
                 <div className="mb-5 mt-10 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3.5 sm:mt-16">
-                  <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-100 p-0.5">
+                  <div className="flex flex-wrap items-center gap-1 rounded-full border border-slate-200 bg-slate-100 p-0.5">
                     <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); setHubTab("active"); }}
                       className={`h-8 rounded-full px-3.5 text-[12.5px] font-medium transition-colors ${hubTab === "active" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}
                     >
-                      Active Cases
+                      Active Searches ({waitingCount})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); setHubTab("located"); }}
+                      className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 text-[12.5px] font-medium transition-colors ${hubTab === "located" ? "bg-white text-emerald-800 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}
+                    >
+                      Located ({locatedCount})
                     </button>
                     <button
                       type="button"
                       onClick={(e) => { e.stopPropagation(); setHubTab("archived"); }}
                       className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 text-[12.5px] font-medium transition-colors ${hubTab === "archived" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-800"}`}
                     >
-                      Archived
-                      <span className={`rounded-full px-1.5 py-px ${mono} text-[10px] ${hubTab === "archived" ? "bg-slate-200 text-slate-700" : "bg-slate-200/80 text-slate-500"}`}>
-                        {archivedCount}
-                      </span>
+                      Archived ({archivedCount})
                     </button>
                   </div>
                   <span className={`${mono} text-[11px] text-slate-500`}>{shownCases.length} SHOWN</span>
@@ -2253,7 +2343,12 @@ export default function DesktopApp() {
 
                 {hubTab === "active" && hubCases && waitingCount === 0 && (
                   <div className="mb-6 rounded-[14px] border border-dashed border-slate-300 bg-white px-6 py-10 text-center text-[13px] text-slate-500">
-                    No cases in the local vault yet. Create one to get started.
+                    No active searches. Create a case, or check Located & Reunited.
+                  </div>
+                )}
+                {hubTab === "located" && locatedCount === 0 && (
+                  <div className="mb-6 rounded-[14px] border border-dashed border-emerald-200 bg-emerald-50/60 px-6 py-10 text-center text-[13px] text-emerald-800">
+                    No located cases yet. Mark a search as Located / Found to celebrate it here — it will not move to the archive.
                   </div>
                 )}
                 {hubTab === "archived" && archivedCount === 0 && (
@@ -2266,11 +2361,13 @@ export default function DesktopApp() {
                   {shownCases.map((c) => {
                     const tone = statusToTone(c.status);
                     const archived = isArchivedCase(c);
+                    const located = isLocatedCase(c);
+                    const resolvedOn = c.locatedAt ? new Date(c.locatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : null;
                     return (
                     <article
                       key={c.id}
                       onClick={() => { if (!archived) openExistingCase(c.id, c.title, c.summary, c.status); }}
-                      className={`relative rounded-[14px] border bg-white p-5 pb-[18px] shadow-sm transition-colors ${archived ? "border-slate-200" : "cursor-pointer border-slate-200 hover:border-slate-300"}`}
+                      className={`relative rounded-[14px] border bg-white p-5 pb-[18px] shadow-sm transition-colors ${archived ? "border-slate-200" : located ? "cursor-pointer border-emerald-200 hover:border-emerald-300" : "cursor-pointer border-slate-200 hover:border-slate-300"}`}
                     >
                       <div className="mb-3.5 flex items-start justify-between gap-3">
                         <div>
@@ -2280,6 +2377,8 @@ export default function DesktopApp() {
                         <div className="flex shrink-0 items-center gap-1.5">
                           {archived ? (
                             <span className={`inline-flex items-center rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-slate-500`}>ARCHIVED</span>
+                          ) : located ? (
+                            <span className={`inline-flex items-center rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-emerald-700`}>LOCATED</span>
                           ) : (
                             <Chip tone={tone}>{formatAlertLabel(c.status)}</Chip>
                           )}
@@ -2298,7 +2397,7 @@ export default function DesktopApp() {
                             {hubCardMenuId === c.id && (
                               <div
                                 onClick={(e) => e.stopPropagation()}
-                                className="absolute right-0 z-20 mt-1 min-w-[168px] overflow-hidden rounded-[10px] border border-slate-200 bg-white py-1 shadow-lg"
+                                className="absolute right-0 z-20 mt-1 min-w-[200px] overflow-hidden rounded-[10px] border border-slate-200 bg-white py-1 shadow-lg"
                               >
                                 {archived ? (
                                   <button
@@ -2309,13 +2408,32 @@ export default function DesktopApp() {
                                     <ArchiveRestore className="h-3.5 w-3.5" />Unarchive Case
                                   </button>
                                 ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => setArchivePrompt({ id: c.id, title: c.title })}
-                                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-slate-700 hover:bg-slate-50"
-                                  >
-                                    <Archive className="h-3.5 w-3.5" />Archive Case
-                                  </button>
+                                  <>
+                                    {located ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => void reopenLocatedSearch(c.id, c.title)}
+                                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-slate-700 hover:bg-slate-50"
+                                      >
+                                        <ArchiveRestore className="h-3.5 w-3.5" />Reopen Search
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        onClick={() => void markCaseLocated(c.id, c.title)}
+                                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-emerald-800 hover:bg-emerald-50"
+                                      >
+                                        <HeartHandshake className="h-3.5 w-3.5" />Mark as Located / Found
+                                      </button>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => setArchivePrompt({ id: c.id, title: c.title })}
+                                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-slate-700 hover:bg-slate-50"
+                                    >
+                                      <Archive className="h-3.5 w-3.5" />Archive Case
+                                    </button>
+                                  </>
                                 )}
                               </div>
                             )}
@@ -2323,6 +2441,9 @@ export default function DesktopApp() {
                         </div>
                       </div>
                       <p className="mb-[18px] text-[13px] leading-relaxed text-slate-500 text-pretty">{c.summary || "No summary recorded."}</p>
+                      {located && resolvedOn && (
+                        <p className="mb-3 text-[12.5px] font-medium text-emerald-800">Resolution date: {resolvedOn}</p>
+                      )}
                       <div className={`mb-3.5 flex items-center gap-4 ${mono} text-[11px] text-slate-500`}>
                         <span className="inline-flex items-center gap-1.5"><Users className="h-[13px] w-[13px]" />{c.entityCount} entities</span>
                         <span className="inline-flex items-center gap-1.5"><FileText className="h-[13px] w-[13px]" />{c.fileCount} files</span>
@@ -2475,6 +2596,10 @@ export default function DesktopApp() {
               </div>
             )}
 
+            {screen === "Media" && activeCase && (
+              <MediaGallery activeCase={activeCase} />
+            )}
+
             {/* ---------------- INTAKE ---------------- */}
             {screen === "Intake" && activeCase && (
               <EvidenceIntake
@@ -2604,6 +2729,10 @@ export default function DesktopApp() {
                           setHoveredCard(id, "doc");
                           document.getElementById(`verify-card-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
                         }}
+                        onImageRegionSelect={({ box, previewDataUrl, x, y }) => {
+                          setExtractTip(null);
+                          setImageExtract({ box, previewDataUrl, x, y });
+                        }}
                       />
                     </div>
                     {extractTip && (
@@ -2612,6 +2741,15 @@ export default function DesktopApp() {
                         y={extractTip.y}
                         onExtract={() => void extractHighlightedText()}
                         onDismiss={() => setExtractTip(null)}
+                      />
+                    )}
+                    {imageExtract && (
+                      <ImageExtractPopover
+                        x={imageExtract.x}
+                        y={imageExtract.y}
+                        previewDataUrl={imageExtract.previewDataUrl}
+                        onDismiss={() => setImageExtract(null)}
+                        onAdd={(input) => void addImageSelectionToCase(input)}
                       />
                     )}
                   </div>

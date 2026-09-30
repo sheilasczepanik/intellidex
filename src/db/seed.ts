@@ -9,6 +9,7 @@ import {
 } from "./schema";
 import type { EntityRelationship } from "../types";
 import { hashStoredEvidenceBytes } from "../lib/cryptoUtils";
+import { PLACEHOLDER_CCTV_STILL } from "../lib/placeholderStills";
 
 const hour = 60 * 60 * 1000;
 const day = 24 * hour;
@@ -95,7 +96,7 @@ const EVIDENCE: EvidenceRecord[] = [
   { id: "ev-manifest", caseId: "CASE-0041", fileName: "manifest_batch_2024Q3.pdf", fileType: "pdf", rawText: "412 pages of bonded warehouse manifests. OCR complete.", status: "indexed" },
   { id: "ev-wires", caseId: "CASE-0041", fileName: "wire_transfers_export.csv", fileType: "csv", rawText: "8,902 rows of shell-company transfers across three port authorities.", status: "ingesting" },
   { id: "ev-mbox", caseId: "CASE-0041", fileName: "okonkwo_mailbox.mbox", fileType: "mail", rawText: "Queued mailbox export.", status: "queued" },
-  { id: "ev-cctv", caseId: "CASE-0038", fileName: "cctv_pier9_0214.jpg", fileType: "image", rawText: "EXIF timestamp mismatch on Pier 9 still.", status: "flagged" },
+  { id: "ev-cctv", caseId: "CASE-0038", fileName: "cctv_pier9_0214.jpg", fileType: "image", rawText: "EXIF timestamp mismatch on Pier 9 still.", status: "flagged", imageBase64: PLACEHOLDER_CCTV_STILL, sourceType: "image" },
   { id: "ev-interview", caseId: "CASE-0038", fileName: "interview_vlas_02.m4a", fileType: "audio", rawText: "47:12 interview. Transcript pending.", status: "ingesting" },
   { id: "ev-report", caseId: "CASE-0038", fileName: "incident_report_24-8813.pdf", fileType: "pdf", rawText: "Supplementary narrative — night of 14 February. Precinct 4, Ofc. D. Reyes.", status: "indexed" },
   { id: "ev-probate", caseId: "CASE-0031", fileName: "probate_filings_bundle.pdf", fileType: "pdf", rawText: "Probate filings for the Blackwell estate.", status: "indexed" },

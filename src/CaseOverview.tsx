@@ -439,7 +439,7 @@ export default function CaseOverview({
               className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[10px] bg-blue-600 px-3 text-[12.5px] font-semibold text-white hover:bg-blue-700"
             >
               <Plus className="h-3.5 w-3.5" />
-              {registryTab === "official" ? "+ Add Evidence" : "+ Log Tip"}
+              {registryTab === "official" ? "Add Evidence" : "Log Tip"}
             </button>
           </div>
 

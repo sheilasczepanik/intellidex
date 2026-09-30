@@ -1,5 +1,6 @@
 import Dexie, { type EntityTable } from "dexie";
 import type { SourceCitation, EntityType, EntityRelationship, ExternalIntelLead, IntelClaim } from "../types";
+import { PLACEHOLDER_CCTV_STILL } from "../lib/placeholderStills";
 
 export type { EntityType, EntityRelationship, ExternalIntelLead, IntelClaim };
 export type { SourceCitation } from "../types";
@@ -40,6 +41,8 @@ export interface CaseRecord {
   status: CaseStatus;
   isArchived: boolean;
   archivedAt?: string;
+  /** ISO timestamp when the subject was marked located / found (not an archive). */
+  locatedAt?: string;
   createdAt: number;
   updatedAt: number;
   workingNotes?: string;
@@ -186,6 +189,28 @@ export const OPERATOR_ROLES = [
 ] as const;
 
 export type OperatorRole = (typeof OPERATOR_ROLES)[number] | string;
+
+export const CASE_MEDIA_CATEGORIES = [
+  "subject",
+  "surveillance",
+  "evidence",
+  "search_maps",
+] as const;
+
+export type CaseMediaCategory = (typeof CASE_MEDIA_CATEGORIES)[number];
+
+export interface CaseMediaRecord {
+  id: string;
+  caseId: string;
+  dataUrl: string;
+  title: string;
+  category: CaseMediaCategory;
+  dateAdded: number;
+  tags: string[];
+  sourceId?: string;
+  originalFileName?: string;
+}
+
 export type ThemePreference = "system" | "dark" | "light";
 
 export interface OperatorPermissions {
@@ -242,6 +267,7 @@ export class DossierDB extends Dexie {
   userProfile!: EntityTable<UserProfile, "id">;
   relationships!: EntityTable<EntityRelationship, "id">;
   externalIntel!: EntityTable<ExternalIntelLead, "id">;
+  caseMedia!: EntityTable<CaseMediaRecord, "id">;
 
   constructor() {
     super("DossierDB");
@@ -436,6 +462,19 @@ export class DossierDB extends Dexie {
           row.lksAt = row.incidentStart.includes("T") ? row.incidentStart : `${row.incidentStart}T12:00`;
         }
         if (!row.subjectProfile) row.subjectProfile = {};
+      });
+    });
+    this.version(18).stores({
+      caseMedia: "id, caseId, category, dateAdded",
+    });
+    this.version(19).stores({
+      evidence: "id, caseId, status, fileType, sha256Hash, sourceType, tier",
+    }).upgrade(async (tx) => {
+      await tx.table("evidence").toCollection().modify((row: { id?: string; imageBase64?: string; fileType?: string }) => {
+        if (row.id === "ev-cctv" && !row.imageBase64) {
+          row.imageBase64 = PLACEHOLDER_CCTV_STILL;
+          if (!row.fileType) row.fileType = "image";
+        }
       });
     });
   }

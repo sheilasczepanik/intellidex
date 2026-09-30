@@ -4,7 +4,7 @@ import { getDocument, type PDFDocumentProxy } from "pdfjs-dist";
 import { pdfBlobFromBytes, pdfBytesFromBase64 } from "./lib/pdfjsSetup";
 import { db, type EvidenceRecord } from "./db";
 import { collectQuoteSpans, locateSnippet, splitTextBySpans } from "./lib/quoteAnchors";
-import { evidenceImageSrc } from "./lib/imageEvidence";
+import { cropImageRegion, evidenceImageSrc } from "./lib/imageEvidence";
 import PdfScrollPages from "./PdfScrollPages";
 import {
   citationPillLabel,
@@ -47,7 +47,7 @@ export function CitationPill({
   );
 }
 
-type OverlayBox = SourceBoundingBox & { id: string };
+type OverlayBox = SourceBoundingBox & { id: string; title?: string };
 
 type ViewerAnchor = {
   id: string;
@@ -62,6 +62,7 @@ type Props = {
   onClose?: () => void;
   onSelectAnchor?: (id: string) => void;
   showClose?: boolean;
+  onImageRegionSelect?: (payload: { box: SourceBoundingBox; previewDataUrl: string; x: number; y: number }) => void;
 };
 
 export default function SourceDocumentViewer({
@@ -72,6 +73,7 @@ export default function SourceDocumentViewer({
   onClose,
   onSelectAnchor,
   showClose = true,
+  onImageRegionSelect,
 }: Props) {
   const kind = evidence ? inferSourceType(evidence) : citation?.sourceType ?? "text";
   const title = evidence?.fileName || citation?.sourceName || "Source";
@@ -84,6 +86,9 @@ export default function SourceDocumentViewer({
   const stageRef = useRef<HTMLDivElement>(null);
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
+  const imageWrapRef = useRef<HTMLDivElement>(null);
+  const dragOrigin = useRef<{ x: number; y: number } | null>(null);
+  const [draftBox, setDraftBox] = useState<SourceBoundingBox | null>(null);
 
   const focus = citation;
   const quote = (focus?.exactQuote || "").trim();
@@ -104,6 +109,8 @@ export default function SourceDocumentViewer({
       void pdfRef.current?.cleanup();
       pdfRef.current = null;
       setPdfDoc(null);
+      setPdfError(null);
+      setBusy(false);
       return;
     }
     setBusy(true);
@@ -186,11 +193,36 @@ export default function SourceDocumentViewer({
   const imageSrc = evidence ? (evidence.imageBase64 || evidence.fileBase64 || evidenceImageSrc(evidence)) : "";
   const imageBoxes: OverlayBox[] = [];
   if (kind === "image") {
-    if (focus?.boundingBox) imageBoxes.push({ id: activeId || "focus", ...focus.boundingBox });
+    if (focus?.boundingBox) {
+      imageBoxes.push({ id: activeId || "focus", ...focus.boundingBox, title: focus.exactQuote });
+    }
     for (const a of anchors) {
-      if (a.citation.boundingBox) imageBoxes.push({ id: a.id, ...a.citation.boundingBox });
+      if (a.citation.boundingBox) {
+        imageBoxes.push({
+          id: a.id,
+          ...a.citation.boundingBox,
+          title: [a.citation.exactQuote, a.citation.sourceName].filter(Boolean).join(" — "),
+        });
+      }
     }
   }
+
+  const pctFromPointer = (clientX: number, clientY: number) => {
+    const el = imageWrapRef.current;
+    if (!el) return { x: 0, y: 0 };
+    const r = el.getBoundingClientRect();
+    return {
+      x: Math.min(100, Math.max(0, ((clientX - r.left) / Math.max(r.width, 1)) * 100)),
+      y: Math.min(100, Math.max(0, ((clientY - r.top) / Math.max(r.height, 1)) * 100)),
+    };
+  };
+
+  const boxFromPoints = (a: { x: number; y: number }, b: { x: number; y: number }): SourceBoundingBox => ({
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    width: Math.abs(a.x - b.x),
+    height: Math.abs(a.y - b.y),
+  });
 
   const approxBanner = !matched && quote ? (
     <div className="mx-3 mt-3 rounded-[10px] border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-900">
@@ -238,10 +270,10 @@ export default function SourceDocumentViewer({
         )}
       </header>
       {approxBanner}
-      {pdfError && !blobUrl && (
+      {kind === "pdf" && pdfError && !blobUrl && (
         <div className="mx-3 mt-3 rounded-[10px] border border-red-200 bg-red-50 px-3 py-2 text-[12.5px] text-red-800">{pdfError}</div>
       )}
-      {pdfError && blobUrl && (
+      {kind === "pdf" && pdfError && blobUrl && (
         <div className="mx-3 mt-3 rounded-[10px] border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-900">
           Canvas preview failed — showing the native PDF viewer.
         </div>
@@ -278,19 +310,60 @@ export default function SourceDocumentViewer({
         ) : kind === "pdf" && !evidence.fileBase64 ? (
           <div className="px-6 py-16 text-center text-[13px] text-slate-500">This PDF has no stored file bytes in the local vault.</div>
         ) : kind === "image" && imageSrc ? (
-          <div className="flex justify-center p-4">
-            <div className="relative inline-block max-w-full" style={{ transform: `scale(${zoom})`, transformOrigin: "top center" }}>
-              <img src={imageSrc} alt={title} className="max-h-[70vh] max-w-full rounded-md border border-slate-200 bg-slate-100 object-contain" />
+          <div className="flex flex-col items-center p-4">
+            {onImageRegionSelect && (
+              <p className="mb-2 text-center text-[11.5px] text-slate-500">Drag across the image to highlight a jacket, plate, landmark, or other region.</p>
+            )}
+            <div
+              ref={imageWrapRef}
+              className={`relative inline-block max-w-full ${onImageRegionSelect ? "cursor-crosshair" : ""}`}
+              style={{ transform: `scale(${zoom})`, transformOrigin: "top center" }}
+              onPointerDown={(e) => {
+                if (!onImageRegionSelect) return;
+                if ((e.target as HTMLElement).closest("[data-bbox-hit]")) return;
+                e.preventDefault();
+                const origin = pctFromPointer(e.clientX, e.clientY);
+                dragOrigin.current = origin;
+                setDraftBox({ ...origin, width: 0, height: 0 });
+                e.currentTarget.setPointerCapture(e.pointerId);
+              }}
+              onPointerMove={(e) => {
+                if (!dragOrigin.current) return;
+                setDraftBox(boxFromPoints(dragOrigin.current, pctFromPointer(e.clientX, e.clientY)));
+              }}
+              onPointerUp={(e) => {
+                if (!onImageRegionSelect || !dragOrigin.current) return;
+                e.stopPropagation();
+                const box = boxFromPoints(dragOrigin.current, pctFromPointer(e.clientX, e.clientY));
+                dragOrigin.current = null;
+                setDraftBox(null);
+                if (box.width < 1.8 || box.height < 1.8) return;
+                void cropImageRegion(imageSrc, box).then((previewDataUrl) => {
+                  onImageRegionSelect({ box, previewDataUrl, x: e.clientX, y: e.clientY });
+                }).catch(() => {
+                  onImageRegionSelect({ box, previewDataUrl: imageSrc, x: e.clientX, y: e.clientY });
+                });
+              }}
+            >
+              <img src={imageSrc} alt={title} draggable={false} className="pointer-events-none max-h-[70vh] max-w-full rounded-md border border-slate-200 bg-slate-100 object-contain" />
               {imageBoxes.map((box) => (
                 <button
                   key={box.id}
                   type="button"
+                  data-bbox-hit
                   id={`source-hit-${box.id}`}
+                  title={box.title || "Logged observation"}
                   onClick={() => onSelectAnchor?.(box.id)}
                   className={`absolute rounded-sm border-2 ${box.id === (activeId || "focus") ? "border-amber-500 bg-amber-300/30 shadow-[0_0_16px_rgba(245,158,11,0.6)]" : "border-amber-400/70 bg-amber-200/20"}`}
                   style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.width}%`, height: `${box.height}%` }}
                 />
               ))}
+              {draftBox && draftBox.width > 0 && (
+                <div
+                  className="pointer-events-none absolute rounded-sm border-2 border-dashed border-blue-500 bg-blue-400/20"
+                  style={{ left: `${draftBox.x}%`, top: `${draftBox.y}%`, width: `${draftBox.width}%`, height: `${draftBox.height}%` }}
+                />
+              )}
             </div>
           </div>
         ) : (

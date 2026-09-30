@@ -33,6 +33,38 @@ function drawJpeg(img: HTMLImageElement, maxEdge: number, quality: number) {
   return canvas.toDataURL("image/jpeg", quality);
 }
 
+export async function cropImageRegion(src: string, box: { x: number; y: number; width: number; height: number }) {
+  const img = await loadImageElement(src);
+  const nw = img.naturalWidth || img.width;
+  const nh = img.naturalHeight || img.height;
+  const sx = Math.max(0, Math.round((box.x / 100) * nw));
+  const sy = Math.max(0, Math.round((box.y / 100) * nh));
+  const sw = Math.max(1, Math.round((box.width / 100) * nw));
+  const sh = Math.max(1, Math.round((box.height / 100) * nh));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.min(sw, nw - sx);
+  canvas.height = Math.min(sh, nh - sy);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas is unavailable in this browser.");
+  ctx.drawImage(img, sx, sy, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.9);
+}
+
+export async function encodeCaseMedia(file: File) {
+  if (!isImageFile(file) && !/\.(png|jpe?g|webp)$/i.test(file.name)) {
+    throw new Error("Use a JPG, PNG, or WEBP image.");
+  }
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await loadImageElement(objectUrl);
+    return drawJpeg(img, 1600, 0.88);
+  } catch {
+    throw new Error(`Could not process image ${file.name}.`);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 export async function encodeProfilePhoto(file: File) {
   if (!isImageFile(file) && !/\.(png|jpe?g|webp)$/i.test(file.name)) {
     throw new Error("Use a JPG, PNG, or WEBP image.");

@@ -10,6 +10,8 @@ import {
   DEFAULT_OPERATOR,
   OPERATOR_ID,
   type CaseContactRecord,
+  type CaseMediaCategory,
+  type CaseMediaRecord,
   type CaseRecord,
   type CaseStatus,
   type EntityRecord,
@@ -56,6 +58,11 @@ export function statusToTone(status: string) {
 export function isArchivedCase(c: { isArchived?: boolean; status?: string } | null | undefined) {
   if (!c) return false;
   return c.isArchived === true || String(c.status).toUpperCase() === "ARCHIVED";
+}
+
+export function isLocatedCase(c: { isArchived?: boolean; status?: string } | null | undefined) {
+  if (!c || isArchivedCase(c)) return false;
+  return String(c.status).toUpperCase() === "LOCATED";
 }
 
 export async function listHubCases(): Promise<HubCase[]> {
@@ -127,7 +134,7 @@ export async function createCase(input: {
 
 export async function updateCase(
   id: string,
-  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "incidentStart" | "incidentEnd" | "subjectName" | "fileIdentifier" | "lksAt" | "lksLocation" | "lksCircumstances" | "subjectProfile">>,
+  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "locatedAt" | "incidentStart" | "incidentEnd" | "subjectName" | "fileIdentifier" | "lksAt" | "lksLocation" | "lksCircumstances" | "subjectProfile">>,
 ) {
   await db.cases.update(id, { ...patch, updatedAt: Date.now() });
 }
@@ -153,6 +160,61 @@ export async function setCaseArchived(id: string, isArchived: boolean) {
 
 export async function touchCase(id: string) {
   await db.cases.update(id, { updatedAt: Date.now() });
+}
+
+export async function setCaseLocated(id: string) {
+  await db.cases.update(id, {
+    status: "LOCATED",
+    isArchived: false,
+    archivedAt: "",
+    locatedAt: new Date().toISOString(),
+    updatedAt: Date.now(),
+  });
+}
+
+export async function reopenLocatedCase(id: string) {
+  await db.cases.update(id, {
+    status: "ACTIVE_MISSING",
+    isArchived: false,
+    locatedAt: "",
+    updatedAt: Date.now(),
+  });
+}
+
+export async function addCaseMedia(input: {
+  caseId: string;
+  dataUrl: string;
+  title: string;
+  category: CaseMediaCategory;
+  tags?: string[];
+  sourceId?: string;
+  originalFileName?: string;
+}) {
+  const row: CaseMediaRecord = {
+    id: crypto.randomUUID(),
+    caseId: input.caseId,
+    dataUrl: input.dataUrl,
+    title: input.title.trim() || "Untitled image",
+    category: input.category,
+    dateAdded: Date.now(),
+    tags: input.tags ?? [],
+    sourceId: input.sourceId,
+    originalFileName: input.originalFileName,
+  };
+  await db.caseMedia.add(row);
+  await touchCase(input.caseId);
+  return row;
+}
+
+export async function updateCaseMedia(
+  id: string,
+  patch: Partial<Pick<CaseMediaRecord, "title" | "category" | "tags">>,
+) {
+  await db.caseMedia.update(id, patch);
+}
+
+export async function deleteCaseMedia(id: string) {
+  await db.caseMedia.delete(id);
 }
 
 export async function createEntity(input: {

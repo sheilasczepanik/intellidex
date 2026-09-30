@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { Camera, Link2, Loader2, MapPin, Upload, X } from "lucide-react";
-import { updateCase, type CaseRecord, type CaseStatus } from "./db";
+import { setCaseLocated, updateCase, type CaseRecord, type CaseStatus } from "./db";
 import { encodeProfilePhoto, resolveProfilePhotoLookup } from "./lib/imageEvidence";
 import {
   ALERT_LEVELS,
@@ -153,7 +153,11 @@ export default function SubjectProfile({
               <span className={`mb-1 block ${mono} text-[10px] tracking-[0.12em] text-slate-500`}>ALERT STATUS</span>
               <select
                 value={STATUS_OPTIONS.some((o) => o.value === activeCase.status) ? activeCase.status : "ACTIVE_MISSING"}
-                onChange={(e) => void updateCase(activeCase.id, { status: e.target.value as CaseStatus })}
+                onChange={(e) => {
+                  const status = e.target.value as CaseStatus;
+                  if (status === "LOCATED") void setCaseLocated(activeCase.id);
+                  else void updateCase(activeCase.id, { status, locatedAt: "" });
+                }}
                 className={`w-full rounded-lg border px-2.5 py-1.5 ${mono} text-[10.5px] tracking-[0.06em] outline-none ${alertToneClass(activeCase.status)}`}
                 aria-label="Alert status"
               >
