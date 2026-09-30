@@ -200,6 +200,8 @@ type Props = {
   onRetrySummary: (id: string) => void;
   onSkipVerify: () => void;
   onImportUrl: (url: string, onProgress: (stage: "scraping" | "staging") => void) => Promise<void>;
+  highlightDropzone?: boolean;
+  onHighlightConsumed?: () => void;
 };
 
 export default function EvidenceIntake({
@@ -226,6 +228,8 @@ export default function EvidenceIntake({
   onRetrySummary,
   onSkipVerify,
   onImportUrl,
+  highlightDropzone = false,
+  onHighlightConsumed,
 }: Props) {
   const [articleUrl, setArticleUrl] = useState("");
   const [urlError, setUrlError] = useState<string | null>(null);
@@ -248,6 +252,22 @@ export default function EvidenceIntake({
     }, 1000);
     return () => window.clearInterval(tick);
   }, [caseEvidence, ingestJob?.evidenceId]);
+
+  useEffect(() => {
+    const fromHash = typeof window !== "undefined" && window.location.hash === "#file-select";
+    if (!highlightDropzone && !fromHash) return;
+    setIntakeTab("official");
+    const el = document.getElementById("intake-file-dropzone");
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const t = window.setTimeout(() => {
+      onHighlightConsumed?.();
+      if (fromHash) {
+        const { pathname, search } = window.location;
+        window.history.replaceState({}, "", `${pathname}${search}`);
+      }
+    }, 2800);
+    return () => window.clearTimeout(t);
+  }, [highlightDropzone]);
 
   const fetchArticle = async () => {
     const parsed = parseArticleUrl(articleUrl);
@@ -317,11 +337,12 @@ export default function EvidenceIntake({
 
       {intakeTab === "official" ? (
       <div
+        id="intake-file-dropzone"
         onDragOver={(e) => { e.preventDefault(); if (!dragging) setDragging(true); }}
         onDragLeave={() => setDragging(false)}
         onDrop={(e) => { e.preventDefault(); setDragging(false); onDropFiles(e.dataTransfer.files); }}
         onClick={() => { if (!busy) fileRef.current?.click(); }}
-        className={`relative flex cursor-pointer flex-col items-center justify-center rounded-[10px] border border-dashed px-10 py-12 text-center transition-colors ${dragging ? "border-blue-600 bg-blue-50/60" : "border-slate-300 bg-white"}`}
+        className={`relative flex cursor-pointer flex-col items-center justify-center rounded-[10px] border border-dashed px-10 py-12 text-center transition-colors ${dragging ? "border-blue-600 bg-blue-50/60" : "border-slate-300 bg-white"} ${highlightDropzone ? "intake-dropzone-highlight" : ""}`}
       >
         <div className="mb-[18px] flex h-11 w-11 items-center justify-center rounded-[14px] border border-slate-200 bg-slate-100 text-blue-600">
           {busy ? <Loader2 className="h-5 w-5 animate-spin" /> : <CloudUpload className="h-5 w-5" />}

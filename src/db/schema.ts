@@ -9,6 +9,7 @@ export type CaseStatus =
   | "ENDANGERED_MISSING"
   | "CRITICAL_MEDICAL"
   | "COLD"
+  | "LOCATED"
   | "ARCHIVED"
   | "CLOSED"
   | "ACTIVE"
@@ -27,6 +28,8 @@ export interface SubjectProfile {
   distinguishingMarks?: string;
   clothingLastSeen?: string;
   medicalAlerts?: string;
+  /** Profile image as data URL or remote http(s) URL (also mirrored on photoDataUrl). */
+  photoUrl?: string;
   photoDataUrl?: string;
 }
 

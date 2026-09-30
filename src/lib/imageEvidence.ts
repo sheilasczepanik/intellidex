@@ -33,6 +33,60 @@ function drawJpeg(img: HTMLImageElement, maxEdge: number, quality: number) {
   return canvas.toDataURL("image/jpeg", quality);
 }
 
+export async function encodeProfilePhoto(file: File) {
+  if (!isImageFile(file) && !/\.(png|jpe?g|webp)$/i.test(file.name)) {
+    throw new Error("Use a JPG, PNG, or WEBP image.");
+  }
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await loadImageElement(objectUrl);
+    return drawJpeg(img, 720, 0.86);
+  } catch {
+    throw new Error(`Could not process image ${file.name}.`);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Could not read image data."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+export async function resolveProfilePhotoLookup(query: string) {
+  const trimmed = query.trim();
+  if (!trimmed) throw new Error("Paste an image URL or flyer link.");
+  const asUrl = /^https?:\/\//i.test(trimmed)
+    ? trimmed
+    : /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}([/?#].*)?$/i.test(trimmed)
+      ? `https://${trimmed}`
+      : "";
+  if (!asUrl) {
+    throw new Error("Paste a direct flyer image URL (JPG/PNG/WEBP). A NamUs ID alone cannot fetch the photo.");
+  }
+  try {
+    const res = await fetch(asUrl);
+    if (res.ok) {
+      const blob = await res.blob();
+      const type = (blob.type || "").toLowerCase();
+      if (type.startsWith("image/") || /\.(png|jpe?g|webp)(\?|$)/i.test(asUrl)) {
+        const dataUrl = await blobToDataUrl(blob);
+        if (dataUrl.startsWith("data:image")) {
+          const img = await loadImageElement(dataUrl);
+          return drawJpeg(img, 720, 0.86);
+        }
+      }
+    }
+  } catch {
+    /* Cross-origin hosts often block fetch; store the URL for <img src>. */
+  }
+  return asUrl;
+}
+
 export async function encodeEvidenceImage(file: File) {
   const objectUrl = URL.createObjectURL(file);
   try {

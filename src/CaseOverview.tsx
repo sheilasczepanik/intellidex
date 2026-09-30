@@ -5,9 +5,9 @@ import {
   MapPin, MoreHorizontal, Pencil, Phone, Plus, Radio, RefreshCw, Trash2, Upload,
 } from "lucide-react";
 import {
-  CONTACT_AFFILIATIONS, createCaseContact, db, deleteCaseContact, deleteEvidence, formatBytes, updateCase,
+  CONTACT_AFFILIATIONS, createCaseContact, db, deleteCaseContact, deleteEvidence, formatBytes,
   updateCaseContact,
-  type CaseContactRecord, type CaseRecord, type CaseStatus,
+  type CaseContactRecord, type CaseRecord,
   type EntityRecord, type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
 import ArchiveCaseModal from "./ArchiveCaseModal";
@@ -17,42 +17,20 @@ import SourceDocumentViewer from "./SourceDocumentViewer";
 import { ingestElapsedSec, type IngestJob } from "./lib/ingestProgress";
 import { entityAvatarClass, entityInitials, formatRoleLabel, isVictimOrDeceased } from "./utils/roleBadge";
 import {
-  ALERT_LEVELS,
-  alertToneClass,
-  bucketTimelineEvent,
-  formatAlertLabel,
   formatElapsedCompact,
   formatLocationKindLabel,
-  formatTimeMissing,
   inferSearchLocationKind,
   inferSearchStatus,
   isOpenTip,
-  isUrgentAlert,
   isVerifiedSighting,
   parseLksTimestamp,
   searchStatusClass,
-  subjectDisplayName,
 } from "./lib/missingPerson";
+import SubjectProfile from "./SubjectProfile";
+import TimelineSnapshot from "./TimelineSnapshot";
 import { isSecondaryEvidence, sourceClassLabel } from "./lib/sourceTier";
 
 const mono = "font-mono";
-
-const STATUS_OPTIONS: { value: CaseStatus; label: string }[] = ALERT_LEVELS.map((value) => ({
-  value,
-  label: formatAlertLabel(value),
-}));
-
-const STATUS_TONE: Record<string, string> = {
-  ACTIVE_MISSING: alertToneClass("ACTIVE_MISSING"),
-  ENDANGERED_MISSING: alertToneClass("ENDANGERED_MISSING"),
-  CRITICAL_MEDICAL: alertToneClass("CRITICAL_MEDICAL"),
-  COLD: alertToneClass("COLD"),
-  ARCHIVED: alertToneClass("ARCHIVED"),
-  CLOSED: alertToneClass("CLOSED"),
-  ACTIVE: alertToneClass("ACTIVE_MISSING"),
-  REVIEW: alertToneClass("ENDANGERED_MISSING"),
-  FIELD: alertToneClass("ACTIVE_MISSING"),
-};
 
 function initials(name: string) {
   return entityInitials(name);
@@ -153,9 +131,11 @@ export default function CaseOverview({
   pendingCount,
   conflictCount: _conflictCount,
   onOpenTimeline,
+  onOpenLocations,
   onInspectContradiction: _onInspectContradiction,
   onOpenEntity,
   onAddEvidence,
+  onLogTip,
   onDropFiles,
   onArchiveCase,
   onUnarchiveCase,
@@ -183,9 +163,11 @@ export default function CaseOverview({
   pendingCount: number;
   conflictCount?: number;
   onOpenTimeline: () => void;
+  onOpenLocations?: () => void;
   onInspectContradiction?: () => void;
   onOpenEntity: (entity: EntityRecord) => void;
   onAddEvidence: () => void;
+  onLogTip: () => void;
   onDropFiles: (files: FileList | File[]) => void | Promise<void>;
   onArchiveCase: () => void | Promise<void>;
   onUnarchiveCase: () => void;
@@ -214,7 +196,6 @@ export default function CaseOverview({
     () => entities.filter((e) => e.type === "place"),
     [entities],
   );
-  const snapshot = [...events].sort((a, b) => a.timestamp - b.timestamp);
   const locations = searchZones;
 
   const contacts = useLiveQuery(
@@ -377,7 +358,7 @@ export default function CaseOverview({
             className="inline-flex h-10 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-[13px] font-semibold text-white hover:bg-blue-700">
             <Upload className="h-3.5 w-3.5" />Add Evidence
           </button>
-          <button type="button" onClick={onAddEvidence}
+          <button type="button" onClick={onLogTip}
             className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-amber-400 bg-amber-50 px-4 text-[13px] font-semibold text-amber-950 hover:bg-amber-100">
             <Plus className="h-3.5 w-3.5" />Log Tip
           </button>
@@ -388,64 +369,7 @@ export default function CaseOverview({
         </div>
       </div>
 
-      {(() => {
-        const profile = activeCase.subjectProfile ?? {};
-        const subject = subjectDisplayName(activeCase);
-        const lksMs = parseLksTimestamp(activeCase);
-        const initialsLabel = initials(subject);
-        return (
-          <section className={`mb-8 grid gap-5 rounded-[16px] border bg-white p-5 shadow-sm lg:grid-cols-[auto_minmax(0,1fr)_auto] ${isUrgentAlert(activeCase.status) ? "border-amber-400" : "border-slate-200"}`}>
-            <div className="flex flex-col items-center gap-2">
-              <div className={`flex h-24 w-24 items-center justify-center rounded-2xl text-[22px] font-bold ${isUrgentAlert(activeCase.status) ? "border border-amber-400 bg-amber-50 text-amber-950" : "border border-slate-300 bg-slate-50 text-slate-800"}`}>
-                {profile.photoDataUrl ? <img src={profile.photoDataUrl} alt="" className="h-full w-full rounded-2xl object-cover" /> : initialsLabel}
-              </div>
-              <span className={`rounded-md border px-2 py-0.5 text-center ${mono} text-[10px] font-semibold tracking-[0.06em] ${alertToneClass(activeCase.status)}`}>
-                {formatAlertLabel(activeCase.status)}
-              </span>
-            </div>
-            <div className="min-w-0">
-              <h1 className="text-[28px] font-semibold leading-tight tracking-tight sm:text-[34px]">{subject}</h1>
-              <p className="mt-1 text-[13px] text-slate-600">
-                Age at disappearance {profile.ageAtDisappearance || "—"}
-                {profile.currentEstimatedAge ? ` · Current estimate ${profile.currentEstimatedAge}` : ""}
-              </p>
-              <div className="mt-3 grid gap-2 text-[13px] text-slate-700 sm:grid-cols-2">
-                <div><span className="text-slate-500">Height / weight</span> · {[profile.height, profile.weight].filter(Boolean).join(" / ") || "—"}</div>
-                <div><span className="text-slate-500">Hair / eyes</span> · {[profile.hair, profile.eyes].filter(Boolean).join(" / ") || "—"}</div>
-                <div className="sm:col-span-2"><span className="text-slate-500">Marks</span> · {profile.distinguishingMarks || "None recorded"}</div>
-                <div className="sm:col-span-2"><span className="text-slate-500">Clothing last seen</span> · {profile.clothingLastSeen || "—"}</div>
-                {profile.medicalAlerts ? (
-                  <div className={`sm:col-span-2 rounded-lg border px-3 py-2 text-[12.5px] font-medium ${alertToneClass("CRITICAL_MEDICAL")}`}>
-                    Vital / medical: {profile.medicalAlerts}
-                  </div>
-                ) : null}
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px] text-slate-500">
-                <span className="inline-flex items-center gap-1.5"><MapPin className="h-3.5 w-3.5" />{activeCase.lksLocation?.trim() || activeCase.jurisdiction?.trim() || "LKS location unassigned"}</span>
-                {activeCase.isArchived ? (
-                  <span className={`rounded-lg border px-2.5 py-1 ${mono} text-[10.5px] tracking-[0.06em] ${STATUS_TONE.ARCHIVED}`}>ARCHIVED</span>
-                ) : (
-                  <select
-                    value={STATUS_OPTIONS.some((o) => o.value === activeCase.status) ? activeCase.status : "ACTIVE_MISSING"}
-                    onChange={(e) => void updateCase(activeCase.id, { status: e.target.value as CaseStatus })}
-                    className={`rounded-lg border px-2.5 py-1 ${mono} text-[10.5px] tracking-[0.06em] outline-none ${STATUS_TONE[activeCase.status] ?? STATUS_TONE.ACTIVE_MISSING}`}
-                    aria-label="Alert level"
-                  >
-                    {STATUS_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </div>
-            <div className={`flex min-w-[11rem] flex-col justify-center rounded-[14px] border px-4 py-4 text-center ${isUrgentAlert(activeCase.status) ? "border-amber-400 bg-amber-50" : "border-slate-300 bg-slate-50"}`}>
-              <div className={`${mono} text-[10px] tracking-[0.14em] text-slate-700`}>TIME MISSING</div>
-              <div className="mt-2 text-[15px] font-semibold leading-snug text-slate-950">{formatTimeMissing(lksMs, clock)}</div>
-              <div className="mt-1 text-[12px] text-slate-600">{lksMs ? new Date(lksMs).toLocaleString() : "Set LKS on case create"}</div>
-            </div>
-          </section>
-        );
-      })()}
+      <SubjectProfile activeCase={activeCase} clock={clock} />
 
       {(ingestJob && ingestJob.stage !== "done") || extractNotice ? (
         <div className="mb-6">
@@ -468,7 +392,7 @@ export default function CaseOverview({
         {[
           { label: "Time elapsed", value: formatElapsedCompact(parseLksTimestamp(activeCase), clock), icon: Clock, onClick: onOpenTimeline },
           { label: "Verified sightings", value: verifiedSightings.length, icon: Check, onClick: onOpenTimeline },
-          { label: "Open tips & leads", value: openTips, icon: AlertTriangle, onClick: onAddEvidence },
+          { label: "Open tips & leads", value: openTips, icon: AlertTriangle, onClick: onLogTip },
           { label: "Search zones & pings", value: searchZones.length, icon: Radio, onClick: () => document.getElementById("overview-search-zones")?.scrollIntoView({ behavior: "smooth", block: "start" }) },
         ].map((stat) => (
           <button
@@ -511,7 +435,7 @@ export default function CaseOverview({
           <div className="mb-4 flex justify-end">
             <button
               type="button"
-              onClick={onAddEvidence}
+              onClick={registryTab === "official" ? onAddEvidence : onLogTip}
               className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[10px] bg-blue-600 px-3 text-[12.5px] font-semibold text-white hover:bg-blue-700"
             >
               <Plus className="h-3.5 w-3.5" />
@@ -806,74 +730,22 @@ export default function CaseOverview({
         )}
       </div>
 
-      <div className="mb-8">
-        <div className="mb-3.5 flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className={`${mono} text-[11px] tracking-[0.14em] text-slate-500`}>TIMELINE SNAPSHOT</h2>
-          <button type="button" onClick={onOpenTimeline} className={`${mono} text-[11px] text-blue-700 hover:underline`}>OPEN CHRONOLOGY</button>
-        </div>
-        <div
-          role="button"
-          tabIndex={0}
-          onClick={onOpenTimeline}
-          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenTimeline(); } }}
-          className="w-full cursor-pointer rounded-[14px] border border-slate-200 bg-white p-4 text-left shadow-sm transition-colors hover:border-blue-300"
-        >
-          {(() => {
-            const lksMs = parseLksTimestamp(activeCase);
-            const buckets = {
-              pre: snapshot.filter((ev) => bucketTimelineEvent(ev, lksMs) === "pre"),
-              lks: snapshot.filter((ev) => bucketTimelineEvent(ev, lksMs) === "lks"),
-              search: snapshot.filter((ev) => bucketTimelineEvent(ev, lksMs) === "search"),
-            };
-            const renderRow = (ev: TimelineEventRecord, highlight?: boolean) => {
-              const src = evidence.find((row) => row.id === ev.sourceDocId);
-              const secondary = ev.tier === "secondary" || Boolean(src && isSecondaryEvidence(src));
-              const citeUrl = ev.sourceCitation?.sourceUrl || src?.sourceUrl;
-              return (
-                <div key={ev.id} className={`flex gap-3 rounded-[10px] px-2 py-1.5 ${highlight ? "border border-amber-400 bg-amber-50" : secondary ? "border border-dashed border-amber-400 bg-amber-50/50" : "border border-transparent"}`}>
-                  <div className="min-w-0 flex-1">
-                    <div className={`${mono} text-[10.5px] text-slate-600`}>{formatStamp(ev.timestamp)}</div>
-                    <div className="truncate text-[13.5px] font-medium text-slate-900">{ev.title}</div>
-                    <div className="truncate text-[12px] text-slate-600">{ev.description}</div>
-                    {citeUrl ? (
-                      <a href={citeUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="mt-0.5 inline-block text-[11.5px] font-semibold text-amber-950 underline">
-                        Source / citation
-                      </a>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            };
-            return (
-              <div className="flex flex-col gap-5">
-                <div>
-                  <div className={`mb-2 ${mono} text-[10px] tracking-[0.12em] text-slate-500`}>PRE-DISAPPEARANCE TIMELINE</div>
-                  {buckets.pre.length ? buckets.pre.slice(0, 4).map((ev) => renderRow(ev)) : <p className="text-[13px] text-slate-500">No pre-disappearance events plotted.</p>}
-                </div>
-                <div>
-                  <div className={`mb-2 ${mono} text-[10px] tracking-[0.12em] text-amber-950`}>LAST KNOWN SIGHTING (LKS)</div>
-                  {buckets.lks.length ? buckets.lks.map((ev) => renderRow(ev, true)) : (
-                    <div className="rounded-[10px] border border-amber-400 bg-amber-50 px-3 py-2">
-                      <div className={`${mono} text-[10.5px] text-amber-950`}>{lksMs ? formatStamp(lksMs) : "Time unknown"}</div>
-                      <div className="text-[13.5px] font-semibold text-slate-950">Last Known Sighting</div>
-                      <div className="text-[12.5px] text-slate-700">{activeCase.lksLocation || activeCase.jurisdiction || "Location unassigned"}{activeCase.lksCircumstances ? ` — ${activeCase.lksCircumstances}` : ""}</div>
-                    </div>
-                  )}
-                </div>
-                <div>
-                  <div className={`mb-2 ${mono} text-[10px] tracking-[0.12em] text-slate-500`}>SEARCH OPERATIONS, VERIFIED SIGHTINGS & TIPS</div>
-                  {buckets.search.length ? buckets.search.slice(0, 6).map((ev) => renderRow(ev)) : <p className="text-[13px] text-slate-500">No search events yet. Confirm facts in Verify.</p>}
-                </div>
-              </div>
-            );
-          })()}
-        </div>
-      </div>
+      <TimelineSnapshot
+        activeCase={activeCase}
+        events={events}
+        evidence={evidence}
+        onOpenTimeline={onOpenTimeline}
+      />
 
       <div id="overview-search-zones" className="mb-8 scroll-mt-6">
         <div className="mb-3.5 flex flex-wrap items-baseline justify-between gap-2">
           <h2 className={`${mono} text-[11px] tracking-[0.14em] text-slate-500`}>KEY LOCATIONS, PINGS & SEARCH GRIDS</h2>
-          <span className={`${mono} text-[11px] text-slate-400`}>{locations.length} ZONES</span>
+          <div className="flex items-center gap-3">
+            <span className={`${mono} text-[11px] text-slate-400`}>{locations.length} ZONES</span>
+            {onOpenLocations ? (
+              <button type="button" onClick={onOpenLocations} className={`${mono} text-[11px] text-blue-700 hover:underline`}>OPEN MAP</button>
+            ) : null}
+          </div>
         </div>
         {locations.length === 0 ? (
           <div className="rounded-[14px] border border-dashed border-slate-300 bg-white px-5 py-10 text-center text-[13px] text-slate-500">
@@ -908,7 +780,7 @@ export default function CaseOverview({
                       {status}
                     </span>
                   </div>
-                  <div className={`${mono} text-[10px] tracking-[0.08em] text-slate-500`}>{formatLocationKindLabel(kind)}</div>
+                  <div className={`mt-1 inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-slate-600`}>{formatLocationKindLabel(kind)}</div>
                   <div className="mt-1 text-[12px] text-slate-600">Logged {dateLabel}</div>
                 </button>
               );
@@ -918,20 +790,20 @@ export default function CaseOverview({
       </div>
 
       {!activeCase.isArchived && (
-        <section className="mt-12">
-          <div className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:flex-row sm:items-center sm:justify-between">
+        <section className="mt-10 border-t border-slate-200/60 pt-6 dark:border-slate-800">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 max-w-2xl">
-              <h2 className="text-[15px] font-semibold tracking-tight text-slate-900">Archive case</h2>
-              <p className="mt-1 text-[13px] leading-relaxed text-slate-500">
+              <h2 className="text-[13px] font-medium text-slate-400">Archive case</h2>
+              <p className="mt-1 text-[12.5px] leading-relaxed text-slate-400">
                 Move this investigation to the Archived tab on the Hub. You can restore it anytime.
               </p>
             </div>
             <button
               type="button"
               onClick={() => setArchiveOpen(true)}
-              className="inline-flex h-10 shrink-0 items-center gap-2 rounded-[10px] border border-slate-200 bg-white px-4 text-[13px] font-medium text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50"
+              className="inline-flex h-9 shrink-0 items-center gap-2 rounded-[10px] bg-transparent px-3 text-[13px] font-medium text-slate-400 hover:bg-red-50/50 hover:text-red-600"
             >
-              <Archive className="h-3.5 w-3.5 text-slate-500" />
+              <Archive className="h-3.5 w-3.5" />
               Archive Case
             </button>
           </div>

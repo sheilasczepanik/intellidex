@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Globe, Loader2, Minus, Plus, Radio, X } from "lucide-react";
-import { getDocument, Util, type PDFDocumentProxy } from "pdfjs-dist";
+import { getDocument, type PDFDocumentProxy } from "pdfjs-dist";
 import { pdfBlobFromBytes, pdfBytesFromBase64 } from "./lib/pdfjsSetup";
 import { db, type EvidenceRecord } from "./db";
 import { collectQuoteSpans, locateSnippet, splitTextBySpans } from "./lib/quoteAnchors";
 import { evidenceImageSrc } from "./lib/imageEvidence";
+import PdfScrollPages from "./PdfScrollPages";
 import {
   citationPillLabel,
   inferSourceType,
@@ -74,27 +75,26 @@ export default function SourceDocumentViewer({
 }: Props) {
   const kind = evidence ? inferSourceType(evidence) : citation?.sourceType ?? "text";
   const title = evidence?.fileName || citation?.sourceName || "Source";
-  const [page, setPage] = useState(citation?.pageNumber || 1);
   const [pageCount, setPageCount] = useState(evidence?.pageCount || 1);
   const [zoom, setZoom] = useState(1);
-  const [fitToken, setFitToken] = useState(0);
   const [matched, setMatched] = useState(true);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [pdfEpoch, setPdfEpoch] = useState(0);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const pdfRef = useRef<PDFDocumentProxy | null>(null);
-  const [pdfBoxes, setPdfBoxes] = useState<OverlayBox[]>([]);
-  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+  const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
 
   const focus = citation;
   const quote = (focus?.exactQuote || "").trim();
   const anchorSig = anchors.map((a) => `${a.id}:${a.citation.exactQuote}:${a.citation.pageNumber ?? ""}`).join("|");
 
   useEffect(() => {
-    if (citation?.pageNumber) setPage(citation.pageNumber);
+    if (citation?.pageNumber) {
+      window.setTimeout(() => {
+        document.getElementById(`pdf-page-${citation.pageNumber}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 120);
+    }
   }, [citation?.sourceId, citation?.pageNumber, citation?.exactQuote]);
 
   useEffect(() => {
@@ -103,6 +103,7 @@ export default function SourceDocumentViewer({
     if (kind !== "pdf" || !evidenceId) {
       void pdfRef.current?.cleanup();
       pdfRef.current = null;
+      setPdfDoc(null);
       return;
     }
     setBusy(true);
@@ -125,9 +126,8 @@ export default function SourceDocumentViewer({
         }
         void pdfRef.current?.cleanup();
         pdfRef.current = doc;
+        setPdfDoc(doc);
         setPageCount(doc.numPages);
-        setPage((p) => Math.min(Math.max(1, p), doc.numPages));
-        setPdfEpoch((n) => n + 1);
       } catch (err) {
         console.error("[PDF] getDocument failed", err);
         if (!cancelled) setPdfError(err instanceof Error ? err.message : "Could not open PDF.");
@@ -160,94 +160,8 @@ export default function SourceDocumentViewer({
   useEffect(() => () => {
     void pdfRef.current?.cleanup();
     pdfRef.current = null;
+    setPdfDoc(null);
   }, []);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const pdf = pdfRef.current;
-    if (kind !== "pdf" || !canvas || !pdf) return;
-    let cancelled = false;
-    const run = async () => {
-      setBusy(true);
-      try {
-        const pg = await pdf.getPage(Math.min(Math.max(1, page), pdf.numPages));
-        const base = pg.getViewport({ scale: 1 });
-        const host = stageRef.current;
-        const fitScale = host ? Math.max(0.4, (host.clientWidth - 32) / base.width) : 1;
-        const scale = zoom * (fitToken >= 0 ? fitScale : fitScale);
-        const viewport = pg.getViewport({ scale });
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        setCanvasSize({ w: viewport.width, h: viewport.height });
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        const renderContext = {
-          canvasContext: ctx,
-          viewport,
-          canvas,
-        };
-        await pg.render(renderContext).promise;
-        if (cancelled) return;
-        const content = await pg.getTextContent();
-        const items = content.items.flatMap((it) => {
-          if (typeof it !== "object" || !it || !("str" in it) || !("transform" in it)) return [];
-          const row = it as { str: string; transform: number[]; width: number; height: number };
-          return row.str ? [row] : [];
-        });
-        let hay = "";
-        const spans: { start: number; end: number; item: (typeof items)[number] }[] = [];
-        for (const item of items) {
-          if (!item.str) continue;
-          const start = hay.length;
-          hay += item.str;
-          spans.push({ start, end: hay.length, item });
-          hay += " ";
-        }
-        const boxes: OverlayBox[] = [];
-        const toBox = (item: (typeof items)[number], id: string): OverlayBox => {
-          const tx = Util.transform(viewport.transform, item.transform);
-          const height = Math.hypot(tx[2], tx[3]);
-          const width = item.width * Math.hypot(tx[0], tx[1]);
-          const left = tx[4];
-          const top = tx[5] - height;
-          return {
-            id,
-            x: (left / viewport.width) * 100,
-            y: (top / viewport.height) * 100,
-            width: (width / viewport.width) * 100,
-            height: (height / viewport.height) * 100,
-          };
-        };
-        const quoteAnchors = [
-          ...(focus?.exactQuote ? [{ id: activeId || "focus", quote: focus.exactQuote }] : []),
-          ...anchors.filter((a) => a.id !== activeId).map((a) => ({ id: a.id, quote: a.citation.exactQuote })),
-        ];
-        let foundFocus = !quote;
-        for (const a of quoteAnchors) {
-          const loc = locateSnippet(hay, a.quote);
-          if (!loc) continue;
-          if (a.id === (activeId || "focus")) foundFocus = true;
-          for (const span of spans) {
-            if (span.end > loc.start && span.start < loc.end) boxes.push(toBox(span.item, a.id));
-          }
-        }
-        if (focus?.boundingBox && boxes.filter((b) => b.id === (activeId || "focus")).length === 0) {
-          boxes.push({ id: activeId || "focus", ...focus.boundingBox });
-          foundFocus = true;
-        }
-        setPdfBoxes(boxes);
-        setMatched(foundFocus);
-      } catch (err) {
-        if (!cancelled) setPdfError(err instanceof Error ? err.message : "Could not render page.");
-      } finally {
-        if (!cancelled) setBusy(false);
-      }
-    };
-    void run();
-    return () => { cancelled = true; };
-  }, [kind, page, zoom, fitToken, pdfEpoch, evidence?.id, focus?.exactQuote, focus?.boundingBox, activeId, anchorSig]);
 
   const textSegments = useMemo(() => {
     if (!evidence?.rawText) return [];
@@ -262,12 +176,12 @@ export default function SourceDocumentViewer({
     if ((kind === "text" || kind === "external_intel" || kind === "web_article") && quote && evidence?.rawText) {
       setMatched(Boolean(locateSnippet(evidence.rawText, quote)));
     }
-  }, [kind, quote, evidence?.rawText, page]);
+  }, [kind, quote, evidence?.rawText]);
 
   useEffect(() => {
     const el = document.getElementById(`source-hit-${activeId || "focus"}`);
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, [activeId, quote, page, textSegments, pdfBoxes]);
+  }, [activeId, quote, textSegments]);
 
   const imageSrc = evidence ? (evidence.imageBase64 || evidence.fileBase64 || evidenceImageSrc(evidence)) : "";
   const imageBoxes: OverlayBox[] = [];
@@ -280,7 +194,7 @@ export default function SourceDocumentViewer({
 
   const approxBanner = !matched && quote ? (
     <div className="mx-3 mt-3 rounded-[10px] border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-900">
-      Approximate citation location on page {page}. Matched text: “{quote}”
+      Approximate citation location{citation?.pageNumber ? ` on page ${citation.pageNumber}` : ""}. Matched text: “{quote}”
     </div>
   ) : null;
 
@@ -305,18 +219,14 @@ export default function SourceDocumentViewer({
           </a>
         ) : null}
         {kind === "pdf" && (
-          <div className="flex items-center gap-1">
-            <button type="button" aria-label="Previous page" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}
-              className="h-7 rounded-md border border-slate-200 px-2 text-[11px] disabled:opacity-40">‹</button>
-            <span className="font-mono text-[10.5px] tracking-wide text-slate-500">Page {page} of {pageCount}</span>
-            <button type="button" aria-label="Next page" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
-              className="h-7 rounded-md border border-slate-200 px-2 text-[11px] disabled:opacity-40">›</button>
-          </div>
+          <span className="font-mono text-[10.5px] tracking-wide text-slate-500">
+            {pageCount} {pageCount === 1 ? "page" : "pages"} · scroll
+          </span>
         )}
         <div className="flex items-center gap-1">
           <button type="button" aria-label="Zoom out" onClick={() => setZoom((z) => Math.max(0.5, Math.round((z - 0.15) * 100) / 100))}
             className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 text-slate-600"><Minus className="h-3 w-3" /></button>
-          <button type="button" onClick={() => { setZoom(1); setFitToken((n) => n + 1); }}
+          <button type="button" onClick={() => setZoom(1)}
             className="h-7 rounded-md border border-slate-200 px-2 font-mono text-[10px] tracking-wide text-slate-600">Fit</button>
           <button type="button" aria-label="Zoom in" onClick={() => setZoom((z) => Math.min(2.5, Math.round((z + 0.15) * 100) / 100))}
             className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 text-slate-600"><Plus className="h-3 w-3" /></button>
@@ -336,7 +246,7 @@ export default function SourceDocumentViewer({
           Canvas preview failed — showing the native PDF viewer.
         </div>
       )}
-      <div ref={stageRef} className="relative min-h-0 flex-1 overflow-auto bg-slate-50">
+      <div ref={stageRef} data-pdf-scroll className="relative min-h-0 max-h-[80vh] flex-1 overflow-y-auto bg-slate-50">
         {busy && (
           <div className="absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-500">
             <Loader2 className="h-3 w-3 animate-spin" />Rendering
@@ -353,24 +263,18 @@ export default function SourceDocumentViewer({
           <div className="px-6 py-16 text-center text-[13px] text-slate-500">No source file is attached to this citation.</div>
         ) : kind === "pdf" && pdfError && blobUrl ? (
           <iframe src={blobUrl} className="h-full min-h-[70vh] w-full rounded border-0 bg-white" title="PDF Preview" />
-        ) : kind === "pdf" && (evidence.fileBase64 || blobUrl) ? (
-          <div className="flex justify-center p-4" style={{ transform: `scale(${zoom === 1 ? 1 : 1})` }}>
-            <div className="relative" style={{ width: canvasSize.w || undefined }}>
-              <canvas ref={canvasRef} className="max-w-full rounded-md border border-slate-200 bg-white shadow-sm" />
-              <div className="absolute inset-0">
-                {pdfBoxes.map((box, i) => (
-                  <button
-                    key={`${box.id}-${i}`}
-                    type="button"
-                    id={i === 0 || box.id === (activeId || "focus") ? `source-hit-${box.id}` : undefined}
-                    onClick={() => onSelectAnchor?.(box.id)}
-                    className={`absolute rounded-sm border-2 ${box.id === (activeId || "focus") ? "border-amber-500 bg-amber-300/35 shadow-[0_0_12px_rgba(245,158,11,0.55)]" : "border-amber-300/80 bg-amber-200/25"}`}
-                    style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.width}%`, height: `${Math.max(box.height, 1.2)}%` }}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
+        ) : kind === "pdf" && (evidence.fileBase64 || blobUrl) && pdfDoc ? (
+          <PdfScrollPages
+            pdf={pdfDoc}
+            pageCount={pageCount}
+            zoom={zoom}
+            citation={citation}
+            anchors={anchors}
+            activeId={activeId}
+            onSelectAnchor={onSelectAnchor}
+          />
+        ) : kind === "pdf" && (evidence.fileBase64 || blobUrl) && busy ? (
+          <div className="flex min-h-[50vh] items-center justify-center text-[13px] text-slate-500">Loading pages…</div>
         ) : kind === "pdf" && !evidence.fileBase64 ? (
           <div className="px-6 py-16 text-center text-[13px] text-slate-500">This PDF has no stored file bytes in the local vault.</div>
         ) : kind === "image" && imageSrc ? (

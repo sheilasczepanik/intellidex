@@ -5,6 +5,7 @@ import {
   Square, StickyNote, Truck, TriangleAlert, User, UserPlus, Users, X, Zap,
 } from "lucide-react";
 import { formatRoleButtonLabel, formatRoleLabel, PERSON_ROLE_VALUES, roleBadgeClass, roleDisplayClass } from "./utils/roleBadge";
+import { formatTag } from "./lib/formatTag";
 
 /* ------------------------------------------------------------------ */
 /* types                                                               */
@@ -868,7 +869,7 @@ export default function MobileApp() {
                         <div key={e.name} className="flex items-center gap-2.5 rounded-lg border border-slate-200 bg-white px-3 py-2">
                           <Icon className="h-3.5 w-3.5 shrink-0 text-slate-500" />
                           <span className="min-w-0 flex-1 truncate text-[12.5px]">{e.name}</span>
-                          <Pill tone="slate">{e.role.toUpperCase()}</Pill>
+                          <Pill tone="slate">{formatTag(e.role)}</Pill>
                         </div>
                       );
                     })}

@@ -1,3 +1,5 @@
+import { formatTag, formatTagUpper } from "../lib/formatTag";
+
 export const PERSON_ROLE_VALUES = [
   "MISSING_PERSON",
   "SUSPECT",
@@ -69,7 +71,7 @@ export function formatRoleLabel(role?: string | null) {
   if (n === "VICTIM") return "Victim";
   if (n === "ASSOCIATE") return "Associate";
   if (n === "UNVERIFIED") return "Unverified";
-  return role.replace(/_/g, " ");
+  return formatTag(role);
 }
 
 /** Compact uppercase label for status toggle buttons. */
@@ -77,7 +79,7 @@ export function formatRoleButtonLabel(role: string) {
   const n = normalizePersonRole(role);
   if (n === "MISSING_PERSON") return "MISSING PERSON";
   if (n === "person_of_interest") return "PERSON OF INTEREST";
-  return n.toUpperCase();
+  return formatTagUpper(n);
 }
 
 function idleChip(role: string) {

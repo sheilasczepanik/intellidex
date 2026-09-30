@@ -1,3 +1,5 @@
+import { formatTag } from "./formatTag";
+
 /** Official vs media-intelligence classification (distinct from media `sourceType` pdf/image/text/web_article). */
 export type EvidenceTier = "primary" | "secondary";
 
@@ -72,7 +74,7 @@ export function sourceClassLabel(cls?: EvidenceSourceClass) {
   if (cls === "news_article") return "News article";
   if (cls === "press_release") return "Press release";
   if (cls === "note") return "Note";
-  return "";
+  return cls ? formatTag(cls) : "";
 }
 
 export function isUncorroboratedEntity(ent: {

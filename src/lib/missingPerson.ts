@@ -1,10 +1,12 @@
 import type { CaseRecord, CaseStatus, EntityRecord, TimelineEventRecord } from "../db/schema";
+import { formatTag } from "./formatTag";
 
 export const ALERT_LEVELS = [
   "ACTIVE_MISSING",
   "ENDANGERED_MISSING",
   "CRITICAL_MEDICAL",
   "COLD",
+  "LOCATED",
 ] as const;
 
 export type AlertLevel = (typeof ALERT_LEVELS)[number];
@@ -23,7 +25,7 @@ export function normalizeAlertLevel(status: string | undefined | null): AlertLev
   const s = String(status || "").toUpperCase();
   if (s === "ACTIVE" || s === "FIELD") return "ACTIVE_MISSING";
   if (s === "REVIEW") return "ENDANGERED_MISSING";
-  if (s === "ACTIVE_MISSING" || s === "ENDANGERED_MISSING" || s === "CRITICAL_MEDICAL" || s === "COLD") return s;
+  if (s === "ACTIVE_MISSING" || s === "ENDANGERED_MISSING" || s === "CRITICAL_MEDICAL" || s === "COLD" || s === "LOCATED") return s;
   if (s === "ARCHIVED" || s === "CLOSED") return s as CaseStatus;
   return "ACTIVE_MISSING";
 }
@@ -32,7 +34,8 @@ export function formatAlertLabel(status: string | undefined | null) {
   const s = String(status || "").toUpperCase();
   if (s === "ENDANGERED_MISSING" || s === "REVIEW") return "Endangered Missing";
   if (s === "CRITICAL_MEDICAL") return "Critical Medical Need";
-  if (s === "COLD") return "Cold Case";
+  if (s === "COLD") return "Cold Case Review";
+  if (s === "LOCATED") return "Located";
   if (s === "ARCHIVED") return "Archived";
   if (s === "CLOSED") return "Closed";
   if (s === "ACTIVE_MISSING" || s === "ACTIVE" || s === "FIELD") return "Active Missing";
@@ -44,6 +47,7 @@ export function alertToneClass(status: string | undefined | null) {
   const s = String(status || "").toUpperCase();
   if (s === "CRITICAL_MEDICAL") return "border-orange-400 bg-orange-50 text-orange-950";
   if (s === "ENDANGERED_MISSING" || s === "REVIEW") return "border-amber-400 bg-amber-50 text-amber-950";
+  if (s === "LOCATED") return "border-emerald-300 bg-emerald-50 text-emerald-950";
   if (s === "COLD" || s === "ARCHIVED" || s === "CLOSED") return "border-slate-300 bg-slate-100 text-slate-800";
   return "border-slate-300 bg-slate-50 text-slate-900";
 }
@@ -115,10 +119,7 @@ export function inferSearchLocationKind(entity: EntityRecord): SearchLocationKin
 }
 
 export function formatLocationKindLabel(kind: SearchLocationKind) {
-  if (kind === "last_seen") return "Last Seen Point";
-  if (kind === "item_recovered") return "Vehicle / Belongings Found";
-  if (kind === "cell_ping") return "Cell Tower Sector / Ping";
-  return "Searched Grid / Trail Area";
+  return formatTag(kind);
 }
 
 export function inferSearchStatus(entity: EntityRecord): SearchStatus {
@@ -159,6 +160,24 @@ export function bucketTimelineEvent(event: TimelineEventRecord, lksMs: number | 
   if (Math.abs(event.timestamp - lksMs) <= window) return "lks";
   if (event.timestamp < lksMs) return "pre";
   return "search";
+}
+
+export function subjectPhotoSrc(profile: { photoUrl?: string; photoDataUrl?: string } | undefined | null) {
+  return (profile?.photoUrl || profile?.photoDataUrl || "").trim();
+}
+
+const SNAPSHOT_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+export function formatSnapshotDate(ts: number) {
+  const d = new Date(ts);
+  if (!Number.isFinite(d.getTime())) return "DATE UNKNOWN";
+  return `${SNAPSHOT_MONTHS[d.getMonth()]} ${String(d.getDate()).padStart(2, "0")}, ${d.getFullYear()}`;
+}
+
+export function formatSnapshotTime(ts: number) {
+  const d = new Date(ts);
+  if (!Number.isFinite(d.getTime())) return "Time unknown";
+  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
 }
 
 export function mapContactAffiliation(role: string, relation?: string) {

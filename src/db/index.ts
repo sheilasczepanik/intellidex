@@ -49,6 +49,7 @@ export function statusToTone(status: string) {
   if (s === "ENDANGERED_MISSING" || s === "REVIEW") return "review" as const;
   if (s === "ACTIVE_MISSING" || s === "ACTIVE" || s === "FIELD") return "active" as const;
   if (s === "COLD" || s === "ARCHIVED" || s === "CLOSED") return "cold" as const;
+  if (s === "LOCATED") return "ok" as const;
   return "ok" as const;
 }
 
@@ -283,15 +284,17 @@ export async function listRelationships(caseId: string) {
 
 export async function updateEntity(
   id: string,
-  patch: Pick<EntityRecord, "name" | "type" | "role" | "notes">,
+  patch: Partial<Pick<EntityRecord, "name" | "type" | "role" | "notes" | "classification" | "metadata">>,
 ) {
   const rec = await db.entities.get(id);
   if (!rec) return;
   await db.entities.update(id, {
-    name: patch.name.trim() || rec.name,
-    type: patch.type,
-    role: patch.role,
-    notes: patch.notes.trim(),
+    name: patch.name != null ? (patch.name.trim() || rec.name) : rec.name,
+    type: patch.type ?? rec.type,
+    role: patch.role ?? rec.role,
+    notes: patch.notes != null ? patch.notes.trim() : rec.notes,
+    ...(patch.classification != null ? { classification: patch.classification } : {}),
+    ...(patch.metadata ? { metadata: { ...(rec.metadata ?? {}), ...patch.metadata } } : {}),
   });
   await touchCase(rec.caseId);
 }

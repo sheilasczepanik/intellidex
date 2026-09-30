@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Radio, ShieldAlert, X } from "lucide-react";
 import { checkIntelConflict, type IntelConflictResult } from "./lib/intelConflict";
+import { formatTag } from "./lib/formatTag";
 import type { ExternalIntelLead, IntelClaim, IntelSourceType } from "./types";
 import type { TimelineEventRecord } from "./db";
 
@@ -149,7 +150,7 @@ function ClaimRow({
     <div className={`rounded-[10px] border border-slate-200 bg-slate-50/70 p-3 ${faded ? "opacity-50" : ""}`}>
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <span className={`inline-flex rounded-md border px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] ${CATEGORY_TONE[claim.category]}`}>
-          [{claim.category.toUpperCase()}]
+          [{formatTag(claim.category)}]
         </span>
         {claim.extractedTimestamp && (
           <span className="text-[11px] text-slate-500">{claim.extractedTimestamp}</span>

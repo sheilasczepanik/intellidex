@@ -16,6 +16,7 @@ import { generateAndDownloadDossier, type DossierExportOptions } from "./lib/Dos
 import WorkingTheory from "./WorkingTheory";
 import { applyExtractedGraph } from "./lib/applyExtractGraph";
 import CaseOverview from "./CaseOverview";
+import LocationsMap from "./LocationsMap";
 import ArchiveCaseModal from "./ArchiveCaseModal";
 import NewCaseForm from "./NewCaseForm";
 import EvidenceIntake, {
@@ -80,13 +81,13 @@ import {
 /* types                                                               */
 /* ------------------------------------------------------------------ */
 
-export type Screen = "Hub" | "Setup" | "Overview" | "Intake" | "Verify" | "Timeline" | "WorkingTheory" | "Profile" | "Preferences";
+export type Screen = "Hub" | "Setup" | "Overview" | "Intake" | "Verify" | "Timeline" | "Locations" | "WorkingTheory" | "Profile" | "Preferences";
 export type Tone = "active" | "review" | "cold" | "ok" | "fail";
 export type EntityKind = "People" | "Places" | "Vehicles" | "Phones" | "Digital" | "Exhibits";
 
 function parseAppPath(pathname: string): { screen: Screen; caseId: string | null } {
   const path = pathname.replace(/\/+$/, "") || "/";
-  const caseMatch = path.match(/^\/cases\/([^/]+)(?:\/(overview|intake|verify|timeline|graph|working-theory))?$/i);
+  const caseMatch = path.match(/^\/cases\/([^/]+)(?:\/(overview|intake|verify|timeline|locations|graph|working-theory))?$/i);
   if (caseMatch) {
     const leaf = (caseMatch[2] || "overview").toLowerCase();
     const screens: Record<string, Screen> = {
@@ -94,6 +95,7 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
       intake: "Intake",
       verify: "Verify",
       timeline: "Timeline",
+      locations: "Locations",
       "working-theory": "WorkingTheory",
       graph: "Overview",
     };
@@ -105,6 +107,7 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
   if (path === "/intake") return { screen: "Intake", caseId: null };
   if (path === "/verify") return { screen: "Verify", caseId: null };
   if (path === "/timeline") return { screen: "Timeline", caseId: null };
+  if (path === "/locations") return { screen: "Locations", caseId: null };
   if (path === "/working-theory") return { screen: "WorkingTheory", caseId: null };
   if (path === "/graph") return { screen: "Overview", caseId: null };
   if (path.startsWith("/settings/profile")) return { screen: "Profile", caseId: null };
@@ -122,7 +125,7 @@ function pathFromScreen(screen: Screen, caseId?: string | null) {
   return `/${leaf}`;
 }
 
-const CASE_WORKSPACE: Screen[] = ["Overview", "Intake", "Verify", "Timeline", "WorkingTheory"];
+const CASE_WORKSPACE: Screen[] = ["Overview", "Intake", "Verify", "Timeline", "Locations", "WorkingTheory"];
 
 function NoActiveCase({ onHub }: { onHub: () => void }) {
   return (
@@ -474,6 +477,7 @@ export default function DesktopApp() {
   const [selectedExtractNames, setSelectedExtractNames] = useState<Set<string>>(new Set());
   const [drawerStagedIds, setDrawerStagedIds] = useState<string[]>([]);
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
+  const [intakeHighlight, setIntakeHighlight] = useState(false);
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [extractTip, setExtractTip] = useState<{ text: string; x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -536,6 +540,11 @@ export default function DesktopApp() {
     if (window.location.pathname !== path) window.history.pushState({}, "", path);
   };
 
+  const openIntakePicker = () => {
+    setIntakeHighlight(true);
+    goTo("Intake");
+  };
+
   useEffect(() => {
     if (!navOpen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -585,6 +594,7 @@ export default function DesktopApp() {
   ];
   const CASE_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }>; badge?: number; label?: string }[] = [
     { id: "Overview", icon: LayoutDashboard },
+    { id: "Locations", icon: MapPin, label: "Locations & Map" },
     { id: "Intake", icon: Inbox, badge: caseEvidence.length || undefined },
     { id: "Verify", icon: ShieldCheck, badge: pendingDrafts.length || undefined },
     { id: "Timeline", icon: GitCommitHorizontal },
@@ -621,7 +631,12 @@ export default function DesktopApp() {
       chip: src?.role && SCHEMA[kind].statuses.includes(kind === "People" ? normalizePersonRole(src.role) : src.role)
         ? (kind === "People" ? normalizePersonRole(src.role) : src.role)
         : SCHEMA[kind].statuses[SCHEMA[kind].statuses.length - 1],
-      v: { ...blank, note: src?.notes ?? "" },
+      v: {
+        ...blank,
+        note: src?.notes ?? "",
+        address: src?.metadata?.address ?? "",
+        coords: src?.metadata?.coordinates ?? "",
+      },
     });
   };
 
@@ -637,6 +652,16 @@ export default function DesktopApp() {
       type: KIND_TYPE[form.tab],
       role: form.tab === "People" ? normalizePersonRole(form.chip) : form.chip,
       notes: notesFromForm(form.v),
+      ...(form.tab === "Places"
+        ? {
+          classification: form.chip,
+          metadata: {
+            locationKind: form.chip,
+            address: form.v.address || "",
+            coordinates: form.v.coords || "",
+          },
+        }
+        : {}),
     };
     if (form.id) await updateEntity(form.id, payload);
     else await createEntity({ caseId, ...payload });
@@ -2080,6 +2105,17 @@ export default function DesktopApp() {
               {activeCase && (
                 <button
                   type="button"
+                  onClick={openIntakePicker}
+                  className="inline-flex h-[34px] items-center gap-1.5 rounded-[10px] bg-blue-600 px-2.5 text-xs font-semibold tracking-wide text-white hover:bg-blue-700 sm:px-3"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">+ Add Evidence</span>
+                  <span className="sm:hidden">Evidence</span>
+                </button>
+              )}
+              {activeCase && (
+                <button
+                  type="button"
                   disabled={operator.permissions?.canExportDossier === false}
                   onClick={() => { setExportError(null); setExportOpen(true); }}
                   className="inline-flex h-[34px] items-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-2.5 text-xs font-medium tracking-wide text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50 disabled:opacity-40 sm:px-3"
@@ -2134,7 +2170,7 @@ export default function DesktopApp() {
             </div>
           </header>
 
-          <main className="flex min-w-0 flex-1 flex-col overflow-auto">
+          <main className={`flex min-w-0 flex-1 flex-col ${screen === "Locations" ? "min-h-0 overflow-hidden" : "overflow-auto"}`}>
 
             {screen === "Profile" && (
               <ProfileSettings
@@ -2358,7 +2394,9 @@ export default function DesktopApp() {
                 pendingCount={pendingDrafts.length}
                 conflictCount={chrono.tether?.count ?? 0}
                 onOpenTimeline={() => goTo("Timeline")}
-                onAddEvidence={() => goTo("Verify")}
+                onOpenLocations={() => goTo("Locations")}
+                onAddEvidence={openIntakePicker}
+                onLogTip={() => goTo("Verify")}
                 onInspectContradiction={() => inspectContradiction()}
                 onOpenEntity={(ent) => {
                   setSelected(ent.id);
@@ -2425,6 +2463,16 @@ export default function DesktopApp() {
 
             {screen === "WorkingTheory" && activeCase && (
               <WorkingTheory activeCase={activeCase} />
+            )}
+
+            {screen === "Locations" && activeCase && (
+              <div className="flex min-h-0 flex-1 flex-col lg:h-[calc(100dvh-4rem)]">
+                <LocationsMap
+                  activeCase={activeCase}
+                  places={caseEntities.filter((e) => e.type === "place" || e.type === "location")}
+                  events={caseEvents}
+                />
+              </div>
             )}
 
             {/* ---------------- INTAKE ---------------- */}
@@ -2496,6 +2544,8 @@ export default function DesktopApp() {
                     throw err;
                   }
                 }}
+                highlightDropzone={intakeHighlight}
+                onHighlightConsumed={() => setIntakeHighlight(false)}
               />
             )}
 

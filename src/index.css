@@ -56,3 +56,24 @@ body {
 .contradiction-bridge-pulse {
   animation: contradiction-bridge-pulse 0.65s ease-in-out 3;
 }
+
+@keyframes intake-drop-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(37 99 235 / 0.08); border-color: rgb(37 99 235); }
+  50% { box-shadow: 0 0 0 10px rgb(37 99 235 / 0.18); border-color: rgb(37 99 235); }
+}
+
+.intake-dropzone-highlight {
+  animation: intake-drop-pulse 1s ease-in-out 3;
+  background-color: rgb(239 246 255) !important;
+}
+
+.locations-map-pin {
+  background: transparent;
+  border: none;
+}
+
+.leaflet-container {
+  font-family: inherit;
+  height: 100%;
+  width: 100%;
+}
