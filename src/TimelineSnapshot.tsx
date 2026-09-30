@@ -53,7 +53,7 @@ function SnapshotRow({
         <div className="truncate text-[12px] text-slate-600">{summary}</div>
         <div className="mt-1 flex flex-wrap items-center gap-1.5">
           {sourceTag ? (
-            <span className={`rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] ${secondary ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-200 text-slate-600"}`}>
+            <span className={`rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] ${sourceTag === "Manual Observation" ? "border-violet-200 bg-violet-50 text-violet-800" : secondary ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-200 text-slate-600"}`}>
               {sourceTag}
             </span>
           ) : null}
@@ -91,7 +91,7 @@ export default function TimelineSnapshot({
     const src = evidence.find((row) => row.id === ev.sourceDocId);
     const secondary = ev.tier === "secondary" || Boolean(src && isSecondaryEvidence(src));
     const citeUrl = ev.sourceCitation?.sourceUrl || src?.sourceUrl;
-    const sourceTag = secondary ? "Tier 2" : "Tier 1";
+    const sourceTag = ev.origin === "manual" ? "Manual Observation" : secondary ? "Tier 2" : "Tier 1";
     return (
       <SnapshotRow
         key={ev.id}

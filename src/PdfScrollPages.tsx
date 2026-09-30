@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Util, type PDFDocumentProxy } from "pdfjs-dist";
+import { TextLayer, Util, type PDFDocumentProxy } from "pdfjs-dist";
 import { locateSnippet } from "./lib/quoteAnchors";
 import type { SourceBoundingBox, SourceCitation } from "./types";
 
-type OverlayBox = SourceBoundingBox & { id: string };
+type OverlayBox = SourceBoundingBox & { id: string; title?: string };
 
-type QuoteAnchor = { id: string; quote: string; pageNumber?: number };
+type QuoteAnchor = { id: string; quote: string; pageNumber?: number; title?: string };
 
 function PdfPage({
   pdf,
@@ -28,9 +28,11 @@ function PdfPage({
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const textLayerRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(eager);
   const [size, setSize] = useState({ w: 0, h: 720 });
   const [boxes, setBoxes] = useState<OverlayBox[]>([]);
+  const [tip, setTip] = useState<{ x: number; y: number; title: string } | null>(null);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -50,8 +52,10 @@ function PdfPage({
   useEffect(() => {
     if (!visible) return;
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const layerEl = textLayerRef.current;
+    if (!canvas || !layerEl) return;
     let cancelled = false;
+    let layer: TextLayer | null = null;
     void (async () => {
       try {
         const pg = await pdf.getPage(pageNumber);
@@ -68,6 +72,12 @@ function PdfPage({
         await pg.render({ canvasContext: ctx, viewport, canvas }).promise;
         if (cancelled) return;
         const content = await pg.getTextContent();
+        layerEl.replaceChildren();
+        layerEl.style.width = `${viewport.width}px`;
+        layerEl.style.height = `${viewport.height}px`;
+        layer = new TextLayer({ textContentSource: content, container: layerEl, viewport });
+        await layer.render();
+        if (cancelled) return;
         const items = content.items.flatMap((it) => {
           if (typeof it !== "object" || !it || !("str" in it) || !("transform" in it)) return [];
           const row = it as { str: string; transform: number[]; width: number; height: number };
@@ -82,12 +92,13 @@ function PdfPage({
           hay += " ";
         }
         const next: OverlayBox[] = [];
-        const toBox = (item: (typeof items)[number], id: string): OverlayBox => {
+        const toBox = (item: (typeof items)[number], id: string, title?: string): OverlayBox => {
           const tx = Util.transform(viewport.transform, item.transform);
           const height = Math.hypot(tx[2], tx[3]);
           const width = item.width * Math.hypot(tx[0], tx[1]);
           return {
             id,
+            title,
             x: (tx[4] / viewport.width) * 100,
             y: ((tx[5] - height) / viewport.height) * 100,
             width: (width / viewport.width) * 100,
@@ -99,7 +110,7 @@ function PdfPage({
           const loc = locateSnippet(hay, a.quote);
           if (!loc) continue;
           for (const span of spans) {
-            if (span.end > loc.start && span.start < loc.end) next.push(toBox(span.item, a.id));
+            if (span.end > loc.start && span.start < loc.end) next.push(toBox(span.item, a.id, a.title || a.quote));
           }
         }
         if (!cancelled) setBoxes(next);
@@ -109,6 +120,7 @@ function PdfPage({
     })();
     return () => {
       cancelled = true;
+      layer?.cancel();
     };
   }, [visible, pdf, pageNumber, zoom, hostWidth, quoteKey, activeId]);
 
@@ -116,13 +128,24 @@ function PdfPage({
     <div
       ref={wrapRef}
       id={`pdf-page-${pageNumber}`}
+      data-pdf-page={pageNumber}
       className="relative w-full max-w-[920px] overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm"
       style={{ minHeight: size.h || 720 }}
+      onMouseMove={(e) => {
+        const wrap = wrapRef.current;
+        if (!wrap || !boxes.length) return;
+        const r = wrap.getBoundingClientRect();
+        const x = ((e.clientX - r.left) / r.width) * 100;
+        const y = ((e.clientY - r.top) / r.height) * 100;
+        const hit = [...boxes].reverse().find((b) => x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + Math.max(b.height, 1.2));
+        setTip(hit?.title ? { x: e.clientX, y: e.clientY, title: hit.title } : null);
+      }}
+      onMouseLeave={() => setTip(null)}
     >
       {visible ? (
         <>
           <canvas ref={canvasRef} className="block h-auto w-full bg-white" />
-          <div className="absolute inset-0">
+          <div className="pointer-events-none absolute inset-0 z-[1]">
             {boxes.map((box, i) => (
               <button
                 key={`${box.id}-${i}`}
@@ -134,9 +157,18 @@ function PdfPage({
               />
             ))}
           </div>
+          <div ref={textLayerRef} className="pdf-text-layer" />
         </>
       ) : (
         <div className="flex h-[720px] items-center justify-center text-[12px] text-slate-400">Page {pageNumber}</div>
+      )}
+      {tip && (
+        <div
+          className="pointer-events-none fixed z-[70] max-w-xs rounded-md border border-amber-200 bg-white px-2 py-1.5 text-[11.5px] text-amber-950 shadow-lg"
+          style={{ left: tip.x + 12, top: tip.y + 12 }}
+        >
+          {tip.title}
+        </div>
       )}
     </div>
   );
@@ -162,11 +194,12 @@ export default function PdfScrollPages({
   const hostRef = useRef<HTMLDivElement>(null);
   const [hostWidth, setHostWidth] = useState(720);
   const quotes: QuoteAnchor[] = [
-    ...(citation?.exactQuote ? [{ id: activeId || "focus", quote: citation.exactQuote, pageNumber: citation.pageNumber }] : []),
+    ...(citation?.exactQuote ? [{ id: activeId || "focus", quote: citation.exactQuote, pageNumber: citation.pageNumber, title: citation.exactQuote }] : []),
     ...anchors.filter((a) => a.id !== activeId).map((a) => ({
       id: a.id,
       quote: a.citation.exactQuote,
       pageNumber: a.citation.pageNumber,
+      title: a.citation.exactQuote,
     })),
   ];
 

@@ -3,11 +3,11 @@ import { useLiveQuery } from "dexie-react-hooks";
 import {
   addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent,
   db, DEFAULT_OPERATOR, deleteEntity, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isLocatedCase, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft,
-  OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
+  OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveManualEvidence, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
 import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
-import { extractPdfText, renderPdfPagesToJpeg } from "./lib/pdfHelpers";
+import { extractPdfText, renderPdfPagesToJpeg, ocrImageSource, documentText } from "./lib/pdfHelpers";
 import { regexExtractFromText } from "./lib/regexExtract";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
@@ -38,7 +38,7 @@ import SourceDocumentViewer, { CitationPill } from "./SourceDocumentViewer";
 import TimelineToolbar from "./Timeline";
 import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQueueCard";
 import WorkspacePreferences from "./WorkspacePreferences";
-import { ExtractSelectionTip, IMAGE_OBS_CATEGORIES, ImageExtractPopover, VERIFY_CATEGORIES } from "./Verify";
+import { ExtractSelectionTip, LogEvidenceModal, VERIFY_CATEGORIES, type ManualLogCategoryId } from "./Verify";
 import {
   ingestElapsedSec, type IngestJob,
 } from "./lib/ingestProgress";
@@ -437,6 +437,12 @@ export default function DesktopApp() {
       : Promise.resolve([] as VerifyDraftRecord[])),
     [resolvedCaseId],
   ) ?? [];
+  const highlightDrafts = useLiveQuery(
+    () => (resolvedCaseId
+      ? db.verifyDrafts.where("caseId").equals(resolvedCaseId).filter((d) => d.status !== "rejected").toArray()
+      : Promise.resolve([] as VerifyDraftRecord[])),
+    [resolvedCaseId],
+  ) ?? [];
 
   const fileRef = useRef<HTMLInputElement>(null);
   const extractChain = useRef(Promise.resolve());
@@ -483,12 +489,12 @@ export default function DesktopApp() {
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
   const [intakeHighlight, setIntakeHighlight] = useState(false);
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
-  const [extractTip, setExtractTip] = useState<{ text: string; x: number; y: number } | null>(null);
-  const [imageExtract, setImageExtract] = useState<{
-    box: SourceBoundingBox;
-    previewDataUrl: string;
-    x: number;
-    y: number;
+  const [extractTip, setExtractTip] = useState<{ text: string; x: number; y: number; pageNumber?: number } | null>(null);
+  const [logModal, setLogModal] = useState<{
+    quote: string;
+    pageNumber?: number;
+    previewDataUrl?: string;
+    box?: SourceBoundingBox;
   } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
@@ -1319,6 +1325,22 @@ export default function DesktopApp() {
         if (!row) continue;
         rowId = row.id;
         ids.push(row.id);
+        const staged = await db.evidence.get(row.id);
+        if (staged?.fileBase64 && (isPdfFile(file) || staged.sourceType === "pdf" || staged.fileType === "pdf")) {
+          try {
+            const extracted = await extractPdfText(staged.fileBase64);
+            const fullText = extracted.text || staged.rawText;
+            await db.evidence.update(row.id, {
+              rawText: fullText,
+              fullText,
+              pageCount: extracted.pageCount || staged.pageCount,
+              wordCount: fullText.split(/\s+/).filter(Boolean).length,
+              textClarity: assessTextClarity(fullText, extracted.pageCount || 1),
+            });
+          } catch (err) {
+            console.error("[Intake] PDF full-text parse failed", err);
+          }
+        }
         if (extract) {
           extractChain.current = extractChain.current.then(() =>
             runExtract(rowId!, { stayOnWorkspace: background }),
@@ -1491,11 +1513,12 @@ export default function DesktopApp() {
       startedAt,
       llmStartedAt: isPdf ? null : Date.now(),
     });
-    let sourceText = ev.rawText || "";
+    let sourceText = documentText(ev) || ev.rawText || "";
     try {
       const hints = caseEntities.map((e) => ({ id: e.id, name: e.name, type: e.type, role: e.role }));
       const pageCap = opts?.maxPages ?? CLAUDE_RETRY_PAGES;
-      if (isPdf && ev.fileBase64) {
+      const stubText = /^\s*\[[A-Za-z]+ (document|evidence):/i.test(sourceText);
+      if (isPdf && ev.fileBase64 && (stubText || !ev.fullText || isUnreadableScan(sourceText))) {
         try {
           const extracted = await extractPdfText(ev.fileBase64, {
             onProgress: (current, total) => {
@@ -1504,16 +1527,32 @@ export default function DesktopApp() {
                 : job));
             },
           });
-          if (extracted.pageCount) {
+          if (extracted.pageCount || extracted.text.trim()) {
+            const fullText = extracted.text.trim() || sourceText;
             await db.evidence.update(ev.id, {
               pageCount: extracted.pageCount,
-              ...(extracted.text.trim() ? { rawText: extracted.text } : {}),
+              rawText: fullText,
+              fullText,
+              wordCount: fullText.split(/\s+/).filter(Boolean).length,
+              textClarity: assessTextClarity(fullText, extracted.pageCount || 1),
             });
+            if (extracted.text.trim()) sourceText = extracted.text;
           }
-          if (extracted.text.trim()) sourceText = extracted.text;
         } catch (err) {
           console.error("[Extraction] PDF text extract failed:", err);
         }
+      } else if (!isPdf && (ev.imageBase64 || ev.fileBase64) && (stubText || isUnreadableScan(sourceText))) {
+        try {
+          const ocr = await ocrImageSource(ev.imageBase64 || ev.fileBase64 || "");
+          if (ocr.trim()) {
+            sourceText = ocr;
+            await db.evidence.update(ev.id, { rawText: ocr, fullText: ocr, textClarity: assessTextClarity(ocr, 1) });
+          }
+        } catch (err) {
+          console.error("[OCR] image extract failed", err);
+        }
+      } else if (ev.fullText?.trim()) {
+        sourceText = ev.fullText;
       }
 
       const textUsable = Boolean(sourceText.trim()) && !isUnreadableScan(sourceText);
@@ -1902,26 +1941,29 @@ export default function DesktopApp() {
   const busy = extracting || (ingestJob != null && ingestJob.stage !== "done");
 
   const sourceQuoteSpans = useMemo(
-    () => collectQuoteSpans(sourceEvidence?.rawText ?? "", pendingDrafts),
-    [sourceEvidence?.rawText, pendingDrafts],
+    () => collectQuoteSpans(documentText(sourceEvidence) || "", pendingDrafts),
+    [sourceEvidence?.rawText, sourceEvidence?.fullText, pendingDrafts],
   );
   const sourceQuoteSegments = useMemo(
-    () => splitTextBySpans(sourceEvidence?.rawText ?? "", sourceQuoteSpans),
-    [sourceEvidence?.rawText, sourceQuoteSpans],
+    () => splitTextBySpans(documentText(sourceEvidence) || "", sourceQuoteSpans),
+    [sourceEvidence?.rawText, sourceEvidence?.fullText, sourceQuoteSpans],
   );
   const narrativeQueue = useMemo(
     () => {
-      const byEvidence = new Map(caseEvidence.map((row) => [row.id, row.rawText] as const));
-      const current = sourceEvidence?.rawText ?? "";
+      const byEvidence = new Map(caseEvidence.map((row) => [row.id, documentText(row) || row.rawText] as const));
+      const current = documentText(sourceEvidence) || "";
       const ordered = sortByNarrativeOrder(pendingDrafts, (draft) => {
         if (current && Number.isFinite(narrativeSortKey(current, draft.snippet))) return current;
         return byEvidence.get(draft.evidenceId) || current;
       });
-      const manual = ordered.filter((d) => d.citation === "selection");
+      const logged = highlightDrafts.filter((d) =>
+        (d.origin === "manual" || d.citation === "manual-observation") && d.status !== "rejected" && !ordered.some((p) => p.id === d.id),
+      );
+      const selection = ordered.filter((d) => d.citation === "selection");
       const rest = ordered.filter((d) => d.citation !== "selection");
-      return [...manual, ...rest];
+      return [...logged, ...selection, ...rest];
     },
-    [caseEvidence, pendingDrafts, sourceEvidence?.rawText],
+    [caseEvidence, pendingDrafts, highlightDrafts, sourceEvidence?.rawText, sourceEvidence?.fullText],
   );
 
   const captureSourceSelection = () => {
@@ -1932,98 +1974,62 @@ export default function DesktopApp() {
       return;
     }
     const text = sel.toString().replace(/\s+/g, " ").trim();
-    if (text.length < 8) {
+    if (text.length < 3) {
       setExtractTip(null);
       return;
     }
     const rect = sel.getRangeAt(0).getBoundingClientRect();
-    setExtractTip({ text, x: rect.left + rect.width / 2, y: rect.top - 6 });
+    const node = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode.parentElement;
+    const pageEl = node?.closest("[data-pdf-page]");
+    const pageNumber = Number(pageEl?.getAttribute("data-pdf-page"));
+    setExtractTip({
+      text,
+      x: rect.left + rect.width / 2,
+      y: rect.top - 6,
+      pageNumber: Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : undefined,
+    });
+  };
+
+  const persistLoggedEvidence = async (input: {
+    quote: string;
+    category: ManualLogCategoryId;
+    notes: string;
+    pageNumber?: number;
+  }) => {
+    if (!logModal || !sourceEvidence) return;
+    const caseId = resolvedCaseId ?? await ensureActiveCase();
+    if (!caseId) return;
+    await saveManualEvidence({
+      caseId,
+      evidenceId: sourceEvidence.id,
+      quote: input.quote || logModal.quote,
+      notes: input.notes,
+      category: input.category,
+      pageNumber: input.pageNumber ?? logModal.pageNumber,
+      boundingBox: logModal.box,
+      previewDataUrl: logModal.previewDataUrl,
+      sourceName: sourceEvidence.fileName,
+      sourceType: inferSourceType(sourceEvidence),
+    });
+    if (logModal.previewDataUrl) {
+      await addCaseMedia({
+        caseId,
+        dataUrl: logModal.previewDataUrl,
+        title: (input.quote || logModal.quote).slice(0, 72) || "Visual observation",
+        category: input.category === "location" ? "search_maps" : input.category === "vehicle" ? "surveillance" : "evidence",
+        sourceId: sourceEvidence.id,
+        tags: ["manual"],
+      });
+    }
+    setLogModal(null);
+    setExtractTip(null);
+    window.getSelection()?.removeAllRanges();
+    setToast("Manual observation saved to the case.");
   };
 
   const extractHighlightedText = async () => {
-    if (!extractTip || !sourceEvidence) return;
-    const caseId = resolvedCaseId ?? await ensureActiveCase();
-    if (!caseId) return;
-    const quote = extractTip.text;
-    await addVerifyDrafts([{
-      caseId,
-      evidenceId: sourceEvidence.id,
-      timestamp: Date.now(),
-      timestampLabel: "Unknown",
-      entityId: "",
-      entityName: "Unassigned",
-      suggestNewEntity: true,
-      newEntityType: "person",
-      category: "evidence",
-      title: quote.length > 72 ? `${quote.slice(0, 69)}…` : quote,
-      snippet: quote,
-      details: "Manual selection from source",
-      confidence: 1,
-      citation: "selection",
-      sourceCitation: {
-        sourceId: sourceEvidence.id,
-        sourceName: sourceEvidence.fileName,
-        sourceType: inferSourceType(sourceEvidence),
-        exactQuote: quote,
-      },
-    }]);
-    setExtractTip(null);
-    window.getSelection()?.removeAllRanges();
-    setScreen("Verify");
-  };
-
-  const addImageSelectionToCase = async (input: { name: string; category: (typeof IMAGE_OBS_CATEGORIES)[number]["id"]; notes: string }) => {
-    if (!imageExtract || !sourceEvidence) return;
-    const caseId = resolvedCaseId ?? await ensureActiveCase();
-    if (!caseId) return;
-    const spec = IMAGE_OBS_CATEGORIES.find((c) => c.id === input.category) ?? IMAGE_OBS_CATEGORIES[0];
-    const entity = await createEntity({
-      caseId,
-      name: input.name,
-      type: spec.entityType,
-      role: spec.role,
-      notes: input.notes,
-      classification: spec.role,
-      metadata: {
-        visualSnippet: imageExtract.previewDataUrl,
-        bbox: JSON.stringify(imageExtract.box),
-        sourceId: sourceEvidence.id,
-        observationCategory: spec.label,
-      },
-    });
-    await addVerifyDrafts([{
-      caseId,
-      evidenceId: sourceEvidence.id,
-      timestamp: Date.now(),
-      timestampLabel: "Visual selection",
-      entityId: entity.id,
-      entityName: entity.name,
-      suggestNewEntity: false,
-      newEntityType: spec.entityType,
-      category: spec.extract,
-      title: input.name,
-      snippet: input.notes || input.name,
-      details: input.notes || `Manual bounding box on ${sourceEvidence.fileName}`,
-      confidence: 1,
-      citation: "visual-selection",
-      sourceCitation: {
-        sourceId: sourceEvidence.id,
-        sourceName: sourceEvidence.fileName,
-        sourceType: inferSourceType(sourceEvidence),
-        exactQuote: input.notes ? `${input.name}: ${input.notes}` : input.name,
-        boundingBox: imageExtract.box,
-      },
-    }]);
-    await addCaseMedia({
-      caseId,
-      dataUrl: imageExtract.previewDataUrl,
-      title: input.name,
-      category: spec.entityType === "exhibit" ? "evidence" : spec.entityType === "location" ? "search_maps" : "surveillance",
-      sourceId: sourceEvidence.id,
-      tags: [spec.label],
-    });
-    setImageExtract(null);
-    setToast(`${input.name} added to the case.`);
+    if (!extractTip) return;
+    setLogModal({ quote: extractTip.text, pageNumber: extractTip.pageNumber });
   };
 
   const setHoveredCard = (id: string | null, origin: "card" | "doc") => {
@@ -2706,7 +2712,7 @@ export default function DesktopApp() {
                     </div>
                   </div>
                   <div ref={sourcePaneRef} onScroll={syncQueueToSourceScroll} onMouseUp={captureSourceSelection} className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                    {extractError && (
+                    {extractError && !(sourceEvidence && inferSourceType(sourceEvidence) !== "pdf" && /pdf/i.test(extractError)) && (
                       <div className="mx-3 mt-3 flex items-start gap-2.5 rounded-[10px] border border-red-200 bg-red-50 px-3.5 py-2.5 text-[12.5px] text-red-800">
                         <TriangleAlert className="mt-0.5 h-[15px] w-[15px] shrink-0" />
                         {extractError}
@@ -2716,10 +2722,13 @@ export default function DesktopApp() {
                       <SourceDocumentViewer
                         evidence={sourceEvidence}
                         citation={(() => {
-                          const d = narrativeQueue.find((row) => row.id === activeHoveredCardId) ?? narrativeQueue[0];
+                          const d = narrativeQueue.find((row) => row.id === activeHoveredCardId)
+                            ?? highlightDrafts.find((row) => row.id === activeHoveredCardId)
+                            ?? narrativeQueue[0]
+                            ?? highlightDrafts[0];
                           return d ? citationFromDraft(d, caseEvidence.find((e) => e.id === d.evidenceId) ?? sourceEvidence) : null;
                         })()}
-                        anchors={narrativeQueue.map((row) => ({
+                        anchors={highlightDrafts.map((row) => ({
                           id: row.id,
                           citation: citationFromDraft(row, caseEvidence.find((e) => e.id === row.evidenceId) ?? sourceEvidence),
                         }))}
@@ -2729,13 +2738,13 @@ export default function DesktopApp() {
                           setHoveredCard(id, "doc");
                           document.getElementById(`verify-card-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
                         }}
-                        onImageRegionSelect={({ box, previewDataUrl, x, y }) => {
+                        onImageRegionSelect={({ box, previewDataUrl }) => {
                           setExtractTip(null);
-                          setImageExtract({ box, previewDataUrl, x, y });
+                          setLogModal({ quote: "Selected image region", previewDataUrl, box });
                         }}
                       />
                     </div>
-                    {extractTip && (
+                    {extractTip && !logModal && (
                       <ExtractSelectionTip
                         x={extractTip.x}
                         y={extractTip.y}
@@ -2743,13 +2752,14 @@ export default function DesktopApp() {
                         onDismiss={() => setExtractTip(null)}
                       />
                     )}
-                    {imageExtract && (
-                      <ImageExtractPopover
-                        x={imageExtract.x}
-                        y={imageExtract.y}
-                        previewDataUrl={imageExtract.previewDataUrl}
-                        onDismiss={() => setImageExtract(null)}
-                        onAdd={(input) => void addImageSelectionToCase(input)}
+                    {logModal && (
+                      <LogEvidenceModal
+                        key={`${logModal.quote}-${logModal.pageNumber ?? ""}-${logModal.previewDataUrl?.slice(0, 24) ?? ""}`}
+                        quote={logModal.quote}
+                        pageNumber={logModal.pageNumber}
+                        previewDataUrl={logModal.previewDataUrl}
+                        onDismiss={() => setLogModal(null)}
+                        onSave={(input) => void persistLoggedEvidence(input)}
                       />
                     )}
                   </div>
@@ -2796,7 +2806,7 @@ export default function DesktopApp() {
                       />
                     ))}
 
-                    {pendingDrafts.length === 0 && (
+                    {pendingDrafts.length === 0 && narrativeQueue.length === 0 && (
                       <div className="flex flex-col items-center gap-2.5 rounded-[14px] border border-dashed border-slate-300 px-5 py-14 text-center">
                         <CheckCheck className="h-[18px] w-[18px] text-blue-600" />
                         <div className="text-[20px] font-semibold">

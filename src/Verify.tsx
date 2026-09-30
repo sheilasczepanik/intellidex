@@ -31,90 +31,123 @@ export function ExtractSelectionTip({
       <button
         type="button"
         onClick={onExtract}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-blue-300 bg-white px-2.5 py-1.5 text-[12px] font-semibold text-blue-700 shadow-lg hover:bg-blue-50"
+        className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-[12px] font-semibold text-amber-950 shadow-lg hover:bg-amber-50"
       >
-        + Extract Event
+        + Log as Evidence
       </button>
     </div>
   );
 }
 
-export const IMAGE_OBS_CATEGORIES = [
-  { id: "subject_sighting", label: "Subject Sighting", entityType: "person" as const, extract: "person" as const, role: "UNVERIFIED" },
-  { id: "personal_belonging", label: "Personal Belonging", entityType: "exhibit" as const, extract: "evidence" as const, role: "UNVERIFIED" },
-  { id: "vehicle", label: "Vehicle", entityType: "vehicle" as const, extract: "vehicle" as const, role: "UNVERIFIED" },
-  { id: "location_marker", label: "Location Marker", entityType: "location" as const, extract: "location" as const, role: "UNVERIFIED" },
-  { id: "witness", label: "Witness", entityType: "person" as const, extract: "person" as const, role: "WITNESS" },
+export const MANUAL_EVIDENCE_CATEGORIES = [
+  { id: "subject_sighting", label: "Subject Sighting" },
+  { id: "location", label: "Location / Address" },
+  { id: "vehicle", label: "Vehicle / Plate" },
+  { id: "physical_description", label: "Physical Description" },
+  { id: "timeline", label: "Timeline Event" },
+  { id: "contact", label: "Contact" },
 ] as const;
 
-export type ImageObsCategoryId = (typeof IMAGE_OBS_CATEGORIES)[number]["id"];
+export type ManualLogCategoryId = (typeof MANUAL_EVIDENCE_CATEGORIES)[number]["id"];
 
-export function ImageExtractPopover({
-  x,
-  y,
+export function LogEvidenceModal({
+  quote,
+  pageNumber,
   previewDataUrl,
-  onAdd,
+  onSave,
   onDismiss,
 }: {
-  x: number;
-  y: number;
-  previewDataUrl: string;
-  onAdd: (input: { name: string; category: ImageObsCategoryId; notes: string }) => void;
+  quote: string;
+  pageNumber?: number;
+  previewDataUrl?: string;
+  onSave: (input: { quote: string; category: ManualLogCategoryId; notes: string; pageNumber?: number }) => void;
   onDismiss: () => void;
 }) {
-  const [name, setName] = useState("Region of interest");
-  const [category, setCategory] = useState<ImageObsCategoryId>("subject_sighting");
+  const [text, setText] = useState(quote);
+  const [category, setCategory] = useState<ManualLogCategoryId>("subject_sighting");
   const [notes, setNotes] = useState("");
-  const left = Math.min(window.innerWidth - 24, Math.max(24, x));
-  const top = Math.min(window.innerHeight - 24, Math.max(24, y + 12));
+  const [page, setPage] = useState(pageNumber ? String(pageNumber) : "");
   return (
-    <div
-      className="fixed z-[90] w-[min(320px,calc(100vw-2rem))] -translate-x-1/2 rounded-[14px] border border-slate-200 bg-white p-3 shadow-xl"
-      style={{ left, top }}
-      onMouseDown={(e) => e.stopPropagation()}
-    >
-      <div className="mb-2 text-[12px] font-semibold text-slate-900">Extract from Selection</div>
-      <img src={previewDataUrl} alt="" className="mb-2 max-h-24 w-full rounded-md object-contain bg-slate-100" />
-      <label className="mb-2 block text-[11px] text-slate-500">
-        Entity / Observation Name
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-[13px] text-slate-900 outline-none focus:border-blue-500"
-        />
-      </label>
-      <label className="mb-2 block text-[11px] text-slate-500">
-        Category
-        <select
-          value={category}
-          onChange={(e) => setCategory(e.target.value as ImageObsCategoryId)}
-          className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-[13px] text-slate-900"
-        >
-          {IMAGE_OBS_CATEGORIES.map((opt) => (
-            <option key={opt.id} value={opt.id}>{opt.label}</option>
-          ))}
-        </select>
-      </label>
-      <label className="mb-3 block text-[11px] text-slate-500">
-        Notes / Context
-        <textarea
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          rows={2}
-          className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-[13px] text-slate-900 outline-none focus:border-blue-500"
-        />
-      </label>
-      <div className="flex justify-end gap-2">
-        <button type="button" onClick={onDismiss} className="rounded-lg px-2.5 py-1.5 text-[12px] text-slate-500 hover:bg-slate-50">Cancel</button>
-        <button
-          type="button"
-          onClick={() => onAdd({ name: name.trim() || "Visual observation", category, notes: notes.trim() })}
-          className="rounded-lg bg-blue-600 px-2.5 py-1.5 text-[12px] font-semibold text-white hover:bg-blue-700"
-        >
-          Add to Case
-        </button>
+    <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="log-evidence-title">
+      <div className="w-full max-w-md rounded-[16px] border border-slate-200 bg-white p-5 shadow-xl">
+        <h2 id="log-evidence-title" className="text-[16px] font-semibold text-slate-900">Log as Evidence</h2>
+        <p className="mt-1 text-[12.5px] text-slate-500">This observation is stored on the case immediately and tagged as a manual highlight.</p>
+        {previewDataUrl ? (
+          <img src={previewDataUrl} alt="" className="mt-3 max-h-28 w-full rounded-md bg-slate-100 object-contain" />
+        ) : null}
+        <label className="mt-3 block text-[11px] text-slate-500">
+          Extracted Content / Quote
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={4}
+            className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 text-[13px] text-slate-900 outline-none focus:border-blue-500"
+          />
+        </label>
+        <label className="mt-2 block text-[11px] text-slate-500">
+          Page Number
+          <input
+            value={page}
+            onChange={(e) => setPage(e.target.value)}
+            inputMode="numeric"
+            placeholder="Auto-detected when available"
+            className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-[13px] text-slate-900 outline-none focus:border-blue-500"
+          />
+        </label>
+        <label className="mt-2 block text-[11px] text-slate-500">
+          Evidence Category
+          <select
+            value={category}
+            onChange={(e) => setCategory(e.target.value as ManualLogCategoryId)}
+            className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-[13px] text-slate-900"
+          >
+            {MANUAL_EVIDENCE_CATEGORIES.map((opt) => (
+              <option key={opt.id} value={opt.id}>{opt.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="mt-2 block text-[11px] text-slate-500">
+          Relevance / Notes
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={2}
+            className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 text-[13px] text-slate-900 outline-none focus:border-blue-500"
+          />
+        </label>
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onDismiss} className="rounded-lg px-3 py-2 text-[13px] text-slate-500 hover:bg-slate-50">Cancel</button>
+          <button
+            type="button"
+            onClick={() => onSave({
+              quote: text.trim() || quote,
+              category,
+              notes: notes.trim(),
+              pageNumber: page ? Number.parseInt(page, 10) || pageNumber : pageNumber,
+            })}
+            className="rounded-lg bg-blue-600 px-3 py-2 text-[13px] font-semibold text-white hover:bg-blue-700"
+          >
+            Save Evidence
+          </button>
+        </div>
       </div>
     </div>
+  );
+}
+
+export function ManualObservationBadge() {
+  return (
+    <span className={`inline-flex items-center rounded-md border border-violet-200 bg-violet-50 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-violet-800`}>
+      Manual Observation
+    </span>
+  );
+}
+
+export function AiExtractedBadge() {
+  return (
+    <span className={`inline-flex items-center rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-slate-600`}>
+      AI-Extracted
+    </span>
   );
 }
 

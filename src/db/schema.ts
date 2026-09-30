@@ -82,6 +82,8 @@ export interface EvidenceRecord {
   fileName: string;
   fileType: string;
   rawText: string;
+  /** Complete transcribed document text (embedded PDF text + OCR). Mirrors into GPT extract and search. */
+  fullText?: string;
   status: EvidenceStatus;
   fileSize?: number;
   pageCount?: number;
@@ -117,6 +119,7 @@ export interface TimelineEventRecord {
   isVerified: boolean;
   sourceCitation?: SourceCitation;
   tier?: "primary" | "secondary";
+  origin?: "manual" | "ai";
 }
 
 export type VerifyDraftStatus = "pending" | "confirmed" | "rejected";
@@ -151,6 +154,7 @@ export interface VerifyDraftRecord {
   citation: string;
   sourceCitation?: SourceCitation;
   status: VerifyDraftStatus;
+  origin?: "manual" | "ai";
 }
 
 export const CONTACT_AFFILIATIONS = [

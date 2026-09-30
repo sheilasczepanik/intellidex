@@ -84,13 +84,13 @@ export async function searchDossier(query: string): Promise<SearchHit[]> {
   }
 
   for (const ev of evidence) {
-    const blob = hay(ev.fileName, ev.fileType, ev.rawText.slice(0, 12000));
+    const blob = hay(ev.fileName, ev.fileType, (ev.fullText || ev.rawText).slice(0, 12000));
     if (blob.includes(q)) {
       hits.push({
         id: `evidence:${ev.id}`,
         group: "Evidence",
         title: ev.fileName,
-        subtitle: snippetAround(ev.rawText || ev.fileType, q),
+        subtitle: snippetAround(ev.fullText || ev.rawText || ev.fileType, q),
         caseId: ev.caseId,
         caseTitle: caseTitle(ev.caseId),
         kind: "evidence",

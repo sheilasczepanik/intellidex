@@ -21,6 +21,7 @@ import {
   type TimelineEventRecord,
   type UserProfile,
   type VerifyDraftRecord,
+  type VerifyDraftStatus,
 } from "./schema";
 
 export * from "./schema";
@@ -386,6 +387,7 @@ export async function createTimelineEvent(input: {
   isVerified?: boolean;
   sourceCitation?: SourceCitation;
   tier?: "primary" | "secondary";
+  origin?: "manual" | "ai";
 }) {
   const row: TimelineEventRecord = {
     id: crypto.randomUUID(),
@@ -398,6 +400,7 @@ export async function createTimelineEvent(input: {
     isVerified: input.isVerified ?? true,
     sourceCitation: input.sourceCitation,
     tier: input.tier ?? "primary",
+    origin: input.origin,
   };
   await db.timelineEvents.add(row);
   await touchCase(input.caseId);
@@ -442,6 +445,7 @@ export async function addEvidence(input: {
   sourceUrl?: string;
   publishedDate?: string;
   wordCount?: number;
+  fullText?: string;
   fromPaste?: boolean;
   fromEditorial?: boolean;
 }) {
@@ -488,6 +492,7 @@ export async function addEvidence(input: {
     sourceUrl: input.sourceUrl,
     publishedDate: input.publishedDate,
     wordCount: input.wordCount,
+    fullText: input.fullText ?? input.rawText,
   };
   await db.evidence.add(row);
   await touchCase(input.caseId);
@@ -515,15 +520,16 @@ export { parseEventTime } from "../lib/eventTime";
 export type { ParseEventTimeOpts } from "../lib/eventTime";
 
 export async function addVerifyDrafts(
-  drafts: Omit<VerifyDraftRecord, "id" | "status">[],
+  drafts: (Omit<VerifyDraftRecord, "id" | "status"> & { status?: VerifyDraftStatus })[],
   opts?: { replacePendingForEvidence?: string },
 ) {
   const rows: VerifyDraftRecord[] = drafts.map((d) => ({
     ...d,
     category: d.category || "",
     details: d.details || "",
+    origin: d.origin ?? "ai",
     id: crypto.randomUUID(),
-    status: "pending",
+    status: d.status ?? "pending",
   }));
   await db.transaction("rw", db.verifyDrafts, db.evidence, db.cases, async () => {
     if (opts?.replacePendingForEvidence) {
@@ -545,6 +551,116 @@ export async function addVerifyDrafts(
     if (drafts[0]) await touchCase(drafts[0].caseId);
   });
   return rows;
+}
+
+export type ManualEvidenceCategoryId =
+  | "subject_sighting"
+  | "location"
+  | "vehicle"
+  | "physical_description"
+  | "timeline"
+  | "contact";
+
+const MANUAL_SPEC: Record<ManualEvidenceCategoryId, {
+  label: string;
+  entityType: EntityType;
+  extract: ExtractCategory;
+  role: string;
+}> = {
+  subject_sighting: { label: "Subject Sighting", entityType: "person", extract: "person", role: "UNVERIFIED" },
+  location: { label: "Location / Address", entityType: "place", extract: "location", role: "UNVERIFIED" },
+  vehicle: { label: "Vehicle / Plate", entityType: "vehicle", extract: "vehicle", role: "UNVERIFIED" },
+  physical_description: { label: "Physical Description", entityType: "person", extract: "physical_description", role: "UNVERIFIED" },
+  timeline: { label: "Timeline Event", entityType: "person", extract: "time", role: "UNVERIFIED" },
+  contact: { label: "Contact", entityType: "person", extract: "person", role: "WITNESS" },
+};
+
+export async function saveManualEvidence(input: {
+  caseId: string;
+  evidenceId: string;
+  quote: string;
+  notes: string;
+  category: ManualEvidenceCategoryId;
+  pageNumber?: number;
+  boundingBox?: SourceCitation["boundingBox"];
+  previewDataUrl?: string;
+  sourceName: string;
+  sourceType: SourceCitation["sourceType"];
+}) {
+  const spec = MANUAL_SPEC[input.category];
+  const quote = input.quote.replace(/\s+/g, " ").trim();
+  const name = quote.slice(0, 72) || spec.label;
+  const notes = [input.notes.trim(), quote && `“${quote}”`].filter(Boolean).join("\n");
+  const citation: SourceCitation = {
+    sourceId: input.evidenceId,
+    sourceName: input.sourceName,
+    sourceType: input.sourceType,
+    exactQuote: quote || name,
+    pageNumber: input.pageNumber,
+    boundingBox: input.boundingBox,
+  };
+  const entity = await createEntity({
+    caseId: input.caseId,
+    name,
+    type: spec.entityType,
+    role: spec.role,
+    notes,
+    classification: spec.role,
+    metadata: {
+      origin: "manual",
+      observationCategory: spec.label,
+      ...(input.previewDataUrl ? { visualSnippet: input.previewDataUrl } : {}),
+      ...(input.boundingBox ? { bbox: JSON.stringify(input.boundingBox) } : {}),
+      ...(input.pageNumber ? { pageNumber: String(input.pageNumber) } : {}),
+      sourceId: input.evidenceId,
+      ...(spec.entityType === "place" ? { locationKind: "last_seen", searchStatus: "Unchecked" } : {}),
+    },
+  });
+  if (input.category === "contact") {
+    await createCaseContact({
+      caseId: input.caseId,
+      name: entity.name,
+      affiliation: mapContactAffiliation(spec.role, spec.role),
+      entityId: entity.id,
+      phone: "",
+      email: "",
+      address: "",
+      notes,
+    });
+  }
+  if (input.category === "timeline" || input.category === "subject_sighting") {
+    await createTimelineEvent({
+      caseId: input.caseId,
+      entityId: entity.id,
+      timestamp: Date.now(),
+      title: name,
+      description: notes,
+      sourceDocId: input.evidenceId,
+      isVerified: true,
+      sourceCitation: citation,
+      origin: "manual",
+    });
+  }
+  const drafts = await addVerifyDrafts([{
+    caseId: input.caseId,
+    evidenceId: input.evidenceId,
+    timestamp: Date.now(),
+    timestampLabel: input.pageNumber ? `Page ${input.pageNumber}` : "Manual observation",
+    entityId: entity.id,
+    entityName: entity.name,
+    suggestNewEntity: false,
+    newEntityType: spec.entityType,
+    category: spec.extract,
+    title: name,
+    snippet: quote || name,
+    details: input.notes.trim() || spec.label,
+    confidence: 1,
+    citation: "manual-observation",
+    sourceCitation: citation,
+    origin: "manual",
+    status: "confirmed",
+  }]);
+  return { entity, draft: drafts[0] };
 }
 
 function intelEntityType(category: IntelClaimCategory): EntityType {

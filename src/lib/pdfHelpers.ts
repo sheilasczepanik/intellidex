@@ -60,29 +60,4 @@ export async function renderPdfPagesToJpeg(
   }
 }
 
-function itemStr(item: unknown) {
-  if (item && typeof item === "object" && "str" in item) return String((item as { str: string }).str || "");
-  return "";
-}
-
-/** Pull selectable text from every page so long PDFs can be chunked for Claude. */
-export async function extractPdfText(
-  fileBase64: string,
-  opts?: { onProgress?: (current: number, total: number) => void },
-): Promise<{ text: string; pageCount: number }> {
-  let pdf: PDFDocumentProxy | null = null;
-  try {
-    pdf = await getDocument({ data: pdfBytesFromBase64(fileBase64) }).promise;
-    const parts: string[] = [];
-    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-      opts?.onProgress?.(pageNumber, pdf.numPages);
-      const page = await pdf.getPage(pageNumber);
-      const content = await page.getTextContent();
-      const line = content.items.map(itemStr).join(" ").replace(/\s+/g, " ").trim();
-      parts.push(`--- Page ${pageNumber} ---\n${line}`);
-    }
-    return { text: parts.join("\n\n").trim(), pageCount: pdf.numPages };
-  } finally {
-    await pdf?.cleanup();
-  }
-}
+export { extractPdfText, ocrImageSource, documentText } from "./pdfParser";

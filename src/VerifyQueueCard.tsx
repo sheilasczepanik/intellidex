@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Check, Pencil, X } from "lucide-react";
 import EvidenceThumb from "./EvidenceThumb";
-import { VerifyCategoryBadge, VerifyConfidenceChip } from "./Verify";
+import { VerifyCategoryBadge, VerifyConfidenceChip, ManualObservationBadge, AiExtractedBadge } from "./Verify";
 import { CitationPill } from "./SourceDocumentViewer";
 import type { EntityRecord, EvidenceRecord, VerifyDraftRecord } from "./db";
 import { evidenceImageSrc } from "./lib/imageEvidence";
@@ -130,10 +130,13 @@ export default function VerifyQueueCard({
         <>
           <div className="mb-3 flex flex-wrap items-center gap-2">
             {thumb ? <EvidenceThumb src={thumb} alt={evidence?.fileName || d.title} className="h-12 w-[4.5rem]" /> : null}
+            {d.origin === "manual" || d.citation === "manual-observation" || d.citation === "selection" || d.citation === "visual-selection"
+              ? <ManualObservationBadge />
+              : <AiExtractedBadge />}
             {d.category ? <VerifyCategoryBadge category={d.category} /> : null}
             <span className={`${mono} text-[12.5px] tracking-wide text-slate-900`}>{d.timestampLabel}</span>
             <Chip ok={Boolean(entity)}>{entity ? entity.name : d.entityName}</Chip>
-            <VerifyConfidenceChip confidence={d.confidence} />
+            {d.origin === "manual" || d.citation === "manual-observation" ? null : <VerifyConfidenceChip confidence={d.confidence} />}
           </div>
           <h3 className="mb-1.5 text-[14.5px] font-medium tracking-tight">{d.title}</h3>
           {d.details ? <p className="mb-2 text-[12px] leading-relaxed text-slate-600">{d.details}</p> : null}
@@ -148,14 +151,20 @@ export default function VerifyQueueCard({
             <CitationPill citation={citation} onClick={() => onOpenCitation(citation)} />
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={onConfirm}
-              className="inline-flex h-[30px] items-center gap-2 rounded-lg border border-blue-300 bg-blue-600/5 px-3 text-[12.5px] font-medium text-blue-700 transition-colors hover:bg-blue-600/15">
-              <Check className="h-3.5 w-3.5" />Confirm
-            </button>
-            <button onClick={onReject}
-              className="inline-flex h-[30px] items-center gap-2 rounded-lg border border-slate-300 px-3 text-[12.5px] text-slate-500 transition-colors hover:border-slate-400 hover:text-slate-900">
-              <X className="h-3.5 w-3.5" />Reject
-            </button>
+            {d.status === "confirmed" ? (
+              <span className={`${mono} text-[10.5px] tracking-[0.08em] text-emerald-700`}>SAVED TO CASE</span>
+            ) : (
+              <>
+                <button onClick={onConfirm}
+                  className="inline-flex h-[30px] items-center gap-2 rounded-lg border border-blue-300 bg-blue-600/5 px-3 text-[12.5px] font-medium text-blue-700 transition-colors hover:bg-blue-600/15">
+                  <Check className="h-3.5 w-3.5" />Confirm
+                </button>
+                <button onClick={onReject}
+                  className="inline-flex h-[30px] items-center gap-2 rounded-lg border border-slate-300 px-3 text-[12.5px] text-slate-500 transition-colors hover:border-slate-400 hover:text-slate-900">
+                  <X className="h-3.5 w-3.5" />Reject
+                </button>
+              </>
+            )}
             <button onClick={onEdit}
               className="inline-flex h-[30px] items-center gap-2 rounded-lg border border-slate-300 px-3 text-[12.5px] text-slate-500 hover:text-slate-900">
               <Pencil className="h-3.5 w-3.5" />Edit

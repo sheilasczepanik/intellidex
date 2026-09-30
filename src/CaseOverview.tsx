@@ -193,7 +193,7 @@ export default function CaseOverview({
   const verifiedSightings = events.filter((e) => isVerifiedSighting(e));
   const openTips = events.filter((e) => isOpenTip(e)).length + pendingCount;
   const searchZones = useMemo(
-    () => entities.filter((e) => e.type === "place"),
+    () => entities.filter((e) => e.type === "place" || e.type === "location"),
     [entities],
   );
   const locations = searchZones;
@@ -675,6 +675,9 @@ export default function CaseOverview({
                       <div className="min-w-0">
                         <div className="truncate text-[14.5px] font-semibold">{c.name}</div>
                         <div className={`${mono} text-[10.5px] tracking-[0.04em] text-slate-500`}>{c.affiliation}</div>
+                        {linked?.metadata?.origin === "manual" ? (
+                          <div className={`mt-1 inline-flex rounded-md border border-violet-200 bg-violet-50 px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-violet-800`}>Manual Observation</div>
+                        ) : null}
                       </div>
                     </div>
                     <div className="flex gap-1">
@@ -780,6 +783,9 @@ export default function CaseOverview({
                       {status}
                     </span>
                   </div>
+                  {loc.metadata?.origin === "manual" ? (
+                    <div className={`mb-2 inline-flex rounded-md border border-violet-200 bg-violet-50 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-violet-800`}>Manual Observation</div>
+                  ) : null}
                   <div className={`mt-1 inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-slate-600`}>{formatLocationKindLabel(kind)}</div>
                   <div className="mt-1 text-[12px] text-slate-600">Logged {dateLabel}</div>
                 </button>

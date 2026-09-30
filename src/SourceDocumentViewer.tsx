@@ -6,6 +6,7 @@ import { db, type EvidenceRecord } from "./db";
 import { collectQuoteSpans, locateSnippet, splitTextBySpans } from "./lib/quoteAnchors";
 import { cropImageRegion, evidenceImageSrc } from "./lib/imageEvidence";
 import PdfScrollPages from "./PdfScrollPages";
+import { documentText } from "./lib/pdfParser";
 import {
   citationPillLabel,
   inferSourceType,
@@ -89,6 +90,7 @@ export default function SourceDocumentViewer({
   const imageWrapRef = useRef<HTMLDivElement>(null);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const [draftBox, setDraftBox] = useState<SourceBoundingBox | null>(null);
+  const [imgTip, setImgTip] = useState<{ x: number; y: number; title: string } | null>(null);
 
   const focus = citation;
   const quote = (focus?.exactQuote || "").trim();
@@ -170,20 +172,21 @@ export default function SourceDocumentViewer({
     setPdfDoc(null);
   }, []);
 
+  const sourcePlain = documentText(evidence) || evidence?.rawText || "";
   const textSegments = useMemo(() => {
-    if (!evidence?.rawText) return [];
+    if (!sourcePlain) return [];
     const drafts = [
       ...(quote ? [{ id: activeId || "focus", snippet: quote }] : []),
       ...anchors.map((a) => ({ id: a.id, snippet: a.citation.exactQuote })),
     ];
-    return splitTextBySpans(evidence.rawText, collectQuoteSpans(evidence.rawText, drafts));
-  }, [evidence?.rawText, quote, anchorSig, activeId]);
+    return splitTextBySpans(sourcePlain, collectQuoteSpans(sourcePlain, drafts));
+  }, [sourcePlain, quote, anchorSig, activeId]);
 
   useEffect(() => {
-    if ((kind === "text" || kind === "external_intel" || kind === "web_article") && quote && evidence?.rawText) {
-      setMatched(Boolean(locateSnippet(evidence.rawText, quote)));
+    if ((kind === "text" || kind === "external_intel" || kind === "web_article") && quote && sourcePlain) {
+      setMatched(Boolean(locateSnippet(sourcePlain, quote)));
     }
-  }, [kind, quote, evidence?.rawText]);
+  }, [kind, quote, sourcePlain]);
 
   useEffect(() => {
     const el = document.getElementById(`source-hit-${activeId || "focus"}`);
@@ -318,6 +321,16 @@ export default function SourceDocumentViewer({
               ref={imageWrapRef}
               className={`relative inline-block max-w-full ${onImageRegionSelect ? "cursor-crosshair" : ""}`}
               style={{ transform: `scale(${zoom})`, transformOrigin: "top center" }}
+              onMouseMove={(e) => {
+                const wrap = imageWrapRef.current;
+                if (!wrap || !imageBoxes.length) return;
+                const r = wrap.getBoundingClientRect();
+                const x = ((e.clientX - r.left) / Math.max(r.width, 1)) * 100;
+                const y = ((e.clientY - r.top) / Math.max(r.height, 1)) * 100;
+                const hit = [...imageBoxes].reverse().find((b) => x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height);
+                setImgTip(hit?.title ? { x: e.clientX, y: e.clientY, title: hit.title } : null);
+              }}
+              onMouseLeave={() => setImgTip(null)}
               onPointerDown={(e) => {
                 if (!onImageRegionSelect) return;
                 if ((e.target as HTMLElement).closest("[data-bbox-hit]")) return;
@@ -364,6 +377,14 @@ export default function SourceDocumentViewer({
                   style={{ left: `${draftBox.x}%`, top: `${draftBox.y}%`, width: `${draftBox.width}%`, height: `${draftBox.height}%` }}
                 />
               )}
+              {imgTip ? (
+                <div
+                  className="pointer-events-none fixed z-[70] max-w-xs rounded-md border border-amber-200 bg-white px-2 py-1.5 text-[11.5px] text-amber-950 shadow-lg"
+                  style={{ left: imgTip.x + 12, top: imgTip.y + 12 }}
+                >
+                  {imgTip.title}
+                </div>
+              ) : null}
             </div>
           </div>
         ) : (
@@ -383,7 +404,7 @@ export default function SourceDocumentViewer({
                     {part.value}
                   </mark>
                 );
-              }) : (evidence.rawText || "This source has no stored text layer.")}
+              }) : (sourcePlain || "This source has no stored text layer.")}
             </p>
           </div>
         )}

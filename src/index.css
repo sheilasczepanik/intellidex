@@ -77,3 +77,26 @@ body {
   height: 100%;
   width: 100%;
 }
+
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  line-height: 1;
+  transform-origin: 0 0;
+  caret-color: rgb(15 23 42);
+}
+
+.pdf-text-layer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+.pdf-text-layer ::selection {
+  background: rgb(253 230 138 / 0.85);
+  color: transparent;
+}
