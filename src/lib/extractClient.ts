@@ -1,6 +1,12 @@
 import { getLocalApiKey, getLocalProvider } from "./settings";
 import type { ExtractedEvent, ExtractBundle, ExtractEntityHint, ScoutedEntity } from "./extractSchema";
-import { parseExtractGraph, sanitizeExtractText } from "./extractSchema";
+import {
+  EXTRACT_MAX_CHARS,
+  coerceExtractBundle,
+  mergeExtractBundles,
+  sanitizeExtractText,
+} from "./extractSchema";
+import { regexExtractFromText } from "./regexExtract";
 
 export type { ExtractedEvent, ExtractEntityHint, ScoutedEntity };
 
@@ -57,7 +63,7 @@ async function postExtract<T>(body: object, pick: (raw: Record<string, unknown>)
     return pick(json);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
-      throw new Error("Timed out after 180s waiting for Claude. Try Retry (First 3 Pages) or Extract Summary.");
+      throw new Error("Timed out after 180s waiting for extraction. Try a shorter excerpt.");
     }
     if (err instanceof TypeError) {
       throw new Error("Network dropped while contacting the extract API. Retry when you are online.");
@@ -68,16 +74,21 @@ async function postExtract<T>(body: object, pick: (raw: Record<string, unknown>)
   }
 }
 
-function pickEvents(body: Record<string, unknown>): ExtractedEvent[] {
-  if (Array.isArray(body.items) && body.items.length) return body.items as ExtractedEvent[];
-  if (Array.isArray(body.events)) return body.events as ExtractedEvent[];
-  return [];
+function pickBundle(body: Record<string, unknown>): ExtractBundle {
+  return coerceExtractBundle(body);
 }
 
-function pickBundle(body: Record<string, unknown>): ExtractBundle {
-  const events = pickEvents(body);
-  const graph = parseExtractGraph(body);
-  return { events, entities: graph.entities, relationships: graph.relationships };
+async function extractOneTextChunk(input: {
+  text: string;
+  fileName: string;
+  entities: ExtractEntityHint[];
+  summary?: boolean;
+  maxPages?: number;
+  maxChars?: number;
+}): Promise<ExtractBundle> {
+  const cap = Math.min(input.maxChars ?? EXTRACT_MAX_CHARS, EXTRACT_MAX_CHARS);
+  const text = sanitizeExtractText(input.text, 250_000);
+  return postExtract({ type: "text", ...input, text, maxChars: cap }, pickBundle);
 }
 
 export async function extractEventsFromText(input: {
@@ -88,9 +99,11 @@ export async function extractEventsFromText(input: {
   maxPages?: number;
   maxChars?: number;
 }): Promise<ExtractBundle> {
-  const text = sanitizeExtractText(input.text, Math.min(input.maxChars ?? 10_000, 10_000));
-  console.log("[Extraction] Ingested text length:", text.length);
-  const bundle = await postExtract({ type: "text", ...input, text, maxChars: 10_000 }, pickBundle);
+  console.log("[Extraction] Ingested text length:", input.text.length);
+  let bundle = await extractOneTextChunk({ ...input, maxChars: EXTRACT_MAX_CHARS });
+  if (!bundle.events.length && !bundle.entities.length) {
+    bundle = mergeExtractBundles([bundle, regexExtractFromText(input.text, input.fileName)]);
+  }
   console.log("[Extraction] Parsed items count:", bundle.events.length);
   return bundle;
 }

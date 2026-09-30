@@ -1,6 +1,6 @@
 import type { ComponentType } from "react";
 import { getCategoryColor, resolveSemanticCategory, type CategoryColorInput } from "./utils/categoryColors";
-import { formatRoleLabel, roleDisplayClass } from "./utils/roleBadge";
+import { formatRoleLabel, roleDisplayClass, entityAvatarClass, entityInitials } from "./utils/roleBadge";
 import MediaProvenanceBadge from "./MediaProvenanceBadge";
 
 const mono = "font-mono";
@@ -31,7 +31,7 @@ type Props = {
 
 export default function EntityDossier({ open, selected, lanes, onToggle, onSelect, onPromoteEntity, ToggleIcon }: Props) {
   return (
-    <aside className={`flex shrink-0 flex-col overflow-hidden border-r border-slate-200 bg-slate-50/60 transition-[width] duration-200 ${open ? "w-[268px]" : "w-[58px]"}`}>
+    <aside className={`flex shrink-0 flex-col overflow-hidden border-slate-200 bg-slate-50/60 transition-[width] duration-200 max-lg:absolute max-lg:z-20 max-lg:h-full ${open ? "w-[min(268px,86vw)] border-r" : "w-0 border-0 max-lg:pointer-events-none lg:w-[58px] lg:border-r"}`}>
       <div className="flex h-12 shrink-0 items-center justify-between gap-2.5 border-b border-slate-200 pl-[18px] pr-3.5">
         {open && (
           <span className={`whitespace-nowrap ${mono} text-[11px] tracking-[0.12em] text-slate-500`}>ENTITY DOSSIER</span>
@@ -50,7 +50,9 @@ export default function EntityDossier({ open, selected, lanes, onToggle, onSelec
               <div key={def.id} onClick={() => onSelect(on ? null : def.id)}
                 className={`cursor-pointer rounded-[10px] border p-3.5 transition-colors ${on ? "border-slate-300 bg-white" : "border-transparent hover:bg-slate-100/70"}`}>
                 <div className="mb-2 flex items-center gap-2.5">
-                  <span className={`h-2 w-2 shrink-0 rounded-[2px] ${getCategoryColor(semantic, "dot")}`} />
+                  <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${entityAvatarClass(def.role, getCategoryColor(semantic, "badge"), def.note)}`}>
+                    {entityInitials(def.name)}
+                  </span>
                   <span className="min-w-0 truncate text-[13.5px] font-medium">{def.name}</span>
                 </div>
                 <div className={`mb-1.5 truncate whitespace-nowrap ${mono} text-[10.5px] tracking-[0.06em] text-slate-500`}>{def.role ? formatRoleLabel(def.role) : "ENTITY"}</div>

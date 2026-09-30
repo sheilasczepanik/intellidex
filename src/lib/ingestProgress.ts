@@ -11,12 +11,10 @@ export type IngestJob = {
 
 export function ingestStageLabel(job: IngestJob) {
   if (job.stage === "pdf" || job.stage === "render") {
-    const start = 1;
-    const end = Math.max(job.currentPage, job.totalPages, 1);
-    return `Rendering pages ${start}-${end}...`;
+    return "Extracting text from document...";
   }
-  if (job.stage === "claude") return "Analyzing evidence with Claude...";
-  if (job.stage === "events") return "Extracting candidate events...";
+  if (job.stage === "claude") return "Extracting people, locations, dates, and exhibits...";
+  if (job.stage === "events") return "Generating timeline events...";
   return "Done";
 }
 

@@ -1,7 +1,7 @@
 const KEY = "dossier.apiKey";
 const PROVIDER = "dossier.provider";
 
-export type LlmProvider = "anthropic" | "openai";
+export type LlmProvider = "gemini" | "openai" | "anthropic";
 
 export function getLocalApiKey() {
   return localStorage.getItem(KEY) ?? "";
@@ -14,7 +14,9 @@ export function setLocalApiKey(value: string) {
 }
 
 export function getLocalProvider(): LlmProvider {
-  return localStorage.getItem(PROVIDER) === "openai" ? "openai" : "anthropic";
+  const stored = localStorage.getItem(PROVIDER);
+  if (stored === "gemini" || stored === "openai" || stored === "anthropic") return stored;
+  return "openai";
 }
 
 export function setLocalProvider(value: LlmProvider) {

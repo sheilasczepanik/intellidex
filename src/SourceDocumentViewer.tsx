@@ -343,7 +343,7 @@ export default function SourceDocumentViewer({
           </div>
         )}
         {!evidence && (kind === "external_intel" || citation?.sourceType === "external_intel") ? (
-          <div className="mx-auto max-w-[62ch] px-8 py-8">
+          <div className="mx-auto max-w-[62ch] px-4 py-6 sm:px-8 sm:py-8">
             <h2 className="mb-2 text-[22px] font-semibold tracking-tight">{title}</h2>
             <blockquote className="border-l-2 border-amber-300 pl-3 text-[16px] leading-[1.8] text-slate-700">
               “{citation?.exactQuote || "No verbatim quote stored."}”
@@ -390,7 +390,7 @@ export default function SourceDocumentViewer({
             </div>
           </div>
         ) : (
-          <div className="mx-auto max-w-[62ch] px-8 py-8" style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }}>
+          <div className="mx-auto max-w-[62ch] px-4 py-6 sm:px-8 sm:py-8" style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }}>
             <h2 className="mb-4 text-[22px] font-semibold tracking-tight">{title}</h2>
             <p className="whitespace-pre-wrap text-[16px] leading-[1.8] text-slate-700">
               {textSegments.length ? textSegments.map((part) => {

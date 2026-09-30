@@ -4,14 +4,16 @@ import {
   addEvidence, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent,
   db, DEFAULT_OPERATOR, deleteEntity, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft,
   OPERATOR_ID, resetLocalVault, saveOperatorProfile, setCaseArchived, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
-  type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord, type EntityRelationship,
+  type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
 import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
-import { renderPdfPagesToJpeg } from "./lib/pdfHelpers";
+import { extractPdfText, renderPdfPagesToJpeg } from "./lib/pdfHelpers";
+import { regexExtractFromText } from "./lib/regexExtract";
+import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
 import { scrapeArticleFromUrl } from "./lib/scrapeClient";
 import { generateAndDownloadDossier, type DossierExportOptions } from "./lib/DossierPdfGenerator";
-import EntityGraph from "./EntityGraph";
+import WorkingTheory from "./WorkingTheory";
 import { applyExtractedGraph } from "./lib/applyExtractGraph";
 import CaseOverview from "./CaseOverview";
 import ArchiveCaseModal from "./ArchiveCaseModal";
@@ -44,7 +46,15 @@ import { isImageFile } from "./lib/imageEvidence";
 import { inferSourceType, type SourceCitation } from "./types";
 import { isSecondaryEvidence, isUncorroboratedEntity } from "./lib/sourceTier";
 import MediaProvenanceBadge from "./MediaProvenanceBadge";
-import { CLAUDE_MAX_CHARS, CLAUDE_MAX_PAGES, CLAUDE_RETRY_PAGES, windowSourceText } from "./lib/extractSchema";
+import {
+  CLAUDE_MAX_CHARS,
+  CLAUDE_MAX_PAGES,
+  CLAUDE_RETRY_PAGES,
+  mergeExtractBundles,
+  prioritizeLegalFacts,
+  type ExtractBundle,
+  type ExtractedEvent,
+} from "./lib/extractSchema";
 import { collectQuoteSpans, narrativeSortKey, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
 import { joinLocalDateTime, localDayKey, namesLooselyMatch, splitLocalDateTime } from "./lib/eventTime";
@@ -56,11 +66,13 @@ import {
 import { getCategoryColor, resolveSemanticCategory } from "./utils/categoryColors";
 import { formatRoleLabel, normalizePersonRole, PERSON_ROLE_VALUES, roleDisplayClass } from "./utils/roleBadge";
 import type { SearchHit } from "./lib/globalSearch";
+import { formatAlertLabel, ALERT_LEVELS } from "./lib/missingPerson";
+import type { SubjectProfile } from "./db/schema";
 import {
   ArrowRight, Archive, ArchiveRestore, Check, CheckCheck, Clock, FileDown,
-  FileText, FolderPlus, GitCommitHorizontal, GitFork, Inbox, KeyRound, LayoutDashboard,
-  LayoutGrid, Lock, MapPin, MoreHorizontal, PanelLeftClose,
-  PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, Trash2, Truck,
+  FileText, FolderPlus, GitCommitHorizontal, Inbox, KeyRound, LayoutDashboard,
+  LayoutGrid, Lock, MapPin, Menu, MoreHorizontal, PanelLeftClose,
+  PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, StickyNote, Trash2, Truck,
   TriangleAlert, User, Users, UserRound, X, Box,
 } from "lucide-react";
 
@@ -68,13 +80,13 @@ import {
 /* types                                                               */
 /* ------------------------------------------------------------------ */
 
-export type Screen = "Hub" | "Setup" | "Overview" | "Intake" | "Verify" | "Timeline" | "Graph" | "Profile" | "Preferences";
+export type Screen = "Hub" | "Setup" | "Overview" | "Intake" | "Verify" | "Timeline" | "WorkingTheory" | "Profile" | "Preferences";
 export type Tone = "active" | "review" | "cold" | "ok" | "fail";
 export type EntityKind = "People" | "Places" | "Vehicles" | "Phones" | "Digital" | "Exhibits";
 
 function parseAppPath(pathname: string): { screen: Screen; caseId: string | null } {
   const path = pathname.replace(/\/+$/, "") || "/";
-  const caseMatch = path.match(/^\/cases\/([^/]+)(?:\/(overview|intake|verify|timeline|graph))?$/i);
+  const caseMatch = path.match(/^\/cases\/([^/]+)(?:\/(overview|intake|verify|timeline|graph|working-theory))?$/i);
   if (caseMatch) {
     const leaf = (caseMatch[2] || "overview").toLowerCase();
     const screens: Record<string, Screen> = {
@@ -82,7 +94,8 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
       intake: "Intake",
       verify: "Verify",
       timeline: "Timeline",
-      graph: "Graph",
+      "working-theory": "WorkingTheory",
+      graph: "Overview",
     };
     return { screen: screens[leaf] ?? "Overview", caseId: decodeURIComponent(caseMatch[1]) };
   }
@@ -92,7 +105,8 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
   if (path === "/intake") return { screen: "Intake", caseId: null };
   if (path === "/verify") return { screen: "Verify", caseId: null };
   if (path === "/timeline") return { screen: "Timeline", caseId: null };
-  if (path === "/graph") return { screen: "Graph", caseId: null };
+  if (path === "/working-theory") return { screen: "WorkingTheory", caseId: null };
+  if (path === "/graph") return { screen: "Overview", caseId: null };
   if (path.startsWith("/settings/profile")) return { screen: "Profile", caseId: null };
   if (path.startsWith("/settings/workspace")) return { screen: "Preferences", caseId: null };
   return { screen: "Hub", caseId: null };
@@ -103,18 +117,19 @@ function pathFromScreen(screen: Screen, caseId?: string | null) {
   if (screen === "Profile") return "/settings/profile";
   if (screen === "Preferences") return "/settings/workspace";
   if (screen === "Setup") return "/setup";
-  if (caseId) return `/cases/${encodeURIComponent(caseId)}/${screen.toLowerCase()}`;
-  return `/${screen.toLowerCase()}`;
+  const leaf = screen === "WorkingTheory" ? "working-theory" : screen.toLowerCase();
+  if (caseId) return `/cases/${encodeURIComponent(caseId)}/${leaf}`;
+  return `/${leaf}`;
 }
 
-const CASE_WORKSPACE: Screen[] = ["Overview", "Intake", "Verify", "Timeline", "Graph"];
+const CASE_WORKSPACE: Screen[] = ["Overview", "Intake", "Verify", "Timeline", "WorkingTheory"];
 
 function NoActiveCase({ onHub }: { onHub: () => void }) {
   return (
     <div className="flex min-h-[calc(100vh-94px)] flex-1 flex-col items-center justify-center px-8 py-24 text-center">
       <h2 className="text-[22px] font-semibold tracking-tight text-slate-900">No Active Case Selected</h2>
       <p className="mt-2 max-w-md text-[14px] leading-relaxed text-slate-500">
-        Timeline and Relationship Graph data are scoped to individual cases.
+        Timeline data is scoped to individual cases.
       </p>
       <button
         type="button"
@@ -213,7 +228,7 @@ export interface WizardFormState {
 /* mock data                                                           */
 /* ------------------------------------------------------------------ */
 
-const CASE_STATUSES: CaseStatus[] = ["ACTIVE", "REVIEW", "COLD", "FIELD"];
+const CASE_STATUSES: CaseStatus[] = [...ALERT_LEVELS];
 
 const SCHEMA: Record<EntityKind, KindSchema> = {
   People: {
@@ -228,7 +243,7 @@ const SCHEMA: Record<EntityKind, KindSchema> = {
   },
   Places: {
     noun: "place",
-    statuses: ["PRIMARY", "REGISTERED", "UNVERIFIED"],
+    statuses: ["last_seen", "item_recovered", "cell_ping", "search_grid"],
     fields: [
       { k: "address", label: "Address", ph: "Dock road, east quay" },
       { k: "coords", label: "Coordinates", ph: "51.9244° N, 4.4777° E", half: true },
@@ -373,10 +388,14 @@ export default function DesktopApp() {
   const [draftJurisdiction, setDraftJurisdiction] = useState("");
   const [draftIncidentStart, setDraftIncidentStart] = useState("");
   const [draftIncidentEnd, setDraftIncidentEnd] = useState("");
-  const [draftStatus, setDraftStatus] = useState<CaseStatus>("ACTIVE");
+  const [draftStatus, setDraftStatus] = useState<CaseStatus>("ACTIVE_MISSING");
+  const [draftFileId, setDraftFileId] = useState("");
+  const [draftLksAt, setDraftLksAt] = useState("");
+  const [draftProfile, setDraftProfile] = useState<SubjectProfile>({});
   const [savingCase, setSavingCase] = useState(false);
   const [hubTab, setHubTab] = useState<"active" | "archived">("active");
   const [hubCardMenuId, setHubCardMenuId] = useState<string | null>(null);
+  const [navOpen, setNavOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [archivePrompt, setArchivePrompt] = useState<{ id: string; title: string } | null>(null);
   const [activeCaseId, setActiveCaseId] = useState<string | null>(boot.caseId ?? "CASE-0038");
@@ -394,10 +413,6 @@ export default function DesktopApp() {
 
   const caseEntities = useLiveQuery(
     () => (resolvedCaseId ? db.entities.where("caseId").equals(resolvedCaseId).toArray() : Promise.resolve([] as EntityRecord[])),
-    [resolvedCaseId],
-  ) ?? [];
-  const caseRelationships = useLiveQuery(
-    () => (resolvedCaseId ? db.relationships.where("caseId").equals(resolvedCaseId).toArray() : Promise.resolve([] as EntityRelationship[])),
     [resolvedCaseId],
   ) ?? [];
   const caseEvents = useLiveQuery(
@@ -426,7 +441,9 @@ export default function DesktopApp() {
   const sourcePaneRef = useRef<HTMLDivElement>(null);
   const queuePaneRef = useRef<HTMLDivElement>(null);
   const queueSyncLock = useRef(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches,
+  );
   const [selected, setSelected] = useState<string | null>(null);
   const [popover, setPopover] = useState(false);
   const [popoverAnchor, setPopoverAnchor] = useState<{ left: number; top: number } | null>(null);
@@ -453,12 +470,15 @@ export default function DesktopApp() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [extractError, setExtractError] = useState<string | null>(null);
   const [extractNotice, setExtractNotice] = useState<{ fileName: string; entityCount: number } | null>(null);
+  const [extractPreview, setExtractPreview] = useState<ExtractPreview | null>(null);
+  const [selectedExtractNames, setSelectedExtractNames] = useState<Set<string>>(new Set());
+  const [drawerStagedIds, setDrawerStagedIds] = useState<string[]>([]);
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
   const [editingDraftId, setEditingDraftId] = useState<string | null>(null);
   const [extractTip, setExtractTip] = useState<{ text: string; x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
-  const [providerDraft, setProviderDraft] = useState<LlmProvider>("anthropic");
+  const [providerDraft, setProviderDraft] = useState<LlmProvider>(getLocalProvider);
   const [viewDay, setViewDay] = useState("");
   const [viewAllDates, setViewAllDates] = useState(false);
   const [timeWindow, setTimeWindow] = useState<TimeWindow>("full");
@@ -510,10 +530,20 @@ export default function DesktopApp() {
     if (caseId === "") setActiveCaseId("");
     setScreen(next);
     setOperatorMenu(false);
+    setNavOpen(false);
     const id = caseId || (next === "Hub" || next === "Setup" || next === "Profile" || next === "Preferences" ? null : resolvedCaseId);
     const path = pathFromScreen(next, id);
     if (window.location.pathname !== path) window.history.pushState({}, "", path);
   };
+
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setNavOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navOpen]);
 
   useEffect(() => {
     if (screen === "Hub" || screen === "Setup" || screen === "Profile" || screen === "Preferences") {
@@ -553,12 +583,12 @@ export default function DesktopApp() {
   const GLOBAL_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: "Hub", icon: LayoutGrid },
   ];
-  const CASE_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }>; badge?: number }[] = [
+  const CASE_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }>; badge?: number; label?: string }[] = [
     { id: "Overview", icon: LayoutDashboard },
     { id: "Intake", icon: Inbox, badge: caseEvidence.length || undefined },
     { id: "Verify", icon: ShieldCheck, badge: pendingDrafts.length || undefined },
     { id: "Timeline", icon: GitCommitHorizontal },
-    { id: "Graph", icon: GitFork, badge: (screen !== "Hub" && caseRelationships.length) || undefined },
+    { id: "WorkingTheory", icon: StickyNote, label: "Working Theory" },
   ];
 
   const ensureActiveCase = async () => {
@@ -571,6 +601,11 @@ export default function DesktopApp() {
       jurisdiction: draftJurisdiction,
       incidentStart: draftIncidentStart,
       incidentEnd: draftIncidentEnd,
+      subjectName: draftTitle,
+      fileIdentifier: draftFileId,
+      lksAt: draftLksAt,
+      lksLocation: draftJurisdiction,
+      subjectProfile: draftProfile,
     });
     setActiveCaseId(row.id);
     return row.id;
@@ -997,7 +1032,10 @@ export default function DesktopApp() {
     setDraftJurisdiction("");
     setDraftIncidentStart("");
     setDraftIncidentEnd("");
-    setDraftStatus("ACTIVE");
+    setDraftFileId("");
+    setDraftLksAt("");
+    setDraftProfile({});
+    setDraftStatus("ACTIVE_MISSING");
     goTo("Setup");
   };
 
@@ -1005,7 +1043,7 @@ export default function DesktopApp() {
     setActiveCaseId(id);
     setDraftTitle(title);
     setDraftSummary(summary);
-    setDraftStatus((CASE_STATUSES.includes(status as CaseStatus) ? status : "ACTIVE") as CaseStatus);
+    setDraftStatus((CASE_STATUSES.includes(status as CaseStatus) ? status : "ACTIVE_MISSING") as CaseStatus);
     goTo("Overview", id);
   };
 
@@ -1036,8 +1074,13 @@ export default function DesktopApp() {
         summary: draftSummary,
         status: draftStatus,
         jurisdiction: draftJurisdiction,
-        incidentStart: draftIncidentStart,
+        incidentStart: draftLksAt ? draftLksAt.slice(0, 10) : draftIncidentStart,
         incidentEnd: draftIncidentEnd,
+        subjectName: draftTitle,
+        fileIdentifier: draftFileId,
+        lksAt: draftLksAt,
+        lksLocation: draftJurisdiction,
+        subjectProfile: draftProfile,
       });
       setActiveCaseId(row.id);
       goTo("Overview", row.id);
@@ -1205,9 +1248,16 @@ export default function DesktopApp() {
     }
   };
 
+  const pushDrawerStaged = (ids: string[]) => {
+    const clean = ids.filter(Boolean);
+    if (!clean.length) return;
+    setDrawerStagedIds((prev) => [...clean, ...prev.filter((id) => !clean.includes(id))]);
+  };
+
   const ingestFiles = async (files: FileList | File[], opts?: { extract?: boolean; background?: boolean }) => {
     const extract = opts?.extract ?? true;
     const background = opts?.background ?? (screen !== "Intake");
+    const ids: string[] = [];
     for (const file of [...files]) {
       let rowId: string | null = null;
       try {
@@ -1218,6 +1268,7 @@ export default function DesktopApp() {
         const row = await stageEvidenceFile(file, (payload) => ingestText(payload));
         if (!row) continue;
         rowId = row.id;
+        ids.push(row.id);
         if (extract) {
           extractChain.current = extractChain.current.then(() =>
             runExtract(rowId!, { stayOnWorkspace: background }),
@@ -1262,9 +1313,15 @@ export default function DesktopApp() {
         }
       }
     }
+    return ids;
   };
 
-  const ingestWebArticle = async (url: string, onProgress: (stage: "scraping" | "staging") => void) => {
+  const ingestWebArticle = async (
+    url: string,
+    onProgress: (stage: "scraping" | "staging") => void,
+    opts?: { extract?: boolean },
+  ) => {
+    const extract = opts?.extract ?? true;
     onProgress("scraping");
     const article = await scrapeArticleFromUrl(url);
     onProgress("staging");
@@ -1285,12 +1342,13 @@ export default function DesktopApp() {
       publishedDate: article.publishedDate ?? undefined,
       wordCount: article.wordCount,
     });
-    if (row?.id) {
+    if (row?.id && extract) {
       extractChain.current = extractChain.current.then(() =>
         runExtract(row.id, { stayOnWorkspace: screen !== "Intake" }),
       );
       if (screen === "Intake") await extractChain.current;
     }
+    return row;
   };
 
   const runOfficialExport = async (opts: DossierExportOptions) => {
@@ -1327,8 +1385,10 @@ export default function DesktopApp() {
     maxChars?: number;
     summary?: boolean;
     stayOnWorkspace?: boolean;
+    deferApply?: boolean;
   }) => {
     const stayOnWorkspace = opts?.stayOnWorkspace ?? screen !== "Intake";
+    const deferApply = opts?.deferApply ?? false;
     const caseId = resolvedCaseId ?? await ensureActiveCase();
     if (!caseId) {
       setExtractError("Create or open a case first.");
@@ -1341,8 +1401,26 @@ export default function DesktopApp() {
       setExtractError("Add or paste source text before extracting.");
       return;
     }
+    const isPdf = (ev.fileType === "pdf" || ev.mediaType === "application/pdf") && Boolean(ev.fileBase64);
     const canVision = Boolean(ev.fileBase64 || ev.imageBase64);
-    if (!canVision && (!ev.rawText.trim() || isUnreadableScan(ev.rawText))) {
+    if (!canVision && !isPdf && (!ev.rawText.trim() || isUnreadableScan(ev.rawText))) {
+      const fallback = regexExtractFromText(ev.rawText || ev.fileName, ev.fileName);
+      if (deferApply && (fallback.events.length || fallback.entities.length)) {
+        pushDrawerStaged([ev.id]);
+        setExtractPreview({
+          evidenceId: ev.id,
+          fileName: ev.fileName,
+          entities: fallback.entities,
+          events: fallback.events,
+          relationships: fallback.relationships,
+          usedFallback: true,
+          bundle: fallback,
+        });
+        setSelectedExtractNames(new Set(fallback.entities.map((ent) => ent.name)));
+        await db.evidence.update(ev.id, { status: "flagged", lastError: "" });
+        setExtractError(null);
+        return;
+      }
       const message = UNREADABLE_SCAN_ALERT;
       await db.evidence.update(ev.id, { status: "failed", lastError: message, textClarity: "low" });
       setExtractError(message);
@@ -1354,67 +1432,190 @@ export default function DesktopApp() {
     setExtractError(null);
     await db.evidence.update(ev.id, { status: "ingesting", lastError: "" });
     setActiveEvidenceId(ev.id);
+    pushDrawerStaged([ev.id]);
     setIngestJob({
       evidenceId: ev.id,
-      stage: (ev.fileType === "pdf" || ev.mediaType === "application/pdf") && ev.fileBase64 ? "render" : "claude",
+      stage: isPdf ? "pdf" : "claude",
       currentPage: 0,
       totalPages: Math.min(opts?.maxPages ?? CLAUDE_RETRY_PAGES, ev.pageCount || CLAUDE_RETRY_PAGES),
       startedAt,
-      llmStartedAt: (ev.fileType === "pdf" || ev.mediaType === "application/pdf") && ev.fileBase64 ? null : Date.now(),
+      llmStartedAt: isPdf ? null : Date.now(),
     });
+    let sourceText = ev.rawText || "";
     try {
       const hints = caseEntities.map((e) => ({ id: e.id, name: e.name, type: e.type, role: e.role }));
-      const isPdf = (ev.fileType === "pdf" || ev.mediaType === "application/pdf") && Boolean(ev.fileBase64);
       const pageCap = opts?.maxPages ?? CLAUDE_RETRY_PAGES;
-      const bundle = isPdf && ev.fileBase64
-        ? await (async () => {
-            const rendered = await renderPdfPagesToJpeg(ev.fileBase64!, {
-              maxPages: pageCap,
-              scale: 1.5,
-              quality: 0.8,
-              onProgress: (current, total) => {
-                setIngestJob((job) => (job && job.evidenceId === ev.id
-                  ? { ...job, stage: "render", currentPage: current, totalPages: total }
-                  : job));
-              },
+      if (isPdf && ev.fileBase64) {
+        try {
+          const extracted = await extractPdfText(ev.fileBase64, {
+            onProgress: (current, total) => {
+              setIngestJob((job) => (job && job.evidenceId === ev.id
+                ? { ...job, stage: "pdf", currentPage: current, totalPages: total }
+                : job));
+            },
+          });
+          if (extracted.pageCount) {
+            await db.evidence.update(ev.id, {
+              pageCount: extracted.pageCount,
+              ...(extracted.text.trim() ? { rawText: extracted.text } : {}),
             });
-            if (rendered.pageCount && rendered.pageCount !== ev.pageCount) {
-              await db.evidence.update(ev.id, { pageCount: rendered.pageCount });
-            }
+          }
+          if (extracted.text.trim()) sourceText = extracted.text;
+        } catch (err) {
+          console.error("[Extraction] PDF text extract failed:", err);
+        }
+      }
+
+      const textUsable = Boolean(sourceText.trim()) && !isUnreadableScan(sourceText);
+      const windowed = Boolean(opts?.summary || opts?.maxPages);
+      let bundle: ExtractBundle;
+      let usedFallback = false;
+
+      if (isPdf && ev.fileBase64 && !textUsable) {
+        const rendered = await renderPdfPagesToJpeg(ev.fileBase64, {
+          maxPages: pageCap,
+          scale: 1.5,
+          quality: 0.8,
+          onProgress: (current, total) => {
             setIngestJob((job) => (job && job.evidenceId === ev.id
-              ? { ...job, stage: "claude", llmStartedAt: Date.now(), currentPage: rendered.pages.length, totalPages: rendered.pages.length }
+              ? { ...job, stage: "render", currentPage: current, totalPages: total }
               : job));
-            return extractEventsFromRenderedPages({
-              fileName: ev.fileName,
-              pages: rendered.pages,
-              entities: hints,
-            });
-          })()
-        : (ev.imageBase64 || (ev.fileBase64 && (ev.mediaType || "").startsWith("image/")))
-          ? await extractEventsFromImage({
-              imageBase64: ev.imageBase64,
-              fileBase64: ev.fileBase64 || ev.imageBase64,
-              mediaType: ev.mediaType || "image/jpeg",
-              fileName: ev.fileName,
-              entities: hints,
-            })
-          : await extractEventsFromText({
-        text: windowSourceText(ev.rawText, {
+          },
+        });
+        if (rendered.pageCount && rendered.pageCount !== ev.pageCount) {
+          await db.evidence.update(ev.id, { pageCount: rendered.pageCount });
+        }
+        setIngestJob((job) => (job && job.evidenceId === ev.id
+          ? { ...job, stage: "claude", llmStartedAt: Date.now(), currentPage: rendered.pages.length, totalPages: rendered.pages.length }
+          : job));
+        bundle = await extractEventsFromRenderedPages({
+          fileName: ev.fileName,
+          pages: rendered.pages,
+          entities: hints,
+        });
+      } else if (ev.imageBase64 || (ev.fileBase64 && (ev.mediaType || "").startsWith("image/"))) {
+        setIngestJob((job) => (job && job.evidenceId === ev.id
+          ? { ...job, stage: "claude", llmStartedAt: Date.now() }
+          : job));
+        bundle = await extractEventsFromImage({
+          imageBase64: ev.imageBase64,
+          fileBase64: ev.fileBase64 || ev.imageBase64,
+          mediaType: ev.mediaType || "image/jpeg",
+          fileName: ev.fileName,
+          entities: hints,
+        });
+      } else {
+        setIngestJob((job) => (job && job.evidenceId === ev.id
+          ? { ...job, stage: "claude", llmStartedAt: Date.now() }
+          : job));
+        bundle = await extractEventsFromText({
+          text: windowed
+            ? prioritizeLegalFacts(sourceText, opts?.maxChars ?? CLAUDE_MAX_CHARS)
+            : sourceText,
+          fileName: ev.fileName,
+          entities: hints,
+          summary: opts?.summary,
           maxPages: opts?.maxPages ?? CLAUDE_MAX_PAGES,
           maxChars: opts?.maxChars ?? CLAUDE_MAX_CHARS,
-        }),
-        fileName: ev.fileName,
-        entities: hints,
-        summary: opts?.summary,
-        maxPages: opts?.maxPages ?? CLAUDE_MAX_PAGES,
-        maxChars: opts?.maxChars ?? CLAUDE_MAX_CHARS,
-      });
+        });
+      }
+
+      if (!bundle.events.length) {
+        const fallback = regexExtractFromText(sourceText || ev.rawText, ev.fileName);
+        bundle = mergeExtractBundles([bundle, fallback]);
+        usedFallback = true;
+      }
+
       const events = bundle.events;
+      const clarity = ev.textClarity ?? assessTextClarity(sourceText || ev.rawText, ev.pageCount ?? 1);
+      setIngestJob((job) => (job && job.evidenceId === ev.id ? { ...job, stage: "events" } : job));
+
+      if (deferApply) {
+        await applyExtractedGraph({
+          caseId,
+          evidenceId: ev.id,
+          entities: bundle.entities,
+          relationships: bundle.relationships,
+          bundle,
+        });
+        await ensureContactsForPeople(caseId);
+        const roster = await db.entities.where("caseId").equals(caseId).toArray();
+        const matchEntity = (id: string | null, name: string) => {
+          if (id && roster.some((e) => e.id === id)) return id;
+          const needle = name.trim().toLowerCase();
+          if (!needle) return "";
+          return roster.find((e) => e.name.trim().toLowerCase() === needle)?.id
+            ?? roster.find((e) => namesLooselyMatch(e.name, name))?.id
+            ?? "";
+        };
+        if (events.length) {
+          await addVerifyDrafts(events.map((event) => {
+            const entityId = matchEntity(event.entityId, event.entityName);
+            return {
+              caseId,
+              evidenceId: ev.id,
+              timestamp: parseEventTime(event.timestamp, event.timestampLabel, {
+                extraText: `${event.details} ${event.rawQuote} ${event.citation} ${sourceText.slice(0, 2500)}`,
+              }),
+              timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
+              entityId,
+              entityName: event.entityName,
+              suggestNewEntity: !entityId,
+              newEntityType: event.newEntityType ?? event.entityType ?? "",
+              category: event.category,
+              title: event.title,
+              snippet: event.rawQuote || event.snippet,
+              details: event.details,
+              confidence: event.confidence,
+              citation: event.citation,
+              sourceCitation: {
+                sourceId: ev.id,
+                sourceName: ev.fileName,
+                sourceType: inferSourceType(ev),
+                pageNumber: event.pageNumber,
+                exactQuote: event.exactQuote || event.rawQuote || event.snippet,
+                boundingBox: event.boundingBox,
+                sourceUrl: ev.sourceUrl,
+              },
+            };
+          }), { replacePendingForEvidence: ev.id });
+          const drafts = await db.verifyDrafts.where("evidenceId").equals(ev.id).toArray();
+          for (const draft of drafts.filter((d) => d.status === "pending")) {
+            await confirmVerifyDraft(draft.id);
+          }
+        }
+        setExtractPreview({
+          evidenceId: ev.id,
+          fileName: ev.fileName,
+          entities: bundle.entities,
+          events,
+          relationships: bundle.relationships,
+          usedFallback,
+          autoApplied: true,
+          bundle,
+        });
+        setSelectedExtractNames(new Set(bundle.entities.map((ent) => ent.name)));
+        setExtractNotice({ fileName: ev.fileName, entityCount: bundle.entities.length });
+        window.setTimeout(() => {
+          setExtractNotice((curr) => (curr?.fileName === ev.fileName ? null : curr));
+        }, 7000);
+        await db.evidence.update(ev.id, {
+          status: "indexed",
+          lastError: "",
+          textClarity: clarity,
+        });
+        setIngestJob((job) => (job && job.evidenceId === ev.id ? { ...job, stage: "done" } : job));
+        await new Promise((resolve) => window.setTimeout(resolve, 350));
+        setIngestJob(null);
+        return;
+      }
+
       await applyExtractedGraph({
         caseId,
         evidenceId: ev.id,
         entities: bundle.entities,
         relationships: bundle.relationships,
+        bundle,
       });
       await ensureContactsForPeople(caseId);
       const roster = await db.entities.where("caseId").equals(caseId).toArray();
@@ -1422,16 +1623,12 @@ export default function DesktopApp() {
       window.setTimeout(() => {
         setExtractNotice((curr) => (curr?.fileName === ev.fileName ? null : curr));
       }, 7000);
-      setIngestJob((job) => (job && job.evidenceId === ev.id ? { ...job, stage: "events" } : job));
-      const clarity = ev.textClarity ?? assessTextClarity(ev.rawText, ev.pageCount ?? 1);
       if (!events.length) {
-        const message = "Claude returned no events. Try a shorter excerpt or paste narrative text.";
         await db.evidence.update(ev.id, {
           status: bundle.entities.length ? "indexed" : "flagged",
-          lastError: bundle.entities.length ? "" : message,
+          lastError: "",
           textClarity: clarity,
         });
-        if (!stayOnWorkspace) setExtractError(message);
         setIngestJob(null);
         return;
       }
@@ -1453,7 +1650,7 @@ export default function DesktopApp() {
           caseId,
           evidenceId: ev.id,
           timestamp: parseEventTime(event.timestamp, event.timestampLabel, {
-            extraText: `${event.details} ${event.rawQuote} ${event.citation} ${ev.rawText.slice(0, 2500)}`,
+            extraText: `${event.details} ${event.rawQuote} ${event.citation} ${sourceText.slice(0, 2500)}`,
           }),
           timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
           entityId,
@@ -1483,12 +1680,167 @@ export default function DesktopApp() {
       if (!stayOnWorkspace) goTo("Verify", caseId);
       setIngestJob(null);
     } catch (err) {
+      const fallback = regexExtractFromText(sourceText || ev.rawText, ev.fileName);
+      if (fallback.events.length || fallback.entities.length) {
+        if (deferApply) {
+          await applyExtractedGraph({
+            caseId,
+            evidenceId: ev.id,
+            entities: fallback.entities,
+            relationships: fallback.relationships,
+            bundle: fallback,
+          });
+          await ensureContactsForPeople(caseId);
+          setExtractPreview({
+            evidenceId: ev.id,
+            fileName: ev.fileName,
+            entities: fallback.entities,
+            events: fallback.events,
+            relationships: fallback.relationships,
+            usedFallback: true,
+            autoApplied: true,
+            bundle: fallback,
+          });
+          setSelectedExtractNames(new Set(fallback.entities.map((ent) => ent.name)));
+          setExtractNotice({ fileName: ev.fileName, entityCount: fallback.entities.length });
+          await db.evidence.update(ev.id, { status: "indexed", lastError: "" });
+          setExtractError(null);
+          setIngestJob(null);
+          return;
+        }
+      }
       const message = err instanceof Error ? err.message : "Extraction failed.";
       await db.evidence.update(ev.id, { status: "failed", lastError: message });
-      setExtractError(message);
+      setExtractError(deferApply ? null : message);
       setIngestJob(null);
     } finally {
       setExtracting(false);
+    }
+  };
+
+  const acceptExtractRoster = async () => {
+    if (!extractPreview) return;
+    if (extractPreview.autoApplied) {
+      setExtractPreview(null);
+      setSelectedExtractNames(new Set());
+      return;
+    }
+    const caseId = resolvedCaseId ?? await ensureActiveCase();
+    if (!caseId) return;
+    const ev = await db.evidence.get(extractPreview.evidenceId);
+    if (!ev) return;
+    const names = selectedExtractNames;
+    const entities = extractPreview.entities.filter((ent) => names.has(ent.name));
+    const relationships = (extractPreview.relationships ?? []).filter(
+      (rel) => names.has(rel.sourceEntity) && names.has(rel.targetEntity),
+    );
+    await applyExtractedGraph({
+      caseId,
+      evidenceId: ev.id,
+      entities,
+      relationships,
+      bundle: extractPreview.bundle
+        ? { ...extractPreview.bundle, entities, relationships }
+        : { events: extractPreview.events, entities, relationships },
+    });
+    await ensureContactsForPeople(caseId);
+    const roster = await db.entities.where("caseId").equals(caseId).toArray();
+    const matchEntity = (id: string | null, name: string) => {
+      if (id && roster.some((e) => e.id === id)) return id;
+      const needle = name.trim().toLowerCase();
+      if (!needle) return "";
+      return roster.find((e) => e.name.trim().toLowerCase() === needle)?.id
+        ?? roster.find((e) => namesLooselyMatch(e.name, name))?.id
+        ?? "";
+    };
+    if (extractPreview.events.length) {
+      await addVerifyDrafts(extractPreview.events.map((event) => {
+        const entityId = matchEntity(event.entityId, event.entityName);
+        return {
+          caseId,
+          evidenceId: ev.id,
+          timestamp: parseEventTime(event.timestamp, event.timestampLabel, {
+            extraText: `${event.details} ${event.rawQuote} ${event.citation} ${ev.rawText.slice(0, 2500)}`,
+          }),
+          timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
+          entityId,
+          entityName: event.entityName,
+          suggestNewEntity: !entityId,
+          newEntityType: event.newEntityType ?? event.entityType ?? "",
+          category: event.category,
+          title: event.title,
+          snippet: event.rawQuote || event.snippet,
+          details: event.details,
+          confidence: event.confidence,
+          citation: event.citation,
+          sourceCitation: {
+            sourceId: ev.id,
+            sourceName: ev.fileName,
+            sourceType: inferSourceType(ev),
+            pageNumber: event.pageNumber,
+            exactQuote: event.exactQuote || event.rawQuote || event.snippet,
+            boundingBox: event.boundingBox,
+            sourceUrl: ev.sourceUrl,
+          },
+        };
+      }), { replacePendingForEvidence: ev.id });
+      const drafts = await db.verifyDrafts.where("evidenceId").equals(ev.id).toArray();
+      for (const draft of drafts.filter((d) => d.status === "pending")) {
+        await confirmVerifyDraft(draft.id);
+      }
+    }
+    await db.evidence.update(ev.id, { status: "indexed", lastError: "" });
+    setExtractNotice({ fileName: ev.fileName, entityCount: entities.length });
+    window.setTimeout(() => {
+      setExtractNotice((curr) => (curr?.fileName === ev.fileName ? null : curr));
+    }, 7000);
+    setExtractPreview(null);
+    setSelectedExtractNames(new Set());
+  };
+
+  const inspectOverviewSource = (id: string) => {
+    setActiveEvidenceId(id);
+    pushDrawerStaged([id]);
+    const row = caseEvidence.find((e) => e.id === id);
+    const drafts = pendingDrafts.filter((d) => d.evidenceId === id);
+    if (extractPreview?.evidenceId === id) return;
+    if (drafts.length) {
+      const seen = new Set<string>();
+      const entities = drafts.flatMap((d) => {
+        const name = d.entityName.trim();
+        if (!name || seen.has(name.toLowerCase())) return [];
+        seen.add(name.toLowerCase());
+        return [{
+          name,
+          type: (d.newEntityType || "person") as ExtractBundle["entities"][number]["type"],
+          classification: "UNVERIFIED",
+          identifiers: [] as string[],
+        }];
+      });
+      setExtractPreview({
+        evidenceId: id,
+        fileName: row?.fileName || "Source",
+        entities,
+        events: drafts.map((d) => ({
+          timestamp: null,
+          timestampLabel: d.timestampLabel,
+          entityId: d.entityId || null,
+          entityName: d.entityName,
+          entityType: (d.newEntityType || "person") as ExtractedEvent["entityType"],
+          suggestNewEntity: d.suggestNewEntity,
+          newEntityType: (d.newEntityType || "person") as ExtractedEvent["newEntityType"],
+          category: (d.category || "person") as ExtractedEvent["category"],
+          title: d.title,
+          snippet: d.snippet,
+          rawQuote: d.snippet,
+          details: d.details,
+          confidence: d.confidence,
+          citation: d.citation,
+          exactQuote: d.snippet,
+        })),
+        relationships: [],
+      });
+      setSelectedExtractNames(new Set(entities.map((ent) => ent.name)));
     }
   };
 
@@ -1614,22 +1966,41 @@ export default function DesktopApp() {
   /* ---------------------------------------------------------------- */
 
   return (
-    <div className="flex min-h-screen gap-0 bg-slate-200/60 p-3.5 font-sans text-slate-900">
-      <div className="flex min-w-0 flex-1 overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-sm">
+    <div className="flex min-h-dvh bg-slate-200/60 p-0 font-sans text-slate-900 md:p-3.5">
+      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-none border-0 border-slate-200 bg-white shadow-none md:rounded-[20px] md:border md:shadow-sm">
+
+        {navOpen ? (
+          <button
+            type="button"
+            aria-label="Close navigation"
+            className="fixed inset-0 z-30 bg-slate-900/40 md:hidden"
+            onClick={() => setNavOpen(false)}
+          />
+        ) : null}
 
         {/* sidebar */}
-        <aside className="flex w-[236px] shrink-0 flex-col border-r border-slate-200 bg-white">
+        <aside className={`app-shell-nav z-40 flex w-[min(236px,88vw)] flex-col border-r border-slate-200 bg-white transition-transform duration-200 ${navOpen ? "is-open" : ""}`}>
+          <div className="flex shrink-0">
           <button
             type="button"
             onClick={() => goTo("Hub")}
             aria-label="INTELLIDEX home"
-            className="flex h-16 w-full shrink-0 items-center gap-2.5 border-b border-slate-200 px-5 text-left hover:bg-slate-50"
+            className="flex h-16 min-w-0 flex-1 items-center gap-2.5 border-b border-slate-200 px-5 text-left hover:bg-slate-50"
           >
             <div className="flex h-6.5 w-6.5 items-center justify-center rounded-lg bg-blue-600 p-1.5">
               <div className="h-2 w-2 rounded-[2px] bg-white" />
             </div>
-            <span className="font-mono text-lg font-bold tracking-wider text-slate-900">INTELLIDEX</span>
+            <span className="truncate font-mono text-[15px] font-bold tracking-wider text-slate-900 sm:text-lg">INTELLIDEX</span>
           </button>
+          <button
+            type="button"
+            aria-label="Close navigation"
+            onClick={() => setNavOpen(false)}
+            className="flex h-16 w-12 shrink-0 items-center justify-center border-b border-slate-200 text-slate-500 hover:bg-slate-50 md:hidden"
+          >
+            <X className="h-4 w-4" />
+          </button>
+          </div>
           <nav className="flex flex-1 flex-col gap-[3px] p-3 pt-4">
             <div className={`px-2.5 pb-2 pt-1.5 ${mono} text-[10px] tracking-[0.14em] text-slate-500`}>GLOBAL</div>
             {GLOBAL_NAV.map(({ id, icon: Icon }) => {
@@ -1643,7 +2014,7 @@ export default function DesktopApp() {
               );
             })}
             <div className={`mt-3 px-2.5 pb-2 pt-1.5 ${mono} text-[10px] tracking-[0.14em] text-slate-500`}>CASE WORKSPACE</div>
-            {CASE_NAV.map(({ id, icon: Icon, badge }) => {
+            {CASE_NAV.map(({ id, icon: Icon, badge, label }) => {
               const on = screen === id;
               const locked = screen === "Hub" || !activeCase;
               return (
@@ -1655,7 +2026,7 @@ export default function DesktopApp() {
                     className={`flex h-[38px] w-full items-center gap-3 rounded-[10px] px-2.5 text-left text-[13.5px] transition-colors ${locked ? "cursor-not-allowed opacity-40" : on ? "bg-blue-50 font-semibold text-blue-700" : "font-medium text-slate-600 hover:bg-slate-50"}`}
                   >
                     <Icon className="h-[17px] w-[17px] shrink-0" />
-                    {id}
+                    {label ?? id}
                     <div className="flex-1" />
                     {badge != null && (
                       <span className={`rounded-md px-1.5 py-0.5 ${mono} text-[10.5px] font-semibold ${id === "Verify" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>
@@ -1684,31 +2055,41 @@ export default function DesktopApp() {
 
         {/* main column */}
         <div className="flex min-w-0 flex-1 flex-col bg-slate-50">
-          <header className="flex h-16 shrink-0 items-center gap-4 border-b border-slate-200 bg-white px-6">
+          <header className="flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-3 py-2 sm:px-4 lg:h-16 lg:flex-nowrap lg:gap-4 lg:px-6 lg:py-0">
+            <button
+              type="button"
+              aria-label="Open navigation"
+              aria-expanded={navOpen}
+              onClick={() => setNavOpen(true)}
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-900 md:hidden"
+            >
+              <Menu className="h-4 w-4" />
+            </button>
             <button
               type="button"
               aria-label="Search cases, entities, evidence"
               onClick={() => setSearchOpen(true)}
-              className="flex h-[38px] w-[340px] min-w-[150px] max-w-[45%] shrink items-center gap-2.5 rounded-[10px] border border-slate-200 bg-slate-50 px-3 text-left hover:border-slate-300"
+              className="flex h-[38px] min-w-0 flex-1 items-center gap-2.5 rounded-[10px] border border-slate-200 bg-slate-50 px-3 text-left hover:border-slate-300 md:max-w-[45%] md:w-[340px] md:flex-none"
             >
               <Search className="h-[15px] w-[15px] shrink-0 text-slate-500" />
               <span className="min-w-0 truncate text-[13px] text-slate-500">Search cases, entities, evidence…</span>
               <div className="flex-1" />
-              <span className={`shrink-0 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 ${mono} text-[10.5px] text-slate-500`}>⌘K</span>
+              <span className={`hidden shrink-0 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 sm:inline ${mono} text-[10.5px] text-slate-500`}>⌘K</span>
             </button>
-            <div className="flex-1" />
-            <div className="flex items-center gap-2.5">
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2 sm:gap-2.5">
               {activeCase && (
                 <button
                   type="button"
                   disabled={operator.permissions?.canExportDossier === false}
                   onClick={() => { setExportError(null); setExportOpen(true); }}
-                  className="inline-flex h-[34px] items-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium tracking-wide text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50 disabled:opacity-40"
+                  className="inline-flex h-[34px] items-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-2.5 text-xs font-medium tracking-wide text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50 disabled:opacity-40 sm:px-3"
                 >
-                  <FileDown className="h-3.5 w-3.5 text-slate-500" />Export Official INTELLIDEX
+                  <FileDown className="h-3.5 w-3.5 text-slate-500" />
+                  <span className="hidden sm:inline">Export Official INTELLIDEX</span>
+                  <span className="sm:hidden">Export</span>
                 </button>
               )}
-              <div className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200/50 bg-emerald-50/80 px-2.5 py-1 font-mono text-[11px] text-emerald-700">
+              <div className="hidden items-center gap-1.5 rounded-full border border-emerald-200/50 bg-emerald-50/80 px-2.5 py-1 font-mono text-[11px] text-emerald-700 sm:inline-flex">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />SECURE / LOCAL
               </div>
               <button
@@ -1733,7 +2114,7 @@ export default function DesktopApp() {
                   {operatorInitials}
                 </button>
                 {operatorMenu && (
-                  <div className="absolute right-0 z-30 mt-2 w-[260px] overflow-hidden rounded-[12px] border border-slate-200 bg-white py-1 shadow-xl">
+                  <div className="absolute right-0 z-30 mt-2 w-[min(260px,calc(100vw-1.5rem))] overflow-hidden rounded-[12px] border border-slate-200 bg-white py-1 shadow-xl">
                     <button type="button" onClick={() => goTo("Profile")}
                       className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-[13px] text-slate-700 hover:bg-slate-50">
                       <UserRound className="h-4 w-4 text-slate-400" />Creator Profile
@@ -1789,9 +2170,9 @@ export default function DesktopApp() {
               const waitingCount = activeHubCases.length;
               const archivedCount = archivedHubCases.length;
               return (
-              <div className="mx-auto w-full max-w-[1180px] px-10 pb-18 pt-13" onClick={() => setHubCardMenuId(null)}>
+              <div className="mx-auto w-full max-w-[1180px] px-4 pb-16 pt-8 sm:px-6 sm:pt-13 lg:px-10" onClick={() => setHubCardMenuId(null)}>
                 <div className={`mb-5 ${mono} text-[11px] tracking-[0.14em] text-slate-500`}>CREATOR // {creatorLabel}</div>
-                <h1 className="mb-3.5 w-full max-w-none text-[40px] font-semibold leading-tight tracking-tight">
+                <h1 className="mb-3.5 w-full max-w-none text-[28px] font-semibold leading-tight tracking-tight sm:text-[40px]">
                   {hubTab === "archived"
                     ? (archivedCount === 1 ? "1 archived case" : `${archivedCount} archived cases`)
                     : waitingCount === 1
@@ -1801,7 +2182,7 @@ export default function DesktopApp() {
                 <p className="mb-8 w-full max-w-4xl text-[15px] leading-relaxed text-slate-500">
                   {hubTab === "archived"
                     ? "Closed investigations stay on this machine. Restore one to bring it back to the active list."
-                    : "Open an active investigation, or start a new INTELLIDEX case and bring in evidence. Everything stays on this machine until you export it."}
+                    : "Open a missing-person search workspace, or start a new case and bring in official records and tips. Everything stays on this machine until you export it."}
                 </p>
                 {hubTab === "active" && (
                   <div className="flex flex-wrap gap-3">
@@ -1811,7 +2192,7 @@ export default function DesktopApp() {
                   </div>
                 )}
 
-                <div className="mb-5 mt-16 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3.5">
+                <div className="mb-5 mt-10 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3.5 sm:mt-16">
                   <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-100 p-0.5">
                     <button
                       type="button"
@@ -1845,7 +2226,7 @@ export default function DesktopApp() {
                   </div>
                 )}
 
-                <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]">
+                <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr))]">
                   {shownCases.map((c) => {
                     const tone = statusToTone(c.status);
                     const archived = isArchivedCase(c);
@@ -1857,14 +2238,14 @@ export default function DesktopApp() {
                     >
                       <div className="mb-3.5 flex items-start justify-between gap-3">
                         <div>
-                          <div className={`mb-[7px] ${mono} text-[10.5px] tracking-[0.1em] text-slate-500`}>{c.id}</div>
-                          <h3 className="text-[21px] font-semibold leading-tight tracking-tight">{c.title}</h3>
+                          <div className={`mb-[7px] ${mono} text-[10.5px] tracking-[0.1em] text-slate-500`}>{c.fileIdentifier || c.id}</div>
+                          <h3 className="text-[21px] font-semibold leading-tight tracking-tight">{c.subjectName || c.title}</h3>
                         </div>
                         <div className="flex shrink-0 items-center gap-1.5">
                           {archived ? (
                             <span className={`inline-flex items-center rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-slate-500`}>ARCHIVED</span>
                           ) : (
-                            <Chip tone={tone}>{c.status}</Chip>
+                            <Chip tone={tone}>{formatAlertLabel(c.status)}</Chip>
                           )}
                           <div className="relative">
                             <button
@@ -1942,22 +2323,26 @@ export default function DesktopApp() {
             })()}
 
             {/* ---------------- SETUP (single-step create) ---------------- */}
-            {CASE_WORKSPACE.includes(screen) && !activeCase && (
+            {CASE_WORKSPACE.includes(screen) && hubCases !== undefined && !activeCase && (
               <NoActiveCase onHub={() => goTo("Hub")} />
             )}
             {screen === "Setup" && (
               <NewCaseForm
                 title={draftTitle}
+                fileIdentifier={draftFileId}
                 jurisdiction={draftJurisdiction}
-                incidentStart={draftIncidentStart}
-                incidentEnd={draftIncidentEnd}
+                lksAt={draftLksAt}
+                alertLevel={draftStatus}
                 summary={draftSummary}
+                profile={draftProfile}
                 saving={savingCase}
                 onTitle={setDraftTitle}
+                onFileIdentifier={setDraftFileId}
                 onJurisdiction={setDraftJurisdiction}
-                onIncidentStart={setDraftIncidentStart}
-                onIncidentEnd={setDraftIncidentEnd}
+                onLksAt={setDraftLksAt}
+                onAlertLevel={setDraftStatus}
                 onSummary={setDraftSummary}
+                onProfile={setDraftProfile}
                 onCancel={() => goTo("Hub")}
                 onSubmit={() => void submitNewCase()}
               />
@@ -1973,18 +2358,38 @@ export default function DesktopApp() {
                 pendingCount={pendingDrafts.length}
                 conflictCount={chrono.tether?.count ?? 0}
                 onOpenTimeline={() => goTo("Timeline")}
+                onAddEvidence={() => goTo("Verify")}
                 onInspectContradiction={() => inspectContradiction()}
                 onOpenEntity={(ent) => {
                   setSelected(ent.id);
                   openForm(TYPE_KIND[ent.type], ent);
                 }}
-                onDropFiles={(files) => ingestFiles(files, { extract: true, background: true })}
+                onDropFiles={async (files) => {
+                  const ids = await ingestFiles(files, { extract: false, background: true });
+                  pushDrawerStaged(ids);
+                }}
                 ingestJob={ingestJob}
                 nowMs={nowMs}
                 extractNotice={extractNotice}
                 extractError={extractError}
+                extractPreview={extractPreview}
+                selectedExtractNames={selectedExtractNames}
+                stagedEvidence={caseEvidence.filter((row) => drawerStagedIds.includes(row.id))}
+                onToggleExtractName={(name) => {
+                  setSelectedExtractNames((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(name)) next.delete(name);
+                    else next.add(name);
+                    return next;
+                  });
+                }}
+                onExtractEvidence={(id) => {
+                  void runExtract(id, { stayOnWorkspace: true, deferApply: true });
+                }}
+                onAcceptExtract={() => acceptExtractRoster()}
                 onIngestUrl={async (url, onProgress) => {
-                  await ingestWebArticle(url, onProgress);
+                  const row = await ingestWebArticle(url, onProgress, { extract: false });
+                  if (row?.id) pushDrawerStaged([row.id]);
                 }}
                 onIngestPaste={async (text, kind) => {
                   const editorial = kind === "editorial";
@@ -1997,11 +2402,7 @@ export default function DesktopApp() {
                     fromPaste: !editorial,
                     fromEditorial: editorial,
                   });
-                  if (row?.id) {
-                    extractChain.current = extractChain.current.then(() =>
-                      runExtract(row.id, { stayOnWorkspace: true }),
-                    );
-                  }
+                  if (row?.id) pushDrawerStaged([row.id]);
                 }}
                 onExportDossier={() => { setExportError(null); setExportOpen(true); }}
                 canExport={operator.permissions?.canExportDossier !== false}
@@ -2017,12 +2418,13 @@ export default function DesktopApp() {
                   if (!activeCase) return;
                   void unarchiveCase(activeCase.id, activeCase.title);
                 }}
-                onInspectSource={(id) => {
-                  setActiveEvidenceId(id);
-                  goTo("Verify");
-                }}
-                onReextract={(id) => { void runExtract(id); }}
+                onInspectSource={inspectOverviewSource}
+                onReextract={(id) => { void runExtract(id, { stayOnWorkspace: true, deferApply: true }); }}
               />
+            )}
+
+            {screen === "WorkingTheory" && activeCase && (
+              <WorkingTheory activeCase={activeCase} />
             )}
 
             {/* ---------------- INTAKE ---------------- */}
@@ -2099,17 +2501,20 @@ export default function DesktopApp() {
 
             {/* ---------------- VERIFY ---------------- */}
             {screen === "Verify" && activeCase && (
-              <div className="grid h-[calc(100vh-94px)] min-h-0 overflow-hidden grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-slate-200">
-                  <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-6">
-                    <div className={`flex min-w-0 items-center gap-2.5 truncate ${mono} text-[11px] tracking-[0.12em] text-slate-500`}>
-                      <FileText className="h-3.5 w-3.5 shrink-0" />SOURCE / {sourceEvidence?.fileName.toUpperCase() ?? "NO FILE"}
-                      {sourceEvidence?.pageCount ? ` · ${sourceEvidence.pageCount} PAGES` : sourceEvidence?.imageBase64 ? " · IMAGE" : ""}
+              <div className="grid min-h-0 grid-cols-1 overflow-auto lg:h-[calc(100dvh-7.5rem)] lg:grid-cols-2 lg:overflow-hidden">
+                <section className="flex min-h-[min(52dvh,480px)] min-w-0 flex-col overflow-hidden border-b border-slate-200 lg:min-h-0 lg:border-b-0 lg:border-r">
+                  <div className="flex h-auto min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 sm:px-6">
+                    <div className={`flex min-w-0 max-w-full items-center gap-2.5 ${mono} text-[11px] tracking-[0.12em] text-slate-500`}>
+                      <FileText className="h-3.5 w-3.5 shrink-0" />
+                      <span className="min-w-0 truncate">
+                        SOURCE / {sourceEvidence?.fileName.toUpperCase() ?? "NO FILE"}
+                        {sourceEvidence?.pageCount ? ` · ${sourceEvidence.pageCount} PAGES` : sourceEvidence?.imageBase64 ? " · IMAGE" : ""}
+                      </span>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
                       {caseEvidence.length > 1 && (
                         <select value={sourceEvidence?.id ?? ""} onChange={(e) => setActiveEvidenceId(e.target.value)}
-                          className={`max-w-[180px] rounded-md border border-slate-200 bg-white px-2 py-1 ${mono} text-[10.5px]`}>
+                          className={`max-w-[min(180px,42vw)] rounded-md border border-slate-200 bg-white px-2 py-1 ${mono} text-[10.5px]`}>
                           {caseEvidence.map((e) => <option key={e.id} value={e.id}>{e.fileName}</option>)}
                         </select>
                       )}
@@ -2120,7 +2525,8 @@ export default function DesktopApp() {
                         className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-600 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
                       >
                         <RefreshCw className={`h-3 w-3 ${extracting ? "animate-spin" : ""}`} />
-                        Re-run Extraction
+                        <span className="hidden sm:inline">Re-run Extraction</span>
+                        <span className="sm:hidden">Re-run</span>
                       </button>
                     </div>
                   </div>
@@ -2161,8 +2567,8 @@ export default function DesktopApp() {
                   </div>
                 </section>
 
-                <section className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-slate-50/60">
-                  <div className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-slate-200 px-6">
+                <section className="flex min-h-[min(52dvh,480px)] min-w-0 flex-col overflow-hidden bg-slate-50/60 lg:min-h-0">
+                  <div className="flex h-auto min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 sm:px-6">
                     <div className={`flex min-w-0 items-center gap-2.5 truncate ${mono} text-[11px] tracking-[0.12em] text-slate-500`}>
                       <Inbox className="h-3.5 w-3.5 shrink-0" />AI EXTRACTION QUEUE
                     </div>
@@ -2171,7 +2577,7 @@ export default function DesktopApp() {
                     </span>
                   </div>
 
-                  <div ref={queuePaneRef} className="flex flex-1 flex-col gap-3 overflow-auto px-6 pb-6 pt-5">
+                  <div ref={queuePaneRef} className="flex flex-1 flex-col gap-3 overflow-auto px-3 pb-6 pt-5 sm:px-6">
                     {narrativeQueue.map((d) => (
                       <VerifyQueueCard
                         key={d.id}
@@ -2225,10 +2631,10 @@ export default function DesktopApp() {
                     )}
                   </div>
 
-                  <div className="flex h-14 shrink-0 items-center justify-between gap-4 border-t border-slate-200 bg-slate-50 px-6">
-                    <span className={`${mono} text-[11px] text-slate-500`}>CONFIRM WRITES TO TIMELINEEVENTS</span>
+                  <div className="flex min-h-14 shrink-0 flex-col items-stretch gap-2 border-t border-slate-200 bg-slate-50 px-3 py-2 sm:h-14 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-0">
+                    <span className={`min-w-0 truncate ${mono} text-[11px] text-slate-500`}>CONFIRM WRITES TO TIMELINE</span>
                     <button onClick={() => setScreen("Timeline")}
-                      className="inline-flex h-[34px] items-center gap-2 rounded-[10px] border border-slate-300 px-[15px] text-[12.5px] font-medium text-slate-600 transition-colors hover:border-blue-600 hover:text-blue-600">
+                      className="inline-flex h-[34px] shrink-0 items-center justify-center gap-2 rounded-[10px] border border-slate-300 px-[15px] text-[12.5px] font-medium text-slate-600 transition-colors hover:border-blue-600 hover:text-blue-600">
                       Open chronology<ArrowRight className="h-3.5 w-3.5" />
                     </button>
                   </div>
@@ -2236,16 +2642,17 @@ export default function DesktopApp() {
               </div>
             )}
 
-            {screen === "Graph" && activeCase && (
-              <EntityGraph
-                entities={caseEntities}
-                relationships={caseRelationships}
-              />
-            )}
-
             {/* ---------------- TIMELINE ---------------- */}
             {screen === "Timeline" && activeCase && (
-              <div className="flex h-[calc(100vh-94px)]">
+              <div className="relative flex min-h-0 flex-1 flex-col lg:h-[calc(100dvh-7.5rem)] lg:flex-row">
+                {sidebarOpen ? (
+                  <button
+                    type="button"
+                    aria-label="Close entity dossier"
+                    className="absolute inset-0 z-[15] bg-slate-900/30 lg:hidden"
+                    onClick={() => setSidebarOpen(false)}
+                  />
+                ) : null}
                 <EntityDossier
                   open={sidebarOpen}
                   selected={selected}
@@ -2278,7 +2685,15 @@ export default function DesktopApp() {
                     </div>
                   )}
 
-                  <div className="flex min-h-[44px] shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-200 px-5 py-2">
+                  <div className="flex min-h-[44px] shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-200 px-3 py-2 sm:px-5">
+                    <button
+                      type="button"
+                      className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-600 lg:hidden"
+                      onClick={() => setSidebarOpen(true)}
+                    >
+                      <PanelLeftOpen className="h-3.5 w-3.5" />
+                      Entities
+                    </button>
                     <select
                       value={resolvedCaseId ?? ""}
                       onChange={(e) => setActiveCaseId(e.target.value || null)}
@@ -2464,7 +2879,7 @@ export default function DesktopApp() {
                           </button>
 
                           {popover && (
-                            <div className="pointer-events-auto absolute z-[7] w-80 -translate-x-1/2 rounded-[14px] border border-amber-200 bg-white p-4 shadow-xl"
+                            <div className="pointer-events-auto absolute z-[7] w-[min(20rem,calc(100vw-1.5rem))] -translate-x-1/2 rounded-[14px] border border-amber-200 bg-white p-4 shadow-xl"
                               style={{ left: popoverAnchor?.left ?? chrono.tether.midX, top: popoverAnchor?.top ?? chrono.tether.midY + 22 }}>
                               <div className="mb-3 flex items-start justify-between gap-3">
                                 <div>
@@ -2515,9 +2930,9 @@ export default function DesktopApp() {
       </div>
 
       {timelineInspect && (
-        <div className="fixed inset-0 z-[80] flex bg-slate-900/40">
-          <button type="button" className="min-w-0 flex-1" aria-label="Close source inspector" onClick={() => setTimelineInspect(null)} />
-          <div className="flex h-full w-[min(640px,52vw)] flex-col border-l border-slate-200 bg-white shadow-2xl">
+        <div className="fixed inset-0 z-[80] flex flex-col bg-slate-900/40 sm:flex-row">
+          <button type="button" className="hidden min-w-0 flex-1 sm:block" aria-label="Close source inspector" onClick={() => setTimelineInspect(null)} />
+          <div className="ml-auto flex h-full w-full max-w-[640px] flex-col border-l border-slate-200 bg-white shadow-2xl">
             <SourceDocumentViewer
               evidence={caseEvidence.find((e) => e.id === timelineInspect.citation.sourceId) ?? null}
               citation={timelineInspect.citation}
@@ -2779,7 +3194,7 @@ export default function DesktopApp() {
       />
 
       {toast && (
-        <div className="pointer-events-none fixed bottom-6 right-6 z-[90] rounded-[12px] border border-slate-200 bg-white px-4 py-3 text-[13px] font-medium text-slate-800 shadow-lg">
+        <div className="pointer-events-none fixed bottom-4 left-4 right-4 z-[90] rounded-[12px] border border-slate-200 bg-white px-4 py-3 text-[13px] font-medium text-slate-800 shadow-lg sm:left-auto sm:right-6 sm:bottom-6 sm:max-w-md">
           {toast}
         </div>
       )}
@@ -2802,7 +3217,7 @@ export default function DesktopApp() {
               <div>
                 <h2 className="text-[17px] font-bold tracking-tight">AI settings</h2>
                 <p className="mt-1 text-[12.5px] leading-relaxed text-slate-500">
-                  Prefer <span className={mono}>ANTHROPIC_API_KEY</span> in <span className={mono}>.env.local</span> (server-side). This field is a local fallback and is never synced.
+                  Prefer <span className={mono}>GEMINI_API_KEY</span> or <span className={mono}>OPENAI_API_KEY</span> in <span className={mono}>.env.local</span> (server-side). This field is a local fallback and is never synced.
                 </p>
               </div>
               <button onClick={() => setSettingsOpen(false)} className="flex h-[30px] w-[30px] items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-100">
@@ -2812,11 +3227,11 @@ export default function DesktopApp() {
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-2">
                 <label className="text-[12px] font-semibold text-slate-700">Provider</label>
-                <div className="flex gap-2">
-                  {(["anthropic", "openai"] as LlmProvider[]).map((p) => (
+                <div className="flex flex-wrap gap-2">
+                  {(["gemini", "openai", "anthropic"] as LlmProvider[]).map((p) => (
                     <button key={p} type="button" onClick={() => setProviderDraft(p)}
-                      className={`h-9 flex-1 rounded-lg border text-[12.5px] font-medium ${providerDraft === p ? "border-blue-400 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-500"}`}>
-                      {p === "anthropic" ? "Anthropic" : "OpenAI"}
+                      className={`h-9 min-w-[5.5rem] flex-1 rounded-lg border text-[12.5px] font-medium ${providerDraft === p ? "border-blue-400 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-500"}`}>
+                      {p === "gemini" ? "Gemini" : p === "openai" ? "OpenAI" : "Anthropic"}
                     </button>
                   ))}
                 </div>
@@ -2824,7 +3239,7 @@ export default function DesktopApp() {
               <div className="flex flex-col gap-2">
                 <label className="text-[12px] font-semibold text-slate-700">API key</label>
                 <input type="password" value={apiKeyDraft} onChange={(e) => setApiKeyDraft(e.target.value)}
-                  placeholder="sk-ant-… or sk-…" className={`${inputCls} h-10 text-[13.5px]`} />
+                  placeholder="AIza… or sk-…" className={`${inputCls} h-10 text-[13.5px]`} />
               </div>
             </div>
             <div className="mt-5 flex justify-end gap-2.5">

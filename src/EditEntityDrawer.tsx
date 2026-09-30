@@ -1,7 +1,7 @@
 import type { ComponentType } from "react";
 import { Check, Link2, Trash2, X } from "lucide-react";
 import type { WizardFormState, EntityKind, KindSchema } from "./entityTypes";
-import { formatRoleButtonLabel, normalizePersonRole, roleBadgeClass } from "./utils/roleBadge";
+import { formatRoleButtonLabel, normalizePersonRole, roleBadgeClass, entityAvatarClass, entityInitials } from "./utils/roleBadge";
 import MediaProvenanceBadge from "./MediaProvenanceBadge";
 
 const mono = "font-mono";
@@ -30,8 +30,10 @@ export default function EditEntityDrawer({
       <div className="flex-1" onClick={onCancel} />
       <div className="flex h-full w-[460px] max-w-[92vw] flex-col border-l border-slate-200 bg-white shadow-2xl">
         <div className="flex shrink-0 items-start gap-3.5 border-b border-slate-200 px-6 pb-[18px] pt-[22px]">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-blue-200 bg-blue-50 text-blue-600">
-            <Icon className="h-[18px] w-[18px]" />
+          <div className={`flex h-10 w-10 shrink-0 items-center justify-center text-[12px] font-bold ${form.tab === "People"
+            ? `rounded-full ${entityAvatarClass(form.chip)}`
+            : "rounded-xl border border-blue-200 bg-blue-50 text-blue-700"}`}>
+            {form.tab === "People" ? entityInitials(form.name || "Person") : <Icon className="h-[18px] w-[18px]" />}
           </div>
           <div className="min-w-0 flex-1">
             <h2 className="mb-1 text-[17px] font-bold capitalize tracking-tight">
@@ -75,9 +77,9 @@ export default function EditEntityDrawer({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {schema.fields.map((fd) => (
-              <div key={fd.k} className={`flex flex-col gap-2 ${fd.half ? "col-span-1" : "col-span-2"}`}>
+              <div key={fd.k} className={`flex flex-col gap-2 ${fd.half ? "col-span-1" : "col-span-1 sm:col-span-2"}`}>
                 <label className="text-[12px] font-semibold text-slate-700">{fd.label}</label>
                 {fd.area ? (
                   <textarea value={form.v[fd.k] ?? ""} onChange={(e) => setV(fd.k, e.target.value)}

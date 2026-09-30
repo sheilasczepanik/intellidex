@@ -268,13 +268,13 @@ export default function EvidenceIntake({
   };
 
   return (
-    <div className="mx-auto w-full max-w-[1180px] px-10 pb-20 pt-12">
+    <div className="mx-auto w-full max-w-[1180px] px-4 pb-20 pt-8 sm:px-6 sm:pt-12 lg:px-10">
       <div className="mb-7 flex flex-wrap items-end justify-between gap-6">
         <div>
           <div className={`mb-2.5 ${mono} text-[11px] tracking-[0.14em] text-slate-500`}>
             {activeCase ? `${activeCase.id} / ${activeCase.title.toUpperCase()}` : "NO CASE SELECTED"}
           </div>
-          <h1 className="text-[34px] font-semibold leading-tight tracking-tight">Evidence intake</h1>
+          <h1 className="text-[28px] font-semibold leading-tight tracking-tight sm:text-[34px]">Evidence intake</h1>
         </div>
         {extractError && (
           <div className="flex max-w-[72ch] items-start gap-2.5 rounded-[10px] border border-amber-200 bg-amber-50 px-3.5 py-2 text-[12.5px] leading-relaxed break-words text-amber-700">
@@ -296,14 +296,14 @@ export default function EvidenceIntake({
         <button
           type="button"
           onClick={() => setIntakeTab("official")}
-          className={`rounded-[8px] px-2 py-2.5 text-[12.5px] font-semibold ${intakeTab === "official" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}
+          className={`rounded-[8px] px-2 py-2.5 text-[11px] font-semibold leading-snug sm:text-[12.5px] ${intakeTab === "official" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}
         >
           Official Evidence & Court Records
         </button>
         <button
           type="button"
           onClick={() => setIntakeTab("press")}
-          className={`rounded-[8px] px-2 py-2.5 text-[12.5px] font-semibold ${intakeTab === "press" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}
+          className={`rounded-[8px] px-2 py-2.5 text-[11px] font-semibold leading-snug sm:text-[12.5px] ${intakeTab === "press" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500"}`}
         >
           External Intelligence & Press
         </button>
@@ -556,7 +556,7 @@ export default function EvidenceIntake({
               {ingestJob?.stage === "render" || ingestJob?.stage === "pdf"
                 ? ingestStageLabel(ingestJob)
                 : ingestJob?.stage === "claude"
-                  ? "Analyzing evidence with Claude..."
+                  ? "Analyzing evidence..."
                   : ingestJob?.stage === "events"
                     ? "Extracting events…"
                     : ingestJob?.stage === "done"

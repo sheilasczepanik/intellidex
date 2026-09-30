@@ -1,4 +1,5 @@
 export const PERSON_ROLE_VALUES = [
+  "MISSING_PERSON",
   "SUSPECT",
   "person_of_interest",
   "WITNESS",
@@ -18,10 +19,37 @@ const NEUTRAL_ON = "bg-slate-800 text-white border border-slate-800 shadow-sm ri
 
 export const VICTIM_CHIP = VICTIM_IDLE;
 
+/** WCAG AA circular avatar for victims / deceased (red-600 on red-50). */
+export const VICTIM_AVATAR = "bg-red-50 text-red-600 border border-red-200";
+export const SUSPECT_AVATAR = "bg-blue-50 text-blue-700 border border-blue-200";
+export const POI_AVATAR = "bg-amber-50 text-amber-800 border border-amber-200";
+
+export function isVictimOrDeceased(role?: string | null, notes?: string | null, classification?: string | null) {
+  const n = normalizePersonRole(role || "");
+  if (n === "VICTIM" || n === "MISSING_PERSON") return true;
+  const blob = `${role || ""} ${notes || ""} ${classification || ""}`.toLowerCase();
+  return /\b(deceased|decedent|homicide victim|died|killed)\b/.test(blob);
+}
+
+export function entityAvatarClass(role?: string | null, fallback = "bg-slate-50 text-slate-700 border border-slate-200", notes?: string | null, classification?: string | null) {
+  if (isVictimOrDeceased(role, notes, classification)) return VICTIM_AVATAR;
+  const n = normalizePersonRole(role || "");
+  if (n === "MISSING_PERSON") return "bg-amber-50 text-amber-950 border border-amber-400";
+  if (n === "SUSPECT") return SUSPECT_AVATAR;
+  if (n === "person_of_interest") return POI_AVATAR;
+  return fallback;
+}
+
+export function entityInitials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "")).toUpperCase();
+}
+
 /** Canonical person-role value stored on the entity record. */
 export function normalizePersonRole(role: string) {
   const s = role.trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if (s === "subject" || s === "suspect") return "SUSPECT";
+  if (s === "missing" || s === "missing_person" || s === "subject") return "MISSING_PERSON";
+  if (s === "suspect") return "SUSPECT";
   if (s === "poi" || s === "person_of_interest") return "person_of_interest";
   if (s === "witness") return "WITNESS";
   if (s === "victim") return "VICTIM";
@@ -34,6 +62,7 @@ export function normalizePersonRole(role: string) {
 export function formatRoleLabel(role?: string | null) {
   if (!role) return "";
   const n = normalizePersonRole(role);
+  if (n === "MISSING_PERSON") return "Missing person";
   if (n === "person_of_interest") return "Person of Interest";
   if (n === "SUSPECT") return "Suspect";
   if (n === "WITNESS") return "Witness";
@@ -46,12 +75,14 @@ export function formatRoleLabel(role?: string | null) {
 /** Compact uppercase label for status toggle buttons. */
 export function formatRoleButtonLabel(role: string) {
   const n = normalizePersonRole(role);
+  if (n === "MISSING_PERSON") return "MISSING PERSON";
   if (n === "person_of_interest") return "PERSON OF INTEREST";
   return n.toUpperCase();
 }
 
 function idleChip(role: string) {
   const n = normalizePersonRole(role);
+  if (n === "MISSING_PERSON") return "border-amber-400 bg-amber-50 text-amber-950";
   if (n === "VICTIM") return VICTIM_IDLE;
   if (n === "SUSPECT") return SUSPECT_IDLE;
   return NEUTRAL_IDLE;
@@ -75,7 +106,7 @@ export function roleBadgeClass(role: string, selected?: boolean) {
 
 export function roleDisplayClass(role: string, fallback: string) {
   const n = normalizePersonRole(role);
-  if (n === "VICTIM" || n === "SUSPECT" || n === "WITNESS" || n === "ASSOCIATE" || n === "UNVERIFIED" || n === "person_of_interest") {
+  if (n === "MISSING_PERSON" || n === "VICTIM" || n === "SUSPECT" || n === "WITNESS" || n === "ASSOCIATE" || n === "UNVERIFIED" || n === "person_of_interest") {
     return idleChip(n);
   }
   return fallback;

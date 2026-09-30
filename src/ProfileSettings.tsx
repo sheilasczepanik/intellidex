@@ -77,7 +77,7 @@ export default function ProfileSettings({
   };
 
   return (
-    <div className="mx-auto w-full max-w-[780px] px-10 pb-20 pt-12">
+    <div className="mx-auto w-full max-w-[780px] px-4 pb-20 pt-8 sm:px-6 sm:pt-12 lg:px-10">
       <div className="mb-2.5 font-mono text-[11px] tracking-[0.14em] text-slate-500">SETTINGS / CREATOR PROFILE</div>
 
       <div className="mb-8 flex items-center gap-5">

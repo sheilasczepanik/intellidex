@@ -26,7 +26,7 @@ export default function WorkspacePreferences({
   const [saved, setSaved] = useState(false);
 
   return (
-    <div className="mx-auto w-full max-w-[780px] px-10 pb-20 pt-12">
+    <div className="mx-auto w-full max-w-[780px] px-4 pb-20 pt-8 sm:px-6 sm:pt-12 lg:px-10">
       <div className={`mb-2.5 ${mono} text-[11px] tracking-[0.14em] text-slate-500`}>SETTINGS / WORKSPACE</div>
       <h1 className="mb-2 text-[34px] font-semibold leading-tight tracking-tight">Workspace preferences</h1>
       <p className="mb-8 max-w-2xl text-[14px] text-slate-500">Appearance and local AI fallbacks for this machine. Keys never leave the browser except for extract calls.</p>
@@ -61,20 +61,20 @@ export default function WorkspacePreferences({
         <div className="border-b border-slate-200 px-[22px] py-[18px]">
           <h2 className="mb-1 text-[15px] font-semibold tracking-tight">Local AI fallback</h2>
           <p className="text-[12.5px] text-slate-500">
-            Prefer <span className={mono}>ANTHROPIC_API_KEY</span> in <span className={mono}>.env.local</span>. This field is a device fallback.
+            Prefer <span className={mono}>GEMINI_API_KEY</span> or <span className={mono}>OPENAI_API_KEY</span> in <span className={mono}>.env.local</span>. This field is a device fallback.
           </p>
         </div>
         <div className="flex flex-col gap-4 px-[22px] py-[22px]">
-          <div className="flex gap-2">
-            {(["anthropic", "openai"] as LlmProvider[]).map((p) => (
+          <div className="flex flex-wrap gap-2">
+            {(["gemini", "openai", "anthropic"] as LlmProvider[]).map((p) => (
               <button key={p} type="button" onClick={() => setProviderDraft(p)}
                 className={`h-9 flex-1 rounded-lg border text-[12.5px] font-medium ${providerDraft === p ? "border-blue-400 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-500"}`}>
-                {p === "anthropic" ? "Anthropic" : "OpenAI"}
+                {p === "gemini" ? "Gemini" : p === "openai" ? "OpenAI" : "Anthropic"}
               </button>
             ))}
           </div>
           <input type="password" value={apiKeyDraft} onChange={(e) => setApiKeyDraft(e.target.value)}
-            placeholder="sk-ant-… or sk-…" className={`${inputCls} h-10 text-[13.5px]`} />
+            placeholder="AIza… or sk-…" className={`${inputCls} h-10 text-[13.5px]`} />
           <div className="flex justify-end">
             <button
               type="button"

@@ -93,7 +93,7 @@ export default function GlobalSearch({ open, onClose, onPick }: Props) {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-start justify-center bg-slate-900/35 px-4 pt-[12vh] backdrop-blur-[3px]">
+    <div className="fixed inset-0 z-[80] flex items-start justify-center bg-slate-900/35 px-3 pt-[8vh] backdrop-blur-[3px] sm:px-4 sm:pt-[12vh]">
       <div className="absolute inset-0" onClick={onClose} />
       <div className="relative w-full max-w-[640px] overflow-hidden rounded-[16px] border border-slate-200 bg-white shadow-2xl">
         <div className="flex items-center gap-2.5 border-b border-slate-200 px-4">

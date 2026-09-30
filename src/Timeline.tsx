@@ -71,7 +71,7 @@ export default function TimelineToolbar({
           {dayLabel}
         </button>
         {dateMenu && (
-          <div className="absolute left-0 top-full z-20 mt-1 min-w-[220px] rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
+          <div className="absolute left-0 top-full z-20 mt-1 w-[min(16rem,calc(100vw-1.5rem))] min-w-0 rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
             <button
               type="button"
               onClick={() => onSelectDay("all")}
@@ -108,7 +108,7 @@ export default function TimelineToolbar({
           {timeLabel}
         </button>
         {timeMenu && (
-          <div className="absolute left-0 top-full z-20 mt-1 min-w-[200px] rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
+          <div className="absolute left-0 top-full z-20 mt-1 w-[min(16rem,calc(100vw-1.5rem))] min-w-0 rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
             {TIME_WINDOW_OPTIONS.map((opt) => (
               <button
                 key={opt.id}

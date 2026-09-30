@@ -4,8 +4,31 @@ import type { SourceCitation, EntityType, EntityRelationship, ExternalIntelLead,
 export type { EntityType, EntityRelationship, ExternalIntelLead, IntelClaim };
 export type { SourceCitation } from "../types";
 
-export type CaseStatus = "ACTIVE" | "REVIEW" | "COLD" | "FIELD" | "ARCHIVED" | "CLOSED";
+export type CaseStatus =
+  | "ACTIVE_MISSING"
+  | "ENDANGERED_MISSING"
+  | "CRITICAL_MEDICAL"
+  | "COLD"
+  | "ARCHIVED"
+  | "CLOSED"
+  | "ACTIVE"
+  | "REVIEW"
+  | "FIELD";
+
 export type EvidenceStatus = "indexed" | "ingesting" | "flagged" | "queued" | "failed";
+
+export interface SubjectProfile {
+  ageAtDisappearance?: string;
+  currentEstimatedAge?: string;
+  height?: string;
+  weight?: string;
+  hair?: string;
+  eyes?: string;
+  distinguishingMarks?: string;
+  clothingLastSeen?: string;
+  medicalAlerts?: string;
+  photoDataUrl?: string;
+}
 
 export interface CaseRecord {
   id: string;
@@ -20,6 +43,15 @@ export interface CaseRecord {
   jurisdiction?: string;
   incidentStart?: string;
   incidentEnd?: string;
+  /** Missing person full name (title may mirror this). */
+  subjectName?: string;
+  /** NamUs / agency / MP file number shown in the workspace. */
+  fileIdentifier?: string;
+  /** Last known sighting as ISO local datetime. */
+  lksAt?: string;
+  lksLocation?: string;
+  lksCircumstances?: string;
+  subjectProfile?: SubjectProfile;
 }
 
 export interface EntityRecord {
@@ -116,11 +148,11 @@ export interface VerifyDraftRecord {
 }
 
 export const CONTACT_AFFILIATIONS = [
-  "Victim Family / Next of Kin",
-  "Property Owner / Business Manager",
-  "Lead Detective",
-  "Legal Counsel",
-  "Witness",
+  "Lead Detective / Agency",
+  "Search & Rescue Lead",
+  "Family Liaison",
+  "Reporting Party",
+  "Last Contacted Associate",
   "Other",
 ] as const;
 
@@ -374,6 +406,33 @@ export class DossierDB extends Dexie {
         } else if (!row.tier) {
           row.tier = "primary";
         }
+      });
+    });
+    this.version(17).stores({
+      cases: "id, status, updatedAt, isArchived",
+    }).upgrade(async (tx) => {
+      await tx.table("cases").toCollection().modify((row: {
+        status?: string;
+        title?: string;
+        subjectName?: string;
+        fileIdentifier?: string;
+        id?: string;
+        jurisdiction?: string;
+        lksLocation?: string;
+        lksAt?: string;
+        incidentStart?: string;
+        subjectProfile?: Record<string, string>;
+      }) => {
+        const s = String(row.status || "").toUpperCase();
+        if (s === "ACTIVE" || s === "FIELD") row.status = "ACTIVE_MISSING";
+        else if (s === "REVIEW") row.status = "ENDANGERED_MISSING";
+        if (!row.subjectName) row.subjectName = row.title || "";
+        if (!row.fileIdentifier) row.fileIdentifier = row.id || "";
+        if (!row.lksLocation) row.lksLocation = row.jurisdiction || "";
+        if (!row.lksAt && row.incidentStart) {
+          row.lksAt = row.incidentStart.includes("T") ? row.incidentStart : `${row.incidentStart}T12:00`;
+        }
+        if (!row.subjectProfile) row.subjectProfile = {};
       });
     });
   }

@@ -35,11 +35,11 @@ export default function ExportDossierModal({
   const flags = { cover, custody, chronology, contradictions, exhibits };
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/40 p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-slate-950/40 p-4 sm:p-6" onClick={onClose}>
       <div
         role="dialog"
         aria-labelledby="export-dossier-title"
-        className="w-full max-w-[560px] overflow-hidden rounded-[16px] border border-slate-200 bg-white shadow-2xl"
+        className="my-auto w-full max-w-[560px] overflow-hidden rounded-[16px] border border-slate-200 bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">

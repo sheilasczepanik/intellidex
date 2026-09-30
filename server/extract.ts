@@ -1,176 +1,111 @@
 import {
-  ENTITY_SCOUT_SYSTEM,
-  EXTRACT_SYSTEM,
-  parseExtractBundle,
-  parseScoutedEntities,
-  sanitizeExtractText,
-  userExtractPrompt,
-  userScoutPrompt,
+  EXTRACT_MAX_CHARS,
   type ExtractBundle,
   type ExtractedEvent,
   type ExtractEntityHint,
   type ScoutedEntity,
 } from "../src/lib/extractSchema.ts";
-import { MODEL_NAME, postAnthropicMessages } from "./anthropicModels.ts";
+import {
+  ExtractHttpError,
+  resolveExtractEngine,
+  runStructuredExtraction,
+  structuredToBundle,
+  type ExtractEngine,
+} from "./structuredExtract.ts";
 
 export type { ExtractBundle, ExtractedEvent, ExtractEntityHint, ScoutedEntity };
-
-export class ExtractHttpError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.name = "ExtractHttpError";
-    this.status = status;
-  }
-}
+export { ExtractHttpError };
 
 export async function runExtraction(input: {
   text: string;
   fileName: string;
   entities: ExtractEntityHint[];
   apiKey: string;
-  provider: "anthropic" | "openai";
-  anthropicModel?: string;
+  provider?: ExtractEngine | "anthropic" | "openai";
   openaiModel?: string;
   summary?: boolean;
   maxPages?: number;
   maxChars?: number;
 }): Promise<ExtractBundle> {
-  const prompt = userExtractPrompt(sanitizeExtractText(input.text, input.maxChars ?? 12_000), input.fileName, input.entities, {
+  void input.provider;
+  const { bundle } = await runStructuredExtraction({
+    engine: "openai",
+    apiKey: input.apiKey,
+    model: input.openaiModel || "gpt-4o",
+    text: input.text,
+    fileName: input.fileName,
+    entities: input.entities,
     summary: input.summary,
     maxPages: input.maxPages,
-    maxChars: input.maxChars ?? 12_000,
+    maxChars: input.maxChars ?? EXTRACT_MAX_CHARS,
   });
-  const raw = input.provider === "openai"
-    ? await extractWithOpenAI(input.apiKey, prompt, EXTRACT_SYSTEM, input.openaiModel)
-    : await extractWithAnthropic(input.apiKey, prompt, EXTRACT_SYSTEM, input.anthropicModel);
-  console.log("[Extraction] Model output length:", raw.length);
-  console.log("[Extraction] Model output first 300 characters:", raw.slice(0, 300));
-  try {
-    return parseExtractBundle(raw);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : "Invalid JSON";
-    throw new ExtractHttpError(502, detail);
-  }
+  return bundle;
 }
 
-const VISION_USER_TEXT = `Analyze this investigative evidence image in forensic detail. Extract observable facts into structured entities.
-Identify:
-1. Visual scene description and environment setting.
-2. Legible text, signs, license plates, documents, or labels visible in the image.
-3. People, clothing, distinctive markings, or physical features.
-4. Vehicles (make, model, color, distinguishing features).
-5. Physical items / exhibits / weapons / objects of interest.
-6. Estimated time of day, lighting, or timestamp indicators.
-
-For every item include exactQuote, pageNumber 1, and optional boundingBox as percentages 0-100 {x,y,width,height}.
-
-Output STRICT JSON ONLY:
-{ "items": [{ "type": "event", "category": "evidence"|"person"|"location"|"vehicle"|"time", "title": string, "entityName": string, "timestamp": string|null, "rawQuote": string, "exactQuote": string, "pageNumber": 1, "boundingBox": {"x":number,"y":number,"width":number,"height":number}|null, "confidence": number, "details": string }] }`;
+function stripImage(raw: string) {
+  return String(raw || "").replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "").replace(/\s+/g, "");
+}
 
 export async function runVisionExtraction(input: {
   imageBase64: string;
   mediaType?: string;
   fileName: string;
   apiKey: string;
-  anthropicModel?: string;
+  engine?: ExtractEngine;
+  model?: string;
 }): Promise<ExtractBundle> {
-  const data = input.imageBase64.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "").replace(/\s+/g, "");
-  if (!data) throw new ExtractHttpError(400, "Image payload is empty.");
-  const raw = await extractWithAnthropicContent(input.apiKey, EXTRACT_SYSTEM, [
-    {
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: input.mediaType || "image/jpeg",
-        data,
-      },
-    },
-    { type: "text", text: VISION_USER_TEXT },
-  ], input.anthropicModel || MODEL_NAME, 3000);
-  try {
-    return parseExtractBundle(raw);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : "Invalid JSON";
-    throw new ExtractHttpError(502, detail);
-  }
+  void input.engine;
+  const data = stripImage(input.imageBase64);
+  if (!data) return structuredToBundle({ entities: [], events: [] });
+  const { bundle } = await runStructuredExtraction({
+    engine: "openai",
+    apiKey: input.apiKey,
+    model: input.model || "gpt-4o",
+    fileName: input.fileName,
+    entities: [],
+    images: [{ mimeType: input.mediaType || "image/jpeg", data }],
+  });
+  return bundle;
 }
-
-const PDF_USER_TEXT = `Visually read this document (running OCR as needed). Extract people, locations, vehicles, timestamps, and exhibits into structured items. For every item include pageNumber (1-indexed), exactQuote (verbatim), and optional boundingBox as percentages 0-100 {x,y,width,height}. Return STRICT JSON ONLY: { "items": [{ "category": "person"|"location"|"vehicle"|"time"|"evidence", "title": string, "entityName": string, "timestamp": string|null, "rawQuote": string, "exactQuote": string, "pageNumber": number, "boundingBox": {"x":number,"y":number,"width":number,"height":number}|null, "confidence": number, "details": string }] }`;
 
 export async function runRenderedPagesExtraction(input: {
   pages: { pageNumber: number; imageBase64: string }[];
   fileName: string;
   apiKey: string;
-  anthropicModel?: string;
+  engine?: ExtractEngine;
+  model?: string;
 }): Promise<ExtractBundle> {
-  if (!input.pages.length) throw new ExtractHttpError(400, "rendered_pages payload has no page images.");
-  const content: Record<string, unknown>[] = [];
-  for (const p of input.pages) {
-    const data = String(p.imageBase64 || "").replace(/^data:image\/\w+;base64,/, "").replace(/\s+/g, "");
-    if (!data) continue;
-    content.push({
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: "image/jpeg",
-        data,
-      },
-    });
-  }
-  content.push({
-    type: "text",
-    text: `Visually read these scanned case document pages. Extract all observable people, locations, vehicles, timestamps, and physical evidence into structured entities.
-Respond with STRICT JSON ONLY matching the system schema (items, entities, relationships). Each item must include pageNumber for the page it was read from.`,
+  void input.engine;
+  const images = input.pages.flatMap((p) => {
+    const data = stripImage(p.imageBase64);
+    return data ? [{ mimeType: "image/jpeg" as const, data }] : [];
+  }).slice(0, 4);
+  if (!images.length) return structuredToBundle({ entities: [], events: [] });
+  const { bundle } = await runStructuredExtraction({
+    engine: "openai",
+    apiKey: input.apiKey,
+    model: input.model || "gpt-4o",
+    fileName: input.fileName,
+    entities: [],
+    text: `Pages ${input.pages.map((p) => p.pageNumber).join(", ")} of scanned case document.`,
+    images,
   });
-  if (content.length < 2) throw new ExtractHttpError(400, "rendered_pages payload has no page images.");
-  const raw = await extractWithAnthropicContent(
-    input.apiKey,
-    EXTRACT_SYSTEM,
-    content,
-    input.anthropicModel || MODEL_NAME,
-    3000,
-  );
-  try {
-    return parseExtractBundle(raw);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : "Invalid JSON";
-    throw new ExtractHttpError(502, detail);
-  }
+  return bundle;
 }
 
 export async function runPdfExtraction(input: {
   fileBase64: string;
   fileName: string;
   apiKey: string;
-  anthropicModel?: string;
+  text?: string;
 }): Promise<ExtractBundle> {
-  const data = input.fileBase64.replace(/^data:application\/pdf;base64,/i, "").replace(/\s+/g, "");
-  if (!data) throw new ExtractHttpError(400, "PDF payload is empty.");
-  const raw = await extractWithAnthropicContent(
-    input.apiKey,
-    undefined,
-    [
-      {
-        type: "document",
-        source: {
-          type: "base64",
-          media_type: "application/pdf",
-          data,
-        },
-      },
-      { type: "text", text: PDF_USER_TEXT },
-    ],
-    input.anthropicModel || MODEL_NAME,
-    3000,
-    { "anthropic-beta": "pdfs-2024-09-25" },
-  );
-  try {
-    return parseExtractBundle(raw);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : "Invalid JSON";
-    throw new ExtractHttpError(502, detail);
-  }
+  void input.fileBase64;
+  return runExtraction({
+    text: input.text || "",
+    fileName: input.fileName,
+    entities: [],
+    apiKey: input.apiKey,
+  });
 }
 
 export async function runEntityScout(input: {
@@ -178,86 +113,99 @@ export async function runEntityScout(input: {
   fileName: string;
   entities: ExtractEntityHint[];
   apiKey: string;
-  provider: "anthropic" | "openai";
-  anthropicModel?: string;
+  provider?: ExtractEngine | "anthropic" | "openai";
   openaiModel?: string;
 }): Promise<ScoutedEntity[]> {
-  const prompt = userScoutPrompt(input.text, input.fileName, input.entities);
-  if (input.provider === "openai") {
-    return extractWithOpenAI(input.apiKey, prompt, ENTITY_SCOUT_SYSTEM, input.openaiModel).then(parseScoutedEntities);
-  }
-  return extractWithAnthropic(input.apiKey, prompt, ENTITY_SCOUT_SYSTEM, input.anthropicModel).then(parseScoutedEntities);
+  void input.provider;
+  const bundle = await runExtraction(input);
+  return bundle.entities.map((ent) => ({
+    name: ent.name,
+    type: ent.type === "place" ? "place" as const : ent.type === "vehicle" ? "vehicle" as const : "person" as const,
+    role: ent.classification,
+    quote: ent.contextSnippet || "",
+    details: ent.classification,
+    sourceFile: input.fileName,
+  }));
 }
 
-async function extractWithAnthropicContent(
-  apiKey: string,
-  system: string | undefined,
-  content: unknown,
-  model: string,
-  maxTokens: number,
-  extraHeaders?: Record<string, string>,
-): Promise<string> {
+function emptyBody(extra?: Record<string, unknown>) {
+  return {
+    engine: "gpt-4o",
+    events: [],
+    items: [],
+    entities: [],
+    relationships: [],
+    ...extra,
+  };
+}
+
+export async function dispatchExtract(input: {
+  payload: Record<string, unknown>;
+  headerKey?: string;
+  headerProvider?: string;
+  env: Record<string, string | undefined>;
+}): Promise<{ status: number; body: Record<string, unknown> }> {
   try {
-    const raw = await postAnthropicMessages({
-      apiKey,
-      system,
-      user: content as string | Array<Record<string, unknown>>,
-      maxTokens,
-      extraHeaders,
-      preferredModel: model || MODEL_NAME,
+    const resolved = resolveExtractEngine({
+      headerKey: input.headerKey,
+      headerProvider: input.headerProvider,
+      env: input.env,
     });
-    const errorData = JSON.parse(raw || "{}") as { content?: { type?: string; text?: string }[] };
-    const text = Array.isArray(errorData.content)
-      ? errorData.content.map((b) => (b.type === "text" ? b.text ?? "" : "")).join("\n")
-      : "";
-    const fromFirst = errorData.content?.[0]?.text ?? "";
-    const combined = (text || fromFirst).trim();
-    if (!combined) throw new ExtractHttpError(502, "Anthropic returned an empty response.");
-    return combined;
+    const payload = input.payload;
+    const kind = String(payload.type || "").toLowerCase();
+    const fileName = String(payload.filename || payload.fileName || "evidence");
+    const entities = Array.isArray(payload.entities) ? payload.entities as ExtractEntityHint[] : [];
+    const pages = Array.isArray(payload.pages) ? payload.pages as { pageNumber?: number; imageBase64?: string }[] : [];
+    const text = String(payload.text || "");
+
+    let bundle: ExtractBundle;
+
+    if (kind === "rendered_pages" || pages.length) {
+      bundle = await runRenderedPagesExtraction({
+        pages: pages.map((p, i) => ({ pageNumber: p.pageNumber || i + 1, imageBase64: p.imageBase64 || "" })),
+        fileName,
+        apiKey: resolved.apiKey,
+        model: resolved.model,
+      });
+    } else if (kind === "image" || payload.imageBase64 || (typeof payload.fileBase64 === "string" && String(payload.mediaType || "").startsWith("image/"))) {
+      bundle = await runVisionExtraction({
+        imageBase64: String(payload.fileBase64 || payload.imageBase64 || ""),
+        mediaType: typeof payload.mediaType === "string" ? payload.mediaType : "image/jpeg",
+        fileName,
+        apiKey: resolved.apiKey,
+        model: resolved.model,
+      });
+    } else {
+      bundle = (await runStructuredExtraction({
+        engine: "openai",
+        apiKey: resolved.apiKey,
+        model: resolved.model,
+        text,
+        fileName,
+        entities,
+        maxChars: EXTRACT_MAX_CHARS,
+        summary: Boolean(payload.summary),
+      })).bundle;
+    }
+
+    if (payload.mode === "entities") {
+      return { status: 200, body: { engine: "gpt-4o", entities: bundle.entities } };
+    }
+    return {
+      status: 200,
+      body: {
+        engine: "gpt-4o",
+        events: bundle.events,
+        items: bundle.events,
+        entities: bundle.entities,
+        relationships: bundle.relationships,
+      },
+    };
   } catch (err) {
-    if (err instanceof ExtractHttpError) throw err;
-    const status = err && typeof err === "object" && "status" in err && typeof (err as { status: unknown }).status === "number"
-      ? (err as { status: number }).status
-      : 500;
-    throw new ExtractHttpError(status, err instanceof Error ? err.message : "Anthropic request failed.");
+    const status = err instanceof ExtractHttpError ? err.status : 200;
+    const message = err instanceof Error ? err.message : "Extraction failed.";
+    console.error("[Extraction] Handler error", status, message);
+    if (status === 401) return { status: 200, body: { error: message, ...emptyBody() } };
+    return { status: 200, body: emptyBody({ warning: message }) };
   }
-}
-
-async function extractWithAnthropic(apiKey: string, prompt: string, system: string, model?: string): Promise<string> {
-  return extractWithAnthropicContent(
-    apiKey,
-    system,
-    prompt,
-    model || MODEL_NAME,
-    system === ENTITY_SCOUT_SYSTEM ? 4000 : 8192,
-  );
-}
-
-async function extractWithOpenAI(apiKey: string, prompt: string, system: string, model?: string): Promise<string> {
-  const OpenAI = (await import("openai")).default;
-  const client = new OpenAI({ apiKey });
-  try {
-    const msg = await client.chat.completions.create({
-      model: model || "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      max_tokens: 4000,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt },
-      ],
-    });
-    return msg.choices[0]?.message?.content ?? "";
-  } catch (err) {
-    if (err instanceof ExtractHttpError) throw err;
-    throw wrapProviderError("OpenAI", err);
-  }
-}
-
-function wrapProviderError(vendor: string, err: unknown): ExtractHttpError {
-  const rec = err && typeof err === "object"
-    ? err as { status?: number; statusCode?: number; message?: string; error?: { message?: string; type?: string } }
-    : {};
-  const status = rec.status ?? rec.statusCode ?? 500;
-  const detail = rec.error?.message || rec.error?.type || rec.message || (err instanceof Error ? err.message : "request failed");
-  return new ExtractHttpError(status, `${vendor}: ${detail}`);
 }

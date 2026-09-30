@@ -2,6 +2,9 @@ import type { EntityRelationship, SourceCitation, ExternalIntelLead, IntelClaim,
 import { storedEntityType } from "../types";
 import { namesLooselyMatch, parseEventTime } from "../lib/eventTime";
 import { classifySource } from "../lib/sourceTier";
+import { mapContactAffiliation, normalizeAlertLevel } from "../lib/missingPerson";
+import { isVictimOrDeceased } from "../utils/roleBadge";
+import type { SubjectProfile } from "./schema";
 import {
   db,
   DEFAULT_OPERATOR,
@@ -42,8 +45,9 @@ export function formatTouched(ts: number) {
 
 export function statusToTone(status: string) {
   const s = status.toUpperCase();
-  if (s === "ACTIVE" || s === "FIELD") return "active" as const;
-  if (s === "REVIEW") return "review" as const;
+  if (s === "CRITICAL_MEDICAL") return "fail" as const;
+  if (s === "ENDANGERED_MISSING" || s === "REVIEW") return "review" as const;
+  if (s === "ACTIVE_MISSING" || s === "ACTIVE" || s === "FIELD") return "active" as const;
   if (s === "COLD" || s === "ARCHIVED" || s === "CLOSED") return "cold" as const;
   return "ok" as const;
 }
@@ -87,21 +91,34 @@ export async function createCase(input: {
   workingNotes?: string;
   incidentStart?: string;
   incidentEnd?: string;
+  subjectName?: string;
+  fileIdentifier?: string;
+  lksAt?: string;
+  lksLocation?: string;
+  lksCircumstances?: string;
+  subjectProfile?: SubjectProfile;
 }) {
   const now = Date.now();
+  const subjectName = (input.subjectName || input.title).trim();
   const row: CaseRecord = {
     id: await nextCaseId(),
-    title: input.title.trim(),
+    title: subjectName,
     summary: input.summary.trim(),
-    status: input.status,
+    status: normalizeAlertLevel(input.status) as CaseStatus,
     isArchived: false,
     archivedAt: undefined,
     createdAt: now,
     updatedAt: now,
     workingNotes: input.workingNotes ?? "",
-    jurisdiction: input.jurisdiction ?? "",
-    incidentStart: input.incidentStart ?? "",
+    jurisdiction: input.jurisdiction ?? input.lksLocation ?? "",
+    incidentStart: input.incidentStart ?? (input.lksAt ? input.lksAt.slice(0, 10) : ""),
     incidentEnd: input.incidentEnd ?? "",
+    subjectName,
+    fileIdentifier: (input.fileIdentifier || "").trim(),
+    lksAt: input.lksAt ?? "",
+    lksLocation: input.lksLocation ?? input.jurisdiction ?? "",
+    lksCircumstances: input.lksCircumstances ?? "",
+    subjectProfile: input.subjectProfile ?? {},
   };
   await db.cases.add(row);
   return row;
@@ -109,7 +126,7 @@ export async function createCase(input: {
 
 export async function updateCase(
   id: string,
-  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "incidentStart" | "incidentEnd">>,
+  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "incidentStart" | "incidentEnd" | "subjectName" | "fileIdentifier" | "lksAt" | "lksLocation" | "lksCircumstances" | "subjectProfile">>,
 ) {
   await db.cases.update(id, { ...patch, updatedAt: Date.now() });
 }
@@ -128,7 +145,7 @@ export async function setCaseArchived(id: string, isArchived: boolean) {
   await db.cases.update(id, {
     isArchived: false,
     archivedAt: "",
-    status: "ACTIVE",
+    status: "ACTIVE_MISSING",
     updatedAt: now,
   });
 }
@@ -176,6 +193,7 @@ export async function upsertEntityByName(input: {
   classification?: string;
   identifiers?: string[];
   notes?: string;
+  metadata?: Record<string, string>;
   fromSecondary?: boolean;
 }) {
   const name = input.name.trim();
@@ -204,6 +222,7 @@ export async function upsertEntityByName(input: {
       patch.provenanceTier = "primary";
       patch.uncorroborated = false;
     }
+    if (input.metadata) patch.metadata = { ...(hit.metadata ?? {}), ...input.metadata };
     await db.entities.update(hit.id, patch);
     return (await db.entities.get(hit.id)) ?? hit;
   }
@@ -218,6 +237,7 @@ export async function upsertEntityByName(input: {
     classification: input.classification || input.role || "UNVERIFIED",
     identifiers: input.identifiers ?? [],
     notes: mediaNote,
+    metadata: input.metadata ?? {},
     provenanceTier: input.fromSecondary ? "secondary" : "primary",
     uncorroborated: Boolean(input.fromSecondary),
   });
@@ -362,6 +382,12 @@ export async function addEvidence(input: {
 }) {
   const fileName = input.fileName.trim() || "untitled.txt";
   const now = new Date().toISOString();
+  const hash = (input.sha256Hash || "").trim();
+  if (hash) {
+    const existing = await db.evidence.where("caseId").equals(input.caseId).toArray();
+    const hit = existing.find((row) => (row.sha256Hash || "").toLowerCase() === hash.toLowerCase());
+    if (hit) return hit;
+  }
   const classified = classifySource({
     fileName,
     originalFileName: input.originalFileName,
@@ -385,7 +411,7 @@ export async function addEvidence(input: {
     fileBase64: input.fileBase64,
     thumbnailDataUrl: input.thumbnailDataUrl,
     mediaType: input.mediaType ?? input.mimeType,
-    sha256Hash: input.sha256Hash ?? "",
+    sha256Hash: hash || input.sha256Hash || "",
     byteSize: input.byteSize ?? input.fileSize ?? 0,
     ingestedAt: input.ingestedAt ?? now,
     ingestedByCallsign: input.ingestedByCallsign ?? "",
@@ -447,7 +473,7 @@ export async function addVerifyDrafts(
       if (rec) {
         await db.evidence.update(evidenceId, {
           status: rows.length ? "indexed" : "flagged",
-          lastError: rows.length ? "" : "Claude returned no items. Try a shorter excerpt or paste narrative text.",
+          lastError: "",
         });
       }
     }
@@ -636,7 +662,7 @@ export async function deleteCaseContact(id: string) {
 /** Mirror extracted people onto the rolodex so Overview contacts update without a review gate. */
 export async function ensureContactsForPeople(caseId: string) {
   const people = (await db.entities.where("caseId").equals(caseId).toArray())
-    .filter((e) => e.type === "person");
+    .filter((e) => e.type === "person" && !isVictimOrDeceased(e.role, e.notes, e.classification));
   const contacts = await db.caseContacts.where("caseId").equals(caseId).toArray();
   const byEntity = new Set(contacts.map((c) => c.entityId).filter(Boolean));
   const byName = new Set(contacts.map((c) => c.name.trim().toLowerCase()));
@@ -646,7 +672,7 @@ export async function ensureContactsForPeople(caseId: string) {
     await createCaseContact({
       caseId,
       name: person.name,
-      affiliation: person.role?.trim() || "Other",
+      affiliation: mapContactAffiliation(person.role || "", person.classification),
       entityId: person.id,
       phone: "",
       email: "",
