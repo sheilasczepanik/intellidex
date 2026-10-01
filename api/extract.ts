@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { dispatchExtract } from "../server/extract.ts";
 import { readJsonBody } from "../server/readJsonBody.ts";
+import { mauraFallbackApiBody } from "../src/lib/mauraExtractFallback.ts";
 
 export const maxDuration = 60;
 
@@ -31,6 +32,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    console.log("[Extraction] OPENAI_API_KEY present:", Boolean((process.env.OPENAI_API_KEY || "").trim()));
     const payload = await readJsonBody(req);
     const result = await dispatchExtract({
       payload,
@@ -42,13 +44,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (err) {
     const message = err instanceof Error ? err.message : "Extraction service unavailable (verify API key or document size)";
     console.error("[Extraction] Endpoint error", message);
-    return res.status(200).json({
-      engine: "fallback",
-      warning: message,
-      events: [],
-      items: [],
-      entities: [],
-      relationships: [],
-    });
+    return res.status(200).json(mauraFallbackApiBody(message));
   }
 }

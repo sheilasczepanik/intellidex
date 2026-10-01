@@ -28,6 +28,7 @@ export const intelExtractCardSchema = z.object({
   category: z.string(),
   date: z.string().optional(),
   quote: z.string(),
+  anchorText: z.string().optional(),
   confidence: z.number().optional(),
   details: z.string().optional(),
   role: z.string().optional(),
@@ -108,9 +109,6 @@ export function resolveExtractEngine(input: {
   const envKey = (input.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY || "").trim();
   const headerOpenAi = header.startsWith("sk-") && !header.startsWith("sk-ant-");
   const apiKey = envKey || (headerOpenAi ? header : "");
-  if (!apiKey) {
-    throw new ExtractHttpError(401, "Set OPENAI_API_KEY in .env.local, or paste an OpenAI key in Settings.");
-  }
   return { engine: "openai", apiKey, model: input.env.OPENAI_MODEL?.trim() || "gpt-4o" };
 }
 

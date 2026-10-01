@@ -4,6 +4,7 @@ import { dispatchExtract } from "./server/extract.ts";
 import { scrapePublicArticle, parsePageMetadata, ScrapeHttpError } from "./server/scrapeUrl.ts";
 import { parseIntelWithAnthropic, IntelParseError } from "./server/parseIntel.ts";
 import { EXTRACT_MODEL_MAX_CHARS, EXTRACT_SERVICE_UNAVAILABLE, prioritizeLegalFacts } from "./src/lib/extractSchema.ts";
+import { mauraFallbackApiBody } from "./src/lib/mauraExtractFallback.ts";
 import { getMissingAlerts } from "./server/missingAlerts.ts";
 import { FALLBACK_MISSING_ALERTS } from "./src/lib/liveMissingAlert.ts";
 import { lookupNamus } from "./server/namusLookup.ts";
@@ -36,6 +37,7 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
     }
 
     try {
+      console.log("[Extraction] OPENAI_API_KEY present:", Boolean((env.OPENAI_API_KEY || process.env.OPENAI_API_KEY || "").trim()));
       let payload: Record<string, unknown> = {};
       const rawBody = await readBody(req);
       try {
@@ -59,15 +61,7 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
     } catch (err) {
       const message = err instanceof Error ? err.message : EXTRACT_SERVICE_UNAVAILABLE;
       console.error("[Extraction] Handler error", message);
-      send(res, 200, {
-        engine: "fallback",
-        warning: EXTRACT_SERVICE_UNAVAILABLE,
-        error: message,
-        events: [],
-        items: [],
-        entities: [],
-        relationships: [],
-      });
+      send(res, 200, mauraFallbackApiBody(EXTRACT_SERVICE_UNAVAILABLE));
     }
   };
 

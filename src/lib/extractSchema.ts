@@ -59,8 +59,8 @@ export type ExtractedEvent = {
   tier?: "primary" | "secondary";
 };
 
-export const EXTRACT_SYSTEM = `You are INTELLIDEX, an elite investigative intelligence extraction engine.
-Analyze the provided case document and extract ALL verified investigative entities, key persons, critical timestamps, locations, vehicles, and physical evidence.
+export const EXTRACT_SYSTEM = `You are INTELLIDEX, an elite investigative intelligence extraction engine for missing-person and case-file documents.
+Analyze the provided case document and extract ALL verified investigative entities — every named person, place, timestamp, vehicle, and exhibit you can support with a quote. Do not stop after a single card.
 
 Return ONLY a JSON object (no markdown) of this shape:
 {
@@ -70,7 +70,8 @@ Return ONLY a JSON object (no markdown) of this shape:
       "title": "concise name or summary (e.g. Butch Atwood (Bus Driver), Route 112 Crash Site, 1996 Saturn SL2)",
       "category": "display badge (e.g. Primary Witness, Last Known Sighting, Physical Evidence)",
       "date": "ISO date (YYYY-MM-DD) or source date/time text if applicable, else empty string",
-      "quote": "verbatim excerpt from the document proving the extraction",
+      "quote": "EXACT contiguous snippet copied from the document (used to highlight the PDF text layer)",
+      "anchorText": "same verbatim snippet, or a slightly shorter unique phrase that appears in the document",
       "confidence": 80,
       "details": "1-2 sentence investigative context summary",
       "role": "optional person role: subject | witness | investigator | family | other"
@@ -78,20 +79,21 @@ Return ONLY a JSON object (no markdown) of this shape:
   ]
 }
 
-Category coverage (extract every distinct item you can support with a quote):
-- PERSON: full name, role (subject, witness, investigator, family), source quote, confidence 85-98.
-- LOCATION: specific addresses, landmarks, roadways, cities, states, coordinates, source quote.
-- TIMELINE_EVENT: explicit date/time timestamps, chronological event description, source quote.
-- VEHICLE: year, make, model, color, registration/plates, distinguishing characteristics.
-- EVIDENCE: physical items found, personal effects, digital traces, ATM receipts, phone pings.
+Extract ALL of the following whenever they appear (examples from a typical New Hampshire missing-person file):
+1. PERSONS — e.g. Maura Murray, Fred Murray, Butch Atwood, Cecil Smith, Kathleen Murray, Faith Westman. One card per person; include role.
+2. LOCATIONS — e.g. Route 112 Woodsville NH, Kennedy Hall UMass Amherst, Bradley Hill Road, Londonderry tower.
+3. TIMESTAMPS / DATES — e.g. Feb 9 2004 15:40 ATM, 19:27 911 call, 19:30 bus contact, 19:46 Cecil Smith arrival. One card per distinct clock time when possible.
+4. VEHICLES / EVIDENCE — e.g. 1996 Black Saturn SL2, rag in tailpipe, missing backpack & cell phone.
 
 Rules:
+- quote and anchorText MUST be copied character-for-character from the source so the document viewer can highlight them. Prefer 8–160 characters of unique text.
 - Feed facts from the document text (and any attached page images). Do not invent names, plates, or dates that are not in the source.
 - Extract despite OCR errors or redactions: dates, locations, department names, call numbers, officer names.
 - Normalize obvious OCR typos (MASSACHUSEATS → Massachusetts) in title/details; keep quote verbatim.
 - Distinguish report/file dates from incident dates. Prefer incident / last-known-sighting time for timeline_event.date.
 - confidence is an integer 80-99 (typically 85-98) reflecting how clearly the quote supports the card.
 - One card per distinct person, place, timestamped event, vehicle, or exhibit. Do not collapse a crash site and a later search grid into one location.
+- Exhaustive: if the document names six people, return six person cards. Empty arrays are a failure.
 - If almost nothing is recoverable, still return identifiers (call number, agency, report date) rather than an empty array.`;
 
 export function unwrapModelJson(raw: string) {
@@ -169,8 +171,10 @@ function normalizeEvent(row: unknown): ExtractedEvent {
   const composedTs = [date, time].filter(Boolean).join(" ");
   const category = normalizeCategory(typeKey || r.category || r.newEntityType);
   const entityType = normalizeEntityType(r.entityType ?? r.newEntityType ?? typeKey ?? r.category, category);
-  const rawQuote = String(r.quote ?? r.sourceReference ?? r.rawQuote ?? r.exactQuote ?? r.snippet ?? "").trim();
-  const exactQuote = String(r.exactQuote ?? rawQuote).trim();
+  const quote = String(r.quote ?? r.sourceReference ?? r.rawQuote ?? r.exactQuote ?? r.snippet ?? "").trim();
+  const anchorText = String(r.anchorText ?? "").trim();
+  const rawQuote = quote || anchorText;
+  const exactQuote = String(r.exactQuote ?? quote ?? anchorText).trim();
   const ts = r.timestamp === null || r.timestamp === undefined ? composedTs : String(r.timestamp).trim();
   const timestampLabel = String(r.timestampLabel ?? (composedTs || ts || "Unknown")).trim() || "Unknown";
   const title = String(r.title ?? r.name ?? "Untitled fact").trim() || "Untitled fact";
@@ -199,7 +203,7 @@ function normalizeEvent(row: unknown): ExtractedEvent {
     confidence,
     citation: String(r.sourceReference ?? r.citation ?? (pageNumber ? `p.${pageNumber}` : displayBadge || category)),
     pageNumber,
-    exactQuote: exactQuote || rawQuote,
+    exactQuote: anchorText || exactQuote || rawQuote,
     boundingBox,
     tier: String(r.tier ?? "").toLowerCase() === "secondary" ? "secondary" : "primary",
   };
@@ -652,6 +656,7 @@ export function userExtractPrompt(
   return [
     `Source file: ${fileName}`,
     "Return JSON { \"entities\": [ ... ] } covering person, location, timeline_event, vehicle, and evidence.",
+    "Extract ALL named persons, locations, timestamps/dates, vehicles, and evidence. Each card needs quote (and optional anchorText) copied EXACTLY from the source for highlighting.",
     "Extract any recognizable investigative facts (dates, locations, department names, call numbers, officer names) despite OCR errors or redactions.",
     "OCR cleanup: correct obvious scanning typos, expand garbled place names, and keep incident dates separate from report dates.",
     opts?.summary

@@ -60,30 +60,60 @@ export async function scrapeArticleFromUrl(url: string): Promise<ScrapedArticle>
   };
 }
 
-export async function parseMetadataFromUrl(url: string): Promise<PageMetadata> {
-  const res = await fetch("/api/parseMetadata", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
-  });
-  const rawText = await res.text();
-  let json: Record<string, unknown> = {};
+export function fallbackPageMetadata(url: string): PageMetadata {
+  const parsed = parseArticleUrl(url) || url.trim();
+  let title = parsed;
   try {
-    json = rawText ? JSON.parse(rawText) as Record<string, unknown> : {};
+    const u = new URL(parsed);
+    const host = u.hostname.replace(/^www\./i, "");
+    const namusToken = u.href.match(/\b(?:NamUs[#\- ]?\d+|MP[#\- ]?\d{2,})\b/i);
+    const namusPath = u.pathname.match(/\/(?:case|missingpersons?|mp)[/-]?(\d+)/i);
+    if (/namus/i.test(host) && (namusToken || namusPath)) {
+      title = `NamUs Case ${namusPath?.[1] || namusToken?.[0] || host}`;
+    } else {
+      title = host || parsed;
+    }
   } catch {
-    json = {};
+    title = parsed;
   }
-  if (!res.ok) {
-    throw new Error(typeof json.error === "string" ? json.error : `Could not parse metadata (${res.status})`);
-  }
-  const parsed = parseArticleUrl(url) || url;
   return {
-    url: typeof json.url === "string" && json.url.trim() ? json.url : parsed,
-    title: typeof json.title === "string" && json.title.trim() ? json.title : parsed,
-    description: typeof json.description === "string" ? json.description : "",
-    author: typeof json.author === "string" ? json.author : "",
-    favicon: typeof json.favicon === "string" ? json.favicon : "",
-    image: typeof json.image === "string" ? json.image : "",
-    publishedDate: typeof json.publishedDate === "string" && json.publishedDate.trim() ? json.publishedDate : null,
+    url: parsed,
+    title,
+    description: "",
+    author: "",
+    favicon: "",
+    image: "",
+    publishedDate: null,
   };
+}
+
+export async function parseMetadataFromUrl(url: string): Promise<PageMetadata> {
+  const fallback = fallbackPageMetadata(url);
+  try {
+    const res = await fetch("/api/parseMetadata", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const rawText = await res.text();
+    let json: Record<string, unknown> = {};
+    try {
+      json = rawText ? JSON.parse(rawText) as Record<string, unknown> : {};
+    } catch {
+      json = {};
+    }
+    if (!res.ok) return fallback;
+    const parsed = parseArticleUrl(url) || url;
+    return {
+      url: typeof json.url === "string" && json.url.trim() ? json.url : parsed,
+      title: typeof json.title === "string" && json.title.trim() ? json.title : fallback.title,
+      description: typeof json.description === "string" ? json.description : "",
+      author: typeof json.author === "string" ? json.author : "",
+      favicon: typeof json.favicon === "string" ? json.favicon : "",
+      image: typeof json.image === "string" ? json.image : "",
+      publishedDate: typeof json.publishedDate === "string" && json.publishedDate.trim() ? json.publishedDate : null,
+    };
+  } catch {
+    return fallback;
+  }
 }

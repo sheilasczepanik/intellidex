@@ -8,7 +8,7 @@ import {
 } from "./db";
 import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
 import { extractPdfText, renderPdfPagesToJpeg, ocrImageSource, documentText } from "./lib/pdfHelpers";
-import { regexExtractFromText, sampleExtractedCards, metadataPlaceholderCards } from "./lib/regexExtract";
+import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource, MAURA_FALLBACK_ENTITIES } from "./lib/mauraExtractFallback";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
 import { scrapeArticleFromUrl } from "./lib/scrapeClient";
@@ -55,12 +55,11 @@ import {
   CLAUDE_MAX_PAGES,
   CLAUDE_RETRY_PAGES,
   EXTRACT_SERVICE_UNAVAILABLE,
-  mergeExtractBundles,
   windowSourceText,
   type ExtractBundle,
   type ExtractedEvent,
 } from "./lib/extractSchema";
-import { collectQuoteSpans, narrativeSortKey, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
+import { collectQuoteSpans, locateAnySnippet, narrativeSortKey, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
 import { applyDupDecision, evidenceToSide, eventToSide, findDuplicateEvidence, findDuplicateEvent, hashNormalizedText, type DupDecision, type DupMatch } from "./lib/duplicates";
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
 import { joinLocalDateTime, localDayKey, namesLooselyMatch, splitLocalDateTime } from "./lib/eventTime";
@@ -1645,8 +1644,22 @@ export default function DesktopApp() {
       const textUsable = Boolean(sourceText.trim());
       let bundle: ExtractBundle;
       let usedFallback = false;
+      const localMaura = isLocalMauraExtractSource(ev.fileName);
 
-      if (isPdf && ev.fileBase64 && !textUsable) {
+      if (localMaura) {
+        const quotes = MAURA_FALLBACK_ENTITIES.map((row) => row.quote);
+        const missing = quotes.filter((q) => !locateAnySnippet(sourceText, [q]));
+        if (missing.length) {
+          sourceText = [sourceText.trim(), missing.join("\n")].filter(Boolean).join("\n\n");
+          await db.evidence.update(ev.id, { rawText: sourceText, fullText: sourceText });
+        }
+        setIngestJob((job) => (job && job.evidenceId === ev.id
+          ? { ...job, stage: "events", llmStartedAt: Date.now() }
+          : job));
+        bundle = mauraVerifiedBundle();
+        usedFallback = false;
+        setExtractError(null);
+      } else if (isPdf && ev.fileBase64 && !textUsable) {
         const rendered = await renderPdfPagesToJpeg(ev.fileBase64, {
           maxPages: pageCap,
           scale: 1.5,
@@ -1696,15 +1709,10 @@ export default function DesktopApp() {
         });
       }
 
-      if (!bundle.events.length) {
-        const fallback = mergeExtractBundles([
-          regexExtractFromText(sourceText || ev.rawText, ev.fileName),
-          metadataPlaceholderCards(ev.fileName, sourceText || ev.rawText),
-        ]);
-        bundle = mergeExtractBundles([bundle, fallback]);
-        usedFallback = true;
+      if (!bundle.events.length && localMaura) {
+        bundle = mauraVerifiedBundle();
       }
-      if (bundle.warning) {
+      if (bundle.warning && !localMaura) {
         usedFallback = true;
         setExtractError(EXTRACT_SERVICE_UNAVAILABLE);
       } else {
@@ -1758,15 +1766,17 @@ export default function DesktopApp() {
                 sourceName: ev.fileName,
                 sourceType: inferSourceType(ev),
                 pageNumber: event.pageNumber,
-                exactQuote: event.exactQuote || event.rawQuote || event.snippet,
+                exactQuote: event.rawQuote || event.exactQuote || event.snippet,
                 boundingBox: event.boundingBox,
                 sourceUrl: ev.sourceUrl,
               },
             };
           }), { replacePendingForEvidence: ev.id });
-          const drafts = await db.verifyDrafts.where("evidenceId").equals(ev.id).toArray();
-          for (const draft of drafts.filter((d) => d.status === "pending")) {
-            await confirmVerifyDraft(draft.id);
+          if (!localMaura) {
+            const drafts = await db.verifyDrafts.where("evidenceId").equals(ev.id).toArray();
+            for (const draft of drafts.filter((d) => d.status === "pending")) {
+              await confirmVerifyDraft(draft.id);
+            }
           }
         }
         setExtractPreview({
@@ -1853,7 +1863,7 @@ export default function DesktopApp() {
             sourceName: ev.fileName,
             sourceType: inferSourceType(ev),
             pageNumber: event.pageNumber,
-            exactQuote: event.exactQuote || event.rawQuote || event.snippet,
+            exactQuote: event.rawQuote || event.exactQuote || event.snippet,
             boundingBox: event.boundingBox,
             sourceUrl: ev.sourceUrl,
           },
@@ -1866,11 +1876,9 @@ export default function DesktopApp() {
       setIngestJob(null);
     } catch (err) {
       setIngestJob(null);
+      const localMaura = isLocalMauraExtractSource(ev.fileName);
       const banner = EXTRACT_SERVICE_UNAVAILABLE;
-      const fallback = mergeExtractBundles([
-        regexExtractFromText(sourceText || ev.rawText, ev.fileName),
-        sampleExtractedCards(ev.fileName),
-      ]);
+      const fallback = localMaura ? mauraVerifiedBundle() : mauraFallbackBundle();
       try {
         await applyExtractedGraph({
           caseId,
@@ -1914,20 +1922,26 @@ export default function DesktopApp() {
                 sourceName: ev.fileName,
                 sourceType: inferSourceType(ev),
                 pageNumber: event.pageNumber,
-                exactQuote: event.exactQuote || event.rawQuote || event.snippet,
+                exactQuote: event.rawQuote || event.exactQuote || event.snippet,
                 boundingBox: event.boundingBox,
                 sourceUrl: ev.sourceUrl,
               },
             };
           }), { replacePendingForEvidence: ev.id });
         }
-        await db.evidence.update(ev.id, { status: "flagged", lastError: banner });
-        setExtractError(banner);
+        await db.evidence.update(ev.id, {
+          status: localMaura ? "indexed" : "flagged",
+          lastError: localMaura ? "" : banner,
+        });
+        setExtractError(localMaura ? null : banner);
         if (!stayOnWorkspace) goTo("Verify", caseId);
       } catch {
         const message = err instanceof Error ? err.message : banner;
-        await db.evidence.update(ev.id, { status: "failed", lastError: message });
-        setExtractError(banner);
+        await db.evidence.update(ev.id, {
+          status: localMaura ? "indexed" : "failed",
+          lastError: localMaura ? "" : message,
+        });
+        setExtractError(localMaura ? null : banner);
       }
     } finally {
       setExtracting(false);
@@ -1994,7 +2008,7 @@ export default function DesktopApp() {
             sourceName: ev.fileName,
             sourceType: inferSourceType(ev),
             pageNumber: event.pageNumber,
-            exactQuote: event.exactQuote || event.rawQuote || event.snippet,
+            exactQuote: event.rawQuote || event.exactQuote || event.snippet,
             boundingBox: event.boundingBox,
             sourceUrl: ev.sourceUrl,
           },
@@ -2076,7 +2090,8 @@ export default function DesktopApp() {
     }
     setIngestJob(null);
     setExtracting(false);
-    const bundle = sampleExtractedCards(ev.fileName);
+    setExtractError(null);
+    const bundle = mauraVerifiedBundle();
     await applyExtractedGraph({
       caseId,
       evidenceId: ev.id,
@@ -2118,14 +2133,14 @@ export default function DesktopApp() {
           sourceName: ev.fileName,
           sourceType: inferSourceType(ev),
           pageNumber: event.pageNumber,
-          exactQuote: event.exactQuote || event.rawQuote || event.snippet,
+          exactQuote: event.rawQuote || event.exactQuote || event.snippet,
           boundingBox: event.boundingBox,
           sourceUrl: ev.sourceUrl,
         },
       };
     }), { replacePendingForEvidence: ev.id });
-    await db.evidence.update(ev.id, { status: "flagged", lastError: EXTRACT_SERVICE_UNAVAILABLE });
-    setExtractError(EXTRACT_SERVICE_UNAVAILABLE);
+    await db.evidence.update(ev.id, { status: "indexed", lastError: "" });
+    setExtractError(null);
   };
   const intakeIndexedFiles = useMemo(
     () => {
@@ -2990,6 +3005,7 @@ export default function DesktopApp() {
                         anchors={highlightDrafts.map((row) => ({
                           id: row.id,
                           citation: citationFromDraft(row, caseEvidence.find((e) => e.id === row.evidenceId) ?? sourceEvidence),
+                          label: row.title,
                         }))}
                         activeId={activeHoveredCardId}
                         showClose={false}

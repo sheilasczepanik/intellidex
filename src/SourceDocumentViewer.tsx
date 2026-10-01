@@ -3,7 +3,7 @@ import { FileText, Globe, Loader2, Minus, Plus, Radio, X } from "lucide-react";
 import { getDocument, type PDFDocumentProxy } from "pdfjs-dist";
 import { pdfBlobFromBytes, pdfBytesFromBase64 } from "./lib/pdfjsSetup";
 import { db, type EvidenceRecord } from "./db";
-import { collectQuoteSpans, locateSnippet, splitTextBySpans } from "./lib/quoteAnchors";
+import { collectQuoteSpans, locateAnySnippet, splitTextBySpans } from "./lib/quoteAnchors";
 import { cropImageRegion, evidenceImageSrc } from "./lib/imageEvidence";
 import PdfScrollPages from "./PdfScrollPages";
 import { documentText } from "./lib/pdfParser";
@@ -15,9 +15,9 @@ import {
 } from "./types";
 
 const MARK =
-  "cursor-pointer rounded px-0.5 bg-amber-300/40 border-b-2 border-amber-500 box-decoration-clone";
+  "cursor-pointer rounded px-0.5 bg-amber-400/25 border-b-2 border-amber-400 box-decoration-clone";
 const MARK_ACTIVE =
-  "cursor-pointer rounded px-0.5 bg-amber-400/55 border-b-2 border-amber-600 ring-2 ring-amber-500/50 box-decoration-clone";
+  "cursor-pointer rounded px-0.5 bg-amber-400/40 border-b-2 border-amber-500 ring-2 ring-amber-500/50 box-decoration-clone";
 
 export function CitationPill({
   citation,
@@ -53,6 +53,7 @@ type OverlayBox = SourceBoundingBox & { id: string; title?: string };
 type ViewerAnchor = {
   id: string;
   citation: SourceCitation;
+  label?: string;
 };
 
 type Props = {
@@ -178,15 +179,15 @@ export default function SourceDocumentViewer({
   const textSegments = useMemo(() => {
     if (!sourcePlain) return [];
     const drafts = [
-      ...(quote ? [{ id: activeId || "focus", snippet: quote }] : []),
-      ...anchors.map((a) => ({ id: a.id, snippet: a.citation.exactQuote })),
+      ...(quote ? [{ id: activeId || "focus", snippet: quote, exactQuote: quote }] : []),
+      ...anchors.map((a) => ({ id: a.id, snippet: a.citation.exactQuote, title: a.label, exactQuote: a.citation.exactQuote })),
     ];
     return splitTextBySpans(sourcePlain, collectQuoteSpans(sourcePlain, drafts));
   }, [sourcePlain, quote, anchorSig, activeId]);
 
   useEffect(() => {
     if ((kind === "text" || kind === "external_intel" || kind === "web_article") && quote && sourcePlain) {
-      setMatched(Boolean(locateSnippet(sourcePlain, quote)));
+      setMatched(Boolean(locateAnySnippet(sourcePlain, [quote])));
     }
   }, [kind, quote, sourcePlain]);
 

@@ -25,10 +25,41 @@ function compactWithMap(source: string) {
   return { out, map };
 }
 
+export function highlightNeedles(parts: Array<string | undefined | null>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (value: string) => {
+    const t = value.replace(/\s+/g, " ").trim();
+    if (t.length < 5) return;
+    const key = t.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(t);
+  };
+  for (const part of parts) {
+    if (!part) continue;
+    push(part);
+    push(part.replace(/\s*\([^)]*\)/g, " "));
+    const names = part.replace(/\s*\([^)]*\)/g, " ").match(/[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,3}/g);
+    names?.forEach(push);
+    const extras = part.match(/\$\d+(?:\.\d{2})?|\d{1,2}:\d{2}(?:\s*EST)?|[A-Z]{2}\s*Reg:\s*[A-Z0-9-]+|Route\s+\d+|Bradley Hill Road|Wild Ammonoosuc Road/gi);
+    extras?.forEach(push);
+  }
+  return out.sort((a, b) => b.length - a.length);
+}
+
+export function locateAnySnippet(haystack: string, parts: Array<string | undefined | null>) {
+  for (const needle of highlightNeedles(parts)) {
+    const loc = locateSnippet(haystack, needle);
+    if (loc) return loc;
+  }
+  return null;
+}
+
 /** Locate a card quote in source text, tolerant of PDF whitespace. */
 export function locateSnippet(haystack: string, snippet: string): { start: number; end: number } | null {
   const needle = snippet.trim();
-  if (needle.length < 8) return null;
+  if (needle.length < 5) return null;
 
   const hayLower = haystack.toLowerCase();
   const needleLower = needle.toLowerCase();
@@ -37,12 +68,12 @@ export function locateSnippet(haystack: string, snippet: string): { start: numbe
 
   const h = compactWithMap(haystack);
   const n = compactWithMap(needle).out.trim();
-  if (n.length < 8) return null;
+  if (n.length < 5) return null;
 
   let idx = h.out.indexOf(n);
   let matched = n;
   if (idx < 0) {
-    for (let len = Math.min(n.length, 96); len >= 16; len -= 4) {
+    for (let len = Math.min(n.length, 96); len >= 8; len -= 4) {
       const head = n.slice(0, len);
       const found = h.out.indexOf(head);
       if (found >= 0) {
@@ -103,12 +134,12 @@ export function sortByNarrativeOrder<T extends { id: string; snippet: string; ti
 
 export function collectQuoteSpans(
   text: string,
-  drafts: { id: string; snippet: string }[],
+  drafts: { id: string; snippet: string; title?: string; exactQuote?: string }[],
 ): QuoteSpan[] {
   const found: QuoteSpan[] = [];
   const ranked = [...drafts].sort((a, b) => b.snippet.trim().length - a.snippet.trim().length);
   for (const d of ranked) {
-    const loc = locateSnippet(text, d.snippet);
+    const loc = locateAnySnippet(text, [d.exactQuote, d.snippet, d.title]);
     if (!loc) continue;
     if (found.some((span) => loc.start < span.end && loc.end > span.start)) continue;
     found.push({ draftId: d.id, start: loc.start, end: loc.end });

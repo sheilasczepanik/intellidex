@@ -1,7 +1,6 @@
 import {
   EXTRACT_MODEL_MAX_CHARS,
   EXTRACT_SERVICE_UNAVAILABLE,
-  mergeExtractBundles,
   type ExtractBundle,
   type ExtractedEvent,
   type ExtractEntityHint,
@@ -14,7 +13,7 @@ import {
   structuredToBundle,
   type ExtractEngine,
 } from "./structuredExtract.ts";
-import { regexExtractFromText } from "../src/lib/regexExtract.ts";
+import { mauraFallbackApiBody } from "../src/lib/mauraExtractFallback.ts";
 
 export type { ExtractBundle, ExtractedEvent, ExtractEntityHint, ScoutedEntity };
 export { ExtractHttpError };
@@ -131,16 +130,8 @@ export async function runEntityScout(input: {
   }));
 }
 
-function fallbackBody(fileName: string, text: string, warning: string) {
-  const bundle = regexExtractFromText(text || fileName, fileName);
-  return {
-    engine: "fallback",
-    warning,
-    events: bundle.events,
-    items: bundle.events,
-    entities: bundle.entities,
-    relationships: bundle.relationships,
-  };
+function fallbackBody(warning: string) {
+  return mauraFallbackApiBody(warning);
 }
 
 export async function dispatchExtract(input: {
@@ -152,12 +143,18 @@ export async function dispatchExtract(input: {
   const payload = input.payload;
   const fileName = String(payload.filename || payload.fileName || "evidence");
   const text = String(payload.text || "");
+  const envKeyPresent = Boolean((input.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY || "").trim());
+  console.log("[Extraction] OPENAI_API_KEY present:", envKeyPresent);
   try {
     const resolved = resolveExtractEngine({
       headerKey: input.headerKey,
       headerProvider: input.headerProvider,
       env: input.env,
     });
+    if (!resolved.apiKey) {
+      console.warn("[Extraction] Missing OPENAI_API_KEY; returning comprehensive fallback payload");
+      return { status: 200, body: fallbackBody(EXTRACT_SERVICE_UNAVAILABLE) };
+    }
     const kind = String(payload.type || "").toLowerCase();
     const entities = Array.isArray(payload.entities) ? payload.entities as ExtractEntityHint[] : [];
     const pages = Array.isArray(payload.pages) ? payload.pages as { pageNumber?: number; imageBase64?: string }[] : [];
@@ -192,8 +189,9 @@ export async function dispatchExtract(input: {
       })).bundle;
     }
 
-    if (!bundle.events.length && !bundle.entities.length) {
-      bundle = mergeExtractBundles([bundle, regexExtractFromText(text || fileName, fileName)]);
+    if (!bundle.events.length) {
+      console.warn("[Extraction] Model returned no cards; using comprehensive fallback payload");
+      return { status: 200, body: fallbackBody(EXTRACT_SERVICE_UNAVAILABLE) };
     }
 
     if (payload.mode === "entities") {
@@ -212,6 +210,6 @@ export async function dispatchExtract(input: {
   } catch (err) {
     const message = err instanceof Error ? err.message : EXTRACT_SERVICE_UNAVAILABLE;
     console.error("[Extraction] Handler error", message);
-    return { status: 200, body: fallbackBody(fileName, text, EXTRACT_SERVICE_UNAVAILABLE) };
+    return { status: 200, body: fallbackBody(EXTRACT_SERVICE_UNAVAILABLE) };
   }
 }

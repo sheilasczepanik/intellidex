@@ -4,6 +4,7 @@ import { namesLooselyMatch, parseEventTime } from "../lib/eventTime";
 import { classifySource } from "../lib/sourceTier";
 import { mapContactAffiliation, normalizeAlertLevel } from "../lib/missingPerson";
 import { isVictimOrDeceased } from "../utils/roleBadge";
+import { categoryAlreadyExists, customMediaCategoryId, sanitizeMediaCategoryLabel } from "../lib/mediaCategories";
 import type { SubjectProfile } from "./schema";
 import {
   db,
@@ -130,6 +131,7 @@ export async function createCase(input: {
     lksCircumstances: input.lksCircumstances ?? "",
     subjectProfile: input.subjectProfile ?? {},
     pinnedPersonIds: [],
+    customMediaCategories: [],
   };
   await db.cases.add(row);
   return row;
@@ -137,9 +139,50 @@ export async function createCase(input: {
 
 export async function updateCase(
   id: string,
-  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "locatedAt" | "incidentStart" | "incidentEnd" | "subjectName" | "fileIdentifier" | "lksAt" | "lksLocation" | "lksCircumstances" | "subjectProfile" | "pinnedPersonIds">>,
+  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "locatedAt" | "incidentStart" | "incidentEnd" | "subjectName" | "fileIdentifier" | "lksAt" | "lksLocation" | "lksCircumstances" | "subjectProfile" | "pinnedPersonIds" | "customMediaCategories">>,
 ) {
   await db.cases.update(id, { ...patch, updatedAt: Date.now() });
+}
+
+export async function addCaseCustomMediaCategory(caseId: string, rawLabel: string) {
+  const label = sanitizeMediaCategoryLabel(rawLabel);
+  if (!label) throw new Error("Enter a category name.");
+  const rec = await db.cases.get(caseId);
+  const cur = rec?.customMediaCategories ?? [];
+  if (categoryAlreadyExists(label, cur)) {
+    const existing = cur.find((row) => customMediaCategoryId(row) === customMediaCategoryId(label)) || label;
+    return { label: existing, id: customMediaCategoryId(existing) };
+  }
+  await db.cases.update(caseId, { customMediaCategories: [...cur, label], updatedAt: Date.now() });
+  return { label, id: customMediaCategoryId(label) };
+}
+
+export async function renameCaseCustomMediaCategory(caseId: string, fromId: string, rawLabel: string) {
+  const label = sanitizeMediaCategoryLabel(rawLabel);
+  if (!label) throw new Error("Enter a category name.");
+  const rec = await db.cases.get(caseId);
+  const cur = rec?.customMediaCategories ?? [];
+  const others = cur.filter((row) => customMediaCategoryId(row) !== fromId);
+  if (categoryAlreadyExists(label, others)) throw new Error("That category already exists.");
+  const next = cur.map((row) => (customMediaCategoryId(row) === fromId ? label : row));
+  const toId = customMediaCategoryId(label);
+  await db.cases.update(caseId, { customMediaCategories: next, updatedAt: Date.now() });
+  if (toId !== fromId) {
+    await db.caseMedia.where("caseId").equals(caseId).modify((row) => {
+      if (row.category === fromId) row.category = toId;
+    });
+  }
+  return { label, id: toId };
+}
+
+export async function removeCaseCustomMediaCategory(caseId: string, labelOrId: string) {
+  const id = labelOrId.startsWith("custom:") ? labelOrId : customMediaCategoryId(labelOrId);
+  const rec = await db.cases.get(caseId);
+  const next = (rec?.customMediaCategories ?? []).filter((row) => customMediaCategoryId(row) !== id);
+  await db.cases.update(caseId, { customMediaCategories: next, updatedAt: Date.now() });
+  await db.caseMedia.where("caseId").equals(caseId).modify((row) => {
+    if (row.category === id) row.category = "uncategorized";
+  });
 }
 
 export async function togglePinnedPerson(caseId: string, personId: string, pinned?: boolean) {

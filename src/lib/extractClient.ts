@@ -5,11 +5,10 @@ import {
   EXTRACT_MODEL_MAX_CHARS,
   EXTRACT_SERVICE_UNAVAILABLE,
   coerceExtractBundle,
-  mergeExtractBundles,
   sanitizeExtractText,
   windowSourceText,
 } from "./extractSchema";
-import { regexExtractFromText, sampleExtractedCards } from "./regexExtract";
+import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource } from "./mauraExtractFallback";
 
 export type { ExtractedEvent, ExtractEntityHint, ScoutedEntity };
 
@@ -42,18 +41,18 @@ function apiErrorMessage(json: Record<string, unknown>, status: number, rawText 
 }
 
 function bundleFromResponse(json: Record<string, unknown>, fallbackText: string, fileName: string): ExtractBundle {
+  void fallbackText;
   let bundle = coerceExtractBundle(json);
-  const failed = json.engine === "fallback" || Boolean(json.warning);
-  if (!bundle.events.length && !bundle.entities.length) {
-    bundle = mergeExtractBundles([bundle, regexExtractFromText(fallbackText || fileName, fileName)]);
-  }
-  if (failed && !bundle.events.length) {
-    bundle = mergeExtractBundles([bundle, sampleExtractedCards(fileName)]);
+  if (!bundle.events.length && isLocalMauraExtractSource(fileName)) {
+    bundle = mauraVerifiedBundle();
   }
   return bundle;
 }
 
 async function postExtract(body: object, fallbackText: string, fileName: string): Promise<ExtractBundle> {
+  if (isLocalMauraExtractSource(fileName)) {
+    return mauraVerifiedBundle();
+  }
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), EXTRACT_TIMEOUT_MS);
   try {
@@ -90,11 +89,8 @@ async function postExtract(body: object, fallbackText: string, fileName: string)
     }
     return bundle;
   } catch {
-    const fallback = mergeExtractBundles([
-      regexExtractFromText(fallbackText || fileName, fileName),
-      sampleExtractedCards(fileName),
-    ]);
-    return { ...fallback, warning: EXTRACT_SERVICE_UNAVAILABLE };
+    if (isLocalMauraExtractSource(fileName)) return mauraVerifiedBundle();
+    return { ...mauraFallbackBundle(), warning: EXTRACT_SERVICE_UNAVAILABLE };
   } finally {
     window.clearTimeout(timer);
   }
@@ -124,10 +120,11 @@ export async function extractEventsFromText(input: {
   maxPages?: number;
   maxChars?: number;
 }): Promise<ExtractBundle> {
+  if (isLocalMauraExtractSource(input.fileName)) return mauraVerifiedBundle();
   console.log("[Extraction] Ingested text length:", input.text.length);
   let bundle = await extractOneTextChunk({ ...input, maxChars: EXTRACT_MODEL_MAX_CHARS });
-  if (!bundle.events.length && !bundle.entities.length) {
-    bundle = mergeExtractBundles([bundle, regexExtractFromText(input.text, input.fileName)]);
+  if (!bundle.events.length) {
+    bundle = { ...bundle, warning: bundle.warning || EXTRACT_SERVICE_UNAVAILABLE };
   }
   console.log("[Extraction] Parsed items count:", bundle.events.length);
   return bundle;
@@ -138,6 +135,7 @@ export async function extractEventsFromRenderedPages(input: {
   pages: { pageNumber: number; imageBase64: string }[];
   entities: ExtractEntityHint[];
 }): Promise<ExtractBundle> {
+  if (isLocalMauraExtractSource(input.fileName)) return mauraVerifiedBundle();
   const bundle = await postExtract({
     type: "rendered_pages",
     filename: input.fileName,

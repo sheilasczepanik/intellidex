@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { TextLayer, Util, type PDFDocumentProxy } from "pdfjs-dist";
-import { locateSnippet } from "./lib/quoteAnchors";
+import { locateAnySnippet } from "./lib/quoteAnchors";
 import type { SourceBoundingBox, SourceCitation } from "./types";
 
 type OverlayBox = SourceBoundingBox & { id: string; title?: string };
@@ -106,8 +106,7 @@ function PdfPage({
           };
         };
         for (const a of quotes) {
-          if (a.pageNumber && a.pageNumber !== pageNumber) continue;
-          const loc = locateSnippet(hay, a.quote);
+          const loc = locateAnySnippet(hay, [a.quote, a.title]);
           if (!loc) continue;
           for (const span of spans) {
             if (span.end > loc.start && span.start < loc.end) next.push(toBox(span.item, a.id, a.title || a.quote));
@@ -152,7 +151,7 @@ function PdfPage({
                 type="button"
                 id={box.id === (activeId || "focus") ? `source-hit-${box.id}` : undefined}
                 onClick={() => onSelectAnchor?.(box.id)}
-                className={`pointer-events-none absolute rounded-sm border-2 ${box.id === (activeId || "focus") ? "border-amber-500 bg-amber-300/35" : "border-amber-300/80 bg-amber-200/25"}`}
+                className={`pointer-events-none absolute rounded-sm border-b-2 ${box.id === (activeId || "focus") ? "border-amber-500 bg-amber-400/40" : "border-amber-400 bg-amber-400/25"}`}
                 style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.width}%`, height: `${Math.max(box.height, 1.2)}%` }}
               />
             ))}
@@ -187,7 +186,7 @@ export default function PdfScrollPages({
   pageCount: number;
   zoom: number;
   citation: SourceCitation | null;
-  anchors: { id: string; citation: SourceCitation }[];
+  anchors: { id: string; citation: SourceCitation; label?: string }[];
   activeId?: string | null;
   onSelectAnchor?: (id: string) => void;
 }) {
@@ -199,7 +198,7 @@ export default function PdfScrollPages({
       id: a.id,
       quote: a.citation.exactQuote,
       pageNumber: a.citation.pageNumber,
-      title: a.citation.exactQuote,
+      title: a.label || a.citation.exactQuote,
     })),
   ];
 

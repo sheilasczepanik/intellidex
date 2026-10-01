@@ -1,10 +1,13 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import { ExternalLink, FileText, Image as ImageIcon, Link2, Trash2, Upload, X, ZoomIn, ZoomOut } from "lucide-react";
+import { ExternalLink, FileText, Image as ImageIcon, Link2, Pencil, Plus, Trash2, Upload, X, ZoomIn, ZoomOut } from "lucide-react";
 import {
+  addCaseCustomMediaCategory,
   addCaseMedia,
   db,
   deleteCaseMedia,
+  removeCaseCustomMediaCategory,
+  renameCaseCustomMediaCategory,
   updateCaseMedia,
   CASE_MEDIA_CATEGORIES,
   type CaseMediaCategory,
@@ -16,21 +19,15 @@ import { applyDupDecision, findDuplicateMedia, mediaToSide, type DupDecision, ty
 import { encodeCaseMedia, isImageFile } from "./lib/imageEvidence";
 import { renderPdfPagesToJpeg } from "./lib/pdfHelpers";
 import { isPdfFile, readFileAsDataUrl } from "./lib/pdfText";
-import { parseArticleUrl, parseMetadataFromUrl } from "./lib/scrapeClient";
+import { parseArticleUrl, parseMetadataFromUrl, fallbackPageMetadata } from "./lib/scrapeClient";
+import {
+  ADD_MEDIA_CATEGORY_VALUE,
+  MEDIA_CATEGORY_LABEL,
+  customMediaCategoryId,
+  isBuiltinMediaCategory,
+} from "./lib/mediaCategories";
 
-export const MEDIA_CATEGORY_LABEL: Record<CaseMediaCategory, string> = {
-  subject_flyer: "Subject flyer",
-  surveillance: "Surveillance",
-  ping_data: "Ping data",
-  witness_photo: "Witness photo",
-  search_log: "Search log",
-  uncategorized: "Uncategorized",
-};
-
-const CATEGORY_FILTERS: { id: "all" | CaseMediaCategory; label: string }[] = [
-  { id: "all", label: "All" },
-  ...CASE_MEDIA_CATEGORIES.map((id) => ({ id, label: MEDIA_CATEGORY_LABEL[id] })),
-];
+export { MEDIA_CATEGORY_LABEL };
 
 type SortKey = "newest" | "oldest" | "category" | "type";
 
@@ -51,8 +48,11 @@ export default function MediaGallery({
     () => db.caseMedia.where("caseId").equals(activeCase.id).toArray(),
     [activeCase.id],
   ) ?? [];
+  const liveCase = useLiveQuery(() => db.cases.get(activeCase.id), [activeCase.id]);
+  const customCategories = liveCase?.customMediaCategories ?? activeCase.customMediaCategories ?? [];
   const fileRef = useRef<HTMLInputElement>(null);
-  const [filter, setFilter] = useState<"all" | CaseMediaCategory>("all");
+  const newCategoryRef = useRef<HTMLInputElement>(null);
+  const [filter, setFilter] = useState<"all" | string>("all");
   const [typeFilter, setTypeFilter] = useState<"all" | "image" | "pdf" | "url">("all");
   const [sort, setSort] = useState<SortKey>("newest");
   const [dragging, setDragging] = useState(false);
@@ -63,6 +63,23 @@ export default function MediaGallery({
   const [url, setUrl] = useState("");
   const [category, setCategory] = useState<CaseMediaCategory>("uncategorized");
   const [summary, setSummary] = useState("");
+  const [addingCategory, setAddingCategory] = useState<"ingest" | string | null>(null);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+
+  const categoryOptions = useMemo(
+    () => [
+      ...CASE_MEDIA_CATEGORIES.map((id) => ({ id, label: MEDIA_CATEGORY_LABEL[id] })),
+      ...customCategories.map((label) => ({ id: customMediaCategoryId(label), label })),
+    ],
+    [customCategories],
+  );
+
+  const categoryFilters = useMemo(
+    () => [{ id: "all" as const, label: "All" }, ...categoryOptions],
+    [categoryOptions],
+  );
 
   const shown = useMemo(() => {
     const filtered = rows.filter((r) => (filter === "all" || r.category === filter) && (typeFilter === "all" || r.type === typeFilter));
@@ -109,6 +126,50 @@ export default function MediaGallery({
     }
     await addCaseMedia(draft);
     return "added";
+  };
+
+  useEffect(() => {
+    if (filter !== "all" && !categoryOptions.some((opt) => opt.id === filter)) setFilter("all");
+  }, [filter, categoryOptions]);
+
+  useEffect(() => {
+    if (addingCategory) {
+      window.requestAnimationFrame(() => newCategoryRef.current?.focus());
+    }
+  }, [addingCategory]);
+
+  const openAddCategory = (source: "ingest" | string) => {
+    setNewCategoryName("");
+    setAddingCategory(source);
+    setError(null);
+  };
+
+  const confirmAddCategory = async () => {
+    try {
+      const created = await addCaseCustomMediaCategory(activeCase.id, newCategoryName);
+      if (addingCategory && addingCategory !== "ingest") {
+        await updateCaseMedia(addingCategory, { category: created.id });
+      } else {
+        setCategory(created.id);
+      }
+      setAddingCategory(null);
+      setNewCategoryName("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add that category.");
+    }
+  };
+
+  const confirmRenameCategory = async () => {
+    if (!renamingId) return;
+    try {
+      const next = await renameCaseCustomMediaCategory(activeCase.id, renamingId, renameValue);
+      if (category === renamingId) setCategory(next.id);
+      if (filter === renamingId) setFilter(next.id);
+      setRenamingId(null);
+      setRenameValue("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not rename that category.");
+    }
   };
 
   const ingestFiles = async (files: FileList | File[]) => {
@@ -177,26 +238,57 @@ export default function MediaGallery({
     setBusy(true);
     setError(null);
     try {
-      const meta = await parseMetadataFromUrl(parsed);
+      let meta;
+      try {
+        meta = await parseMetadataFromUrl(parsed);
+      } catch {
+        meta = fallbackPageMetadata(parsed);
+      }
+      const note = summary.trim();
       await persistMedia({
         caseId: activeCase.id,
         dataUrl: meta.image || "",
         thumbnailUrl: meta.image || meta.favicon,
-        title: meta.title,
+        title: meta.title || fallbackPageMetadata(parsed).title,
         category,
         type: "url",
-        sourceUrl: meta.url,
+        sourceUrl: meta.url || parsed,
         description: meta.description,
         author: meta.author,
         faviconUrl: meta.favicon,
-        summary: summary.trim() || meta.description,
-        sha256Hash: await calculateSHA256FromText(meta.url),
+        summary: note || meta.description,
+        sha256Hash: await calculateSHA256FromText(meta.url || parsed),
         tags: ["url", "tip"],
       });
       setUrl("");
       setSummary("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not parse that URL.");
+      const message = err instanceof Error ? err.message : "";
+      if (/could not parse metadata|500/i.test(message)) {
+        try {
+          const fallback = fallbackPageMetadata(parsed);
+          await persistMedia({
+            caseId: activeCase.id,
+            dataUrl: "",
+            thumbnailUrl: "",
+            title: fallback.title,
+            category,
+            type: "url",
+            sourceUrl: parsed,
+            summary: summary.trim() || undefined,
+            sha256Hash: await calculateSHA256FromText(parsed),
+            tags: ["url", "tip"],
+          });
+          setUrl("");
+          setSummary("");
+          return;
+        } catch {
+          /* fall through only for non-metadata failures */
+        }
+      }
+      if (!/could not parse metadata|500/i.test(message)) {
+        setError(message || "Could not save that URL.");
+      }
     } finally {
       setBusy(false);
     }
@@ -238,11 +330,52 @@ export default function MediaGallery({
         <div className="grid gap-3 md:grid-cols-2">
           <label className="text-[11px] text-slate-500">
             Category
-            <select value={category} onChange={(e) => setCategory(e.target.value as CaseMediaCategory)} className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-2 text-[13px] text-slate-800">
-              {CASE_MEDIA_CATEGORIES.map((id) => (
-                <option key={id} value={id}>{MEDIA_CATEGORY_LABEL[id]}</option>
-              ))}
-            </select>
+            <div className="mt-1 flex items-center gap-1.5">
+              <select
+                value={category}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === ADD_MEDIA_CATEGORY_VALUE) {
+                    openAddCategory("ingest");
+                    return;
+                  }
+                  setCategory(value);
+                }}
+                className="h-9 min-w-0 flex-1 rounded-lg border border-slate-200 px-2 text-[13px] text-slate-800"
+              >
+                {categoryOptions.map((opt) => (
+                  <option key={opt.id} value={opt.id}>{opt.label}</option>
+                ))}
+                <option value={ADD_MEDIA_CATEGORY_VALUE}>+ Add new category…</option>
+              </select>
+              <button
+                type="button"
+                aria-label="Add new category"
+                onClick={() => openAddCategory("ingest")}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:border-blue-500 hover:text-blue-700"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+            </div>
+            {addingCategory === "ingest" && (
+              <div className="mt-2 rounded-[10px] border border-blue-200 bg-blue-50/70 p-2.5">
+                <input
+                  ref={newCategoryRef}
+                  value={newCategoryName}
+                  onChange={(e) => setNewCategoryName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { e.preventDefault(); void confirmAddCategory(); }
+                    if (e.key === "Escape") setAddingCategory(null);
+                  }}
+                  placeholder="New category name..."
+                  className="h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-[13px] text-slate-800"
+                />
+                <div className="mt-2 flex justify-end gap-1.5">
+                  <button type="button" onClick={() => setAddingCategory(null)} className="h-7 rounded-md px-2 text-[12px] text-slate-500 hover:text-slate-800">Cancel</button>
+                  <button type="button" onClick={() => void confirmAddCategory()} className="h-7 rounded-md bg-blue-600 px-2.5 text-[12px] font-semibold text-white hover:bg-blue-700">Add & Assign</button>
+                </div>
+              </div>
+            )}
           </label>
           <label className="text-[11px] text-slate-500">
             Narrative summary
@@ -266,16 +399,62 @@ export default function MediaGallery({
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        {CATEGORY_FILTERS.map((opt) => (
-          <button
-            key={opt.id}
-            type="button"
-            onClick={() => setFilter(opt.id)}
-            className={`rounded-full border px-3 py-1.5 text-[12px] font-medium ${filter === opt.id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
-          >
-            {opt.label}
-          </button>
-        ))}
+        {categoryFilters.map((opt) => {
+          const custom = opt.id !== "all" && !isBuiltinMediaCategory(opt.id);
+          const active = filter === opt.id;
+          if (custom && renamingId === opt.id) {
+            return (
+              <form
+                key={opt.id}
+                className="flex items-center gap-1 rounded-full border border-blue-300 bg-white px-2 py-0.5"
+                onSubmit={(e) => { e.preventDefault(); void confirmRenameCategory(); }}
+              >
+                <input
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  className="h-6 w-[9rem] bg-transparent text-[12px] text-slate-800 outline-none"
+                  aria-label="Rename category"
+                />
+                <button type="submit" className="text-[11px] font-semibold text-blue-700">Save</button>
+                <button type="button" onClick={() => setRenamingId(null)} className="text-[11px] text-slate-500">Cancel</button>
+              </form>
+            );
+          }
+          return (
+            <span key={opt.id} className="group relative inline-flex">
+              <button
+                type="button"
+                onClick={() => setFilter(opt.id)}
+                className={`rounded-full border px-3 py-1.5 text-[12px] font-medium ${active ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
+              >
+                {opt.label}
+              </button>
+              {custom ? (
+                <span className="absolute -right-1 -top-1 hidden gap-0.5 group-hover:flex">
+                  <button
+                    type="button"
+                    aria-label={`Rename ${opt.label}`}
+                    onClick={() => { setRenamingId(opt.id); setRenameValue(opt.label); }}
+                    className="flex h-4 w-4 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 hover:text-blue-700"
+                  >
+                    <Pencil className="h-2.5 w-2.5" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${opt.label}`}
+                    onClick={() => {
+                      void removeCaseCustomMediaCategory(activeCase.id, opt.id);
+                      if (category === opt.id) setCategory("uncategorized");
+                    }}
+                    className="flex h-4 w-4 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 hover:text-rose-700"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </span>
+              ) : null}
+            </span>
+          );
+        })}
         <div className="flex gap-1">
           {(["all", "image", "pdf", "url"] as const).map((key) => (
             <button
@@ -351,15 +530,42 @@ export default function MediaGallery({
                   aria-label="Title"
                 />
                 <select
-                  value={row.category}
-                  onChange={(e) => void updateCaseMedia(row.id, { category: e.target.value as CaseMediaCategory })}
+                  value={categoryOptions.some((opt) => opt.id === row.category) ? row.category : "uncategorized"}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    if (value === ADD_MEDIA_CATEGORY_VALUE) {
+                      openAddCategory(row.id);
+                      return;
+                    }
+                    void updateCaseMedia(row.id, { category: value });
+                  }}
                   className="w-full rounded-md border border-slate-200 bg-white px-1.5 py-1 text-[11.5px] text-slate-600"
                   aria-label="Category"
                 >
-                  {CASE_MEDIA_CATEGORIES.map((id) => (
-                    <option key={id} value={id}>{MEDIA_CATEGORY_LABEL[id]}</option>
+                  {categoryOptions.map((opt) => (
+                    <option key={opt.id} value={opt.id}>{opt.label}</option>
                   ))}
+                  <option value={ADD_MEDIA_CATEGORY_VALUE}>+ Add new category…</option>
                 </select>
+                {addingCategory === row.id && (
+                  <div className="rounded-[10px] border border-blue-200 bg-blue-50/70 p-2">
+                    <input
+                      ref={newCategoryRef}
+                      value={newCategoryName}
+                      onChange={(e) => setNewCategoryName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") { e.preventDefault(); void confirmAddCategory(); }
+                        if (e.key === "Escape") setAddingCategory(null);
+                      }}
+                      placeholder="New category name..."
+                      className="h-7 w-full rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-800"
+                    />
+                    <div className="mt-1.5 flex justify-end gap-1">
+                      <button type="button" onClick={() => setAddingCategory(null)} className="h-6 rounded px-1.5 text-[11px] text-slate-500">Cancel</button>
+                      <button type="button" onClick={() => void confirmAddCategory()} className="h-6 rounded bg-blue-600 px-1.5 text-[11px] font-semibold text-white">Add & Assign</button>
+                    </div>
+                  </div>
+                )}
                 {row.author ? <div className="text-[11px] text-slate-500">{row.author}</div> : null}
                 <textarea
                   defaultValue={row.summary || ""}

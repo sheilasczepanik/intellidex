@@ -61,6 +61,8 @@ export interface CaseRecord {
   subjectProfile?: SubjectProfile;
   /** Person entity IDs pinned in the left rail for this case. */
   pinnedPersonIds?: string[];
+  /** Investigator-defined Case Media Vault categories for this case. */
+  customMediaCategories?: string[];
 }
 
 export interface EntityRecord {
@@ -210,7 +212,7 @@ export const CASE_MEDIA_CATEGORIES = [
   "uncategorized",
 ] as const;
 
-export type CaseMediaCategory = (typeof CASE_MEDIA_CATEGORIES)[number];
+export type CaseMediaCategory = (typeof CASE_MEDIA_CATEGORIES)[number] | (string & {});
 
 export type CaseMediaType = "image" | "pdf" | "url";
 
@@ -533,6 +535,13 @@ export class DossierDB extends Dexie {
     }).upgrade(async (tx) => {
       await tx.table("cases").toCollection().modify((row: { pinnedPersonIds?: string[] }) => {
         if (!Array.isArray(row.pinnedPersonIds)) row.pinnedPersonIds = [];
+      });
+    });
+    this.version(22).stores({
+      cases: "id, status, updatedAt, isArchived",
+    }).upgrade(async (tx) => {
+      await tx.table("cases").toCollection().modify((row: { customMediaCategories?: string[] }) => {
+        if (!Array.isArray(row.customMediaCategories)) row.customMediaCategories = [];
       });
     });
   }
