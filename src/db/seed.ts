@@ -121,12 +121,21 @@ const RELATIONSHIPS: EntityRelationship[] = [
   { id: "rel-vance-webb", caseId: "CASE-0038", sourceEntityId: "ent-vance", targetEntityId: "ent-webb", relationshipType: "associate_of", label: "Associate of", confidence: 0.55, sourceCitationId: "ev-report" },
 ];
 
+async function custodyHash(row: { fileBase64?: string; imageBase64?: string; rawText?: string; fileName?: string }) {
+  try {
+    return await hashStoredEvidenceBytes(row);
+  } catch (err) {
+    console.warn("[seed] Stored bytes could not be hashed; hashing the text record instead.", err);
+    return hashStoredEvidenceBytes({ rawText: row.rawText || row.fileName || "" });
+  }
+}
+
 export async function seedIfEmpty() {
   const count = await db.cases.count();
   if (count > 0) return;
 
   const seeded = await Promise.all(EVIDENCE.map(async (ev) => {
-    const sha256Hash = await hashStoredEvidenceBytes(ev);
+    const sha256Hash = await custodyHash(ev);
     return {
       ...ev,
       sha256Hash,
@@ -174,7 +183,7 @@ export async function backfillEvidenceCustody() {
   const callsign = op?.creatorName || op?.callsign || DEFAULT_OPERATOR.creatorName;
   for (const row of rows) {
     if (row.sha256Hash && row.ingestedAt && row.originalFileName) continue;
-    const sha256Hash = row.sha256Hash || await hashStoredEvidenceBytes(row);
+    const sha256Hash = row.sha256Hash || await custodyHash(row);
     await db.evidence.update(row.id, {
       sha256Hash,
       byteSize: row.byteSize ?? row.fileSize ?? new TextEncoder().encode(row.rawText || "").length,

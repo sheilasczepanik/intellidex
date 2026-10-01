@@ -57,7 +57,7 @@ async function runAudit() {
     console.log(`\n🚨 Failed Network Requests (${networkErrors.length}):`);
     networkErrors.forEach(err => console.log(`   ${err}`));
   } else {
- ('\n✅ No 400/500 network errors detected.');
+    console.log('\n✅ No 400/500 network errors detected.');
   }
 
   if (issues.length > 0) {

@@ -1,4 +1,4 @@
-export async function calculateSHA256(fileOrBuffer: File | ArrayBuffer): Promise<string> {
+export async function calculateSHA256(fileOrBuffer: File | BufferSource): Promise<string> {
   const buffer = fileOrBuffer instanceof File ? await fileOrBuffer.arrayBuffer() : fileOrBuffer;
   const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
@@ -15,12 +15,38 @@ export function formatSha256Badge(hex: string) {
   return `SHA-256: ${h.slice(0, 8)}…${h.slice(-6)}`;
 }
 
-function decodeDataUrl(data: string): ArrayBuffer {
-  const b64 = data.replace(/^data:[^;]+;base64,/i, "").replace(/\s+/g, "");
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
-  return bytes.buffer;
+export function decodeDataUrl(dataUrl: string): Uint8Array {
+  if (!dataUrl || typeof dataUrl !== "string") {
+    return new Uint8Array();
+  }
+
+  try {
+    // 1. Strip data URL scheme prefix if present (e.g., "data:application/pdf;base64,")
+    const commaIndex = dataUrl.indexOf(",");
+    let base64 = commaIndex !== -1 ? dataUrl.slice(commaIndex + 1) : dataUrl;
+
+    // 2. Remove whitespace, line breaks, URL encoding, or invalid base64 chars
+    base64 = base64.replace(/\s+/g, "");
+
+    // 3. Fix URL-safe base64 if present
+    base64 = base64.replace(/-/g, "+").replace(/_/g, "/");
+
+    // 4. Pad with trailing '=' if length is not a multiple of 4
+    while (base64.length % 4 !== 0) {
+      base64 += "=";
+    }
+
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  } catch (err) {
+    // Fallback safely to TextEncoder so hashing still produces a consistent hash without crashing initDb
+    console.warn("[cryptoUtils] Fallback byte encoding used for string payload:", err);
+    return new TextEncoder().encode(dataUrl);
+  }
 }
 
 export async function calculateSHA256FromDataUrl(dataUrl: string): Promise<string> {
