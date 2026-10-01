@@ -3,7 +3,8 @@ import { FileText, Globe, Loader2, Minus, Plus, Radio, X } from "lucide-react";
 import { getDocument, type PDFDocumentProxy } from "pdfjs-dist";
 import { pdfBlobFromBytes, pdfBytesFromBase64 } from "./lib/pdfjsSetup";
 import { db, type EvidenceRecord } from "./db";
-import { collectQuoteSpans, locateCardHighlight, splitTextBySpans } from "./lib/quoteAnchors";
+import { collectQuoteSpans, locateCardHighlight, locateSnippet, splitTextBySpans, type QuoteSegment } from "./lib/quoteAnchors";
+import { articleBodyReady } from "./lib/scrapeClient";
 import { cropImageRegion, evidenceImageSrc } from "./lib/imageEvidence";
 import PdfScrollPages from "./PdfScrollPages";
 import { documentText } from "./lib/pdfParser";
@@ -54,7 +55,24 @@ type ViewerAnchor = {
   id: string;
   citation: SourceCitation;
   label?: string;
+  entityName?: string;
 };
+
+function groupParagraphs(segments: QuoteSegment[]) {
+  const blocks: QuoteSegment[][] = [[]];
+  for (const part of segments) {
+    if (part.type !== "text") {
+      blocks[blocks.length - 1].push(part);
+      continue;
+    }
+    const chunks = part.value.split(/\n{2,}|\n/);
+    chunks.forEach((chunk, index) => {
+      if (index > 0) blocks.push([]);
+      if (chunk.trim()) blocks[blocks.length - 1].push({ ...part, key: `${part.key}-${index}`, value: chunk.trim() });
+    });
+  }
+  return blocks.filter((block) => block.some((part) => part.value.trim()));
+}
 
 type Props = {
   evidence: EvidenceRecord | null;
@@ -67,6 +85,8 @@ type Props = {
   onImageRegionSelect?: (payload: { box: SourceBoundingBox; previewDataUrl: string; x: number; y: number }) => void;
   onTextSelect?: (payload: { text: string; x: number; y: number; pageNumber?: number }) => void;
   onVisiblePage?: (page: number) => void;
+  highlightTerms?: string[];
+  onPasteArticle?: (text: string) => void | Promise<void>;
 };
 
 export default function SourceDocumentViewer({
@@ -80,6 +100,8 @@ export default function SourceDocumentViewer({
   onImageRegionSelect,
   onTextSelect,
   onVisiblePage,
+  highlightTerms = [],
+  onPasteArticle,
 }: Props) {
   const kind = evidence ? inferSourceType(evidence) : citation?.sourceType ?? "text";
   const title = evidence?.fileName || citation?.sourceName || "Source";
@@ -96,10 +118,13 @@ export default function SourceDocumentViewer({
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const [draftBox, setDraftBox] = useState<SourceBoundingBox | null>(null);
   const [imgTip, setImgTip] = useState<{ x: number; y: number; title: string } | null>(null);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteValue, setPasteValue] = useState("");
+  const [pasteBusy, setPasteBusy] = useState(false);
 
   const focus = citation;
   const quote = (focus?.exactQuote || "").trim();
-  const anchorSig = anchors.map((a) => `${a.id}:${a.citation.exactQuote}:${a.citation.pageNumber ?? ""}`).join("|");
+  const anchorSig = anchors.map((a) => `${a.id}:${a.citation.exactQuote}:${a.citation.pageNumber ?? ""}:${a.entityName ?? ""}`).join("|");
 
   useEffect(() => {
     if (citation?.pageNumber) {
@@ -178,14 +203,34 @@ export default function SourceDocumentViewer({
   }, []);
 
   const sourcePlain = documentText(evidence) || evidence?.rawText || "";
+  const bodyReady = kind !== "web_article" || articleBodyReady(sourcePlain);
+  const termSig = highlightTerms.join("|");
   const textSegments = useMemo(() => {
     if (!sourcePlain) return [];
     const drafts = [
       ...(quote ? [{ id: activeId || "focus", snippet: quote, exactQuote: quote }] : []),
-      ...anchors.map((a) => ({ id: a.id, snippet: a.citation.exactQuote, title: a.label, exactQuote: a.citation.exactQuote })),
+      ...anchors.map((a) => ({
+        id: a.id,
+        snippet: a.citation.exactQuote,
+        title: a.label,
+        exactQuote: a.citation.exactQuote,
+        anchorText: a.entityName,
+      })),
     ];
-    return splitTextBySpans(sourcePlain, collectQuoteSpans(sourcePlain, drafts));
-  }, [sourcePlain, quote, anchorSig, activeId]);
+    const spans = collectQuoteSpans(sourcePlain, drafts);
+    if (kind === "web_article") {
+      for (const term of highlightTerms) {
+        const loc = locateSnippet(sourcePlain, term);
+        if (!loc || spans.some((span) => loc.start < span.end && loc.end > span.start)) continue;
+        const owner = anchors.find((anchor) => `${anchor.entityName || ""} ${anchor.label || ""} ${anchor.citation.exactQuote}`
+          .toLowerCase()
+          .includes(term.toLowerCase()));
+        spans.push({ draftId: owner?.id || `term-${term}`, start: loc.start, end: loc.end });
+      }
+      spans.sort((a, b) => a.start - b.start);
+    }
+    return splitTextBySpans(sourcePlain, spans);
+  }, [sourcePlain, quote, anchorSig, activeId, kind, termSig]);
 
   useEffect(() => {
     if ((kind === "text" || kind === "external_intel" || kind === "web_article") && quote && sourcePlain) {
@@ -306,6 +351,51 @@ export default function SourceDocumentViewer({
           </button>
         )}
       </header>
+      {kind === "web_article" && !bodyReady && (
+        <div className="mx-3 mt-3 rounded-[10px] border border-amber-200 bg-amber-50 px-3 py-2.5 text-[12.5px] text-amber-950">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p>Unable to scrape full body from publisher. Paste article text manually to extract.</p>
+            <button
+              type="button"
+              onClick={() => setPasteOpen((open) => !open)}
+              className="inline-flex h-8 shrink-0 items-center rounded-[8px] border border-amber-400 bg-white px-2.5 text-[12px] font-semibold text-amber-950 hover:bg-amber-100"
+            >
+              Paste Text
+            </button>
+          </div>
+          {pasteOpen && (
+            <form
+              className="mt-2 flex flex-col gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const text = pasteValue.trim();
+                if (text.length < 12 || !onPasteArticle) return;
+                setPasteBusy(true);
+                void Promise.resolve(onPasteArticle(text)).finally(() => {
+                  setPasteBusy(false);
+                  setPasteOpen(false);
+                  setPasteValue("");
+                });
+              }}
+            >
+              <textarea
+                value={pasteValue}
+                onChange={(event) => setPasteValue(event.target.value)}
+                rows={8}
+                placeholder="Paste the article text"
+                className="w-full rounded-[8px] border border-amber-200 bg-white px-2.5 py-2 text-[13px] leading-relaxed text-slate-800 outline-none"
+              />
+              <button
+                type="submit"
+                disabled={pasteBusy || pasteValue.trim().length < 12}
+                className="h-8 self-end rounded-[8px] bg-slate-900 px-3 text-[12px] font-semibold text-white disabled:opacity-40"
+              >
+                {pasteBusy ? "Saving…" : "Save article text"}
+              </button>
+            </form>
+          )}
+        </div>
+      )}
       {approxBanner}
       {kind === "pdf" && pdfError && !blobUrl && (
         <div className="mx-3 mt-3 rounded-[10px] border border-red-200 bg-red-50 px-3 py-2 text-[12.5px] text-red-800">{pdfError}</div>
@@ -422,6 +512,31 @@ export default function SourceDocumentViewer({
               ) : null}
             </div>
           </div>
+        ) : kind === "web_article" && !bodyReady ? (
+          <div className="px-8 py-10 text-[13px] text-slate-500">The publisher page did not return a readable article.</div>
+        ) : kind === "web_article" ? (
+          <article className="prose prose-slate dark:prose-invert article-prose max-w-none p-8 text-sm leading-relaxed" style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }}>
+            <h2 className="mb-4 text-[22px] font-semibold tracking-tight text-slate-900">{title}</h2>
+            {groupParagraphs(textSegments).map((block, index) => (
+              <p key={block[0]?.key || index} className="select-text">
+                {block.map((part) => {
+                  if (part.type === "text") return <span key={part.key}>{part.value}</span>;
+                  const active = part.draftId === (activeId || "focus");
+                  return (
+                    <mark
+                      key={part.key}
+                      id={`source-hit-${part.draftId}`}
+                      data-verify-quote={part.draftId}
+                      onClick={() => onSelectAnchor?.(part.draftId)}
+                      className={`rounded border-b-2 border-amber-400 bg-amber-400/25 px-0.5 ${active ? "extract-hit-active" : ""}`}
+                    >
+                      {part.value}
+                    </mark>
+                  );
+                })}
+              </p>
+            ))}
+          </article>
         ) : (
           <div className="mx-auto max-w-[62ch] px-4 py-6 sm:px-8 sm:py-8" style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }}>
             <h2 className="mb-4 text-[22px] font-semibold tracking-tight">{title}</h2>

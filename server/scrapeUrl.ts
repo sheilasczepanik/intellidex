@@ -235,65 +235,112 @@ function extractBody(html: string) {
   return htmlToText(chunk).slice(0, 100_000);
 }
 
+const READER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
+const DIRECT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+const READER_MS = 8000;
+
+function readerTitle(text: string) {
+  const titled = text.match(/^Title:\s*(.+)$/m)?.[1]?.trim();
+  if (titled && !/^https?:/i.test(titled)) return titled.replace(/^#+\s*/, "").slice(0, 240);
+  const header = text.split("\n").map((line) => line.trim()).find((line) => /^#{1,3}\s+\S/.test(line));
+  if (header) return header.replace(/^#+\s*/, "").slice(0, 240);
+  const first = text.split("\n").map((line) => line.trim()).find(Boolean);
+  return (first || "Imported Web Evidence").replace(/^#+\s*/, "").slice(0, 240);
+}
+
+function readerBody(text: string) {
+  const marker = text.match(/Markdown Content:\s*/i);
+  const body = marker && marker.index !== undefined
+    ? text.slice(marker.index + marker[0].length).trim()
+    : text.trim();
+  return body || text.trim();
+}
+
+function readerUnusable(text: string) {
+  const head = text.slice(0, 800).toLowerCase();
+  if (head.includes("target url returned error") || head.includes("access denied")) return true;
+  return text.trim().split(/\s+/).filter(Boolean).length < 40;
+}
+
+/** Read a public article as text. Reader proxy first; publisher HTML only if that fails. */
+export async function scrapeArticleText(targetUrl: string): Promise<{ title: string; content: string; publishedDate: string | null }> {
+  const parsed = assertPublicHttpUrl(targetUrl);
+  const href = parsed.toString();
+  try {
+    const res = await fetch(`https://r.jina.ai/${href}`, {
+      headers: {
+        "User-Agent": READER_UA,
+        Accept: "text/plain",
+      },
+      signal: AbortSignal.timeout(READER_MS),
+    });
+    if (res.ok) {
+      const text = await res.text();
+      if (text.trim() && !readerUnusable(text)) {
+        const content = readerBody(text);
+        return { title: readerTitle(text), content, publishedDate: null };
+      }
+    }
+  } catch (err) {
+    console.warn("Reader proxy failed, attempting direct fetch:", err);
+  }
+
+  const directRes = await fetch(href, {
+    redirect: "follow",
+    headers: {
+      "User-Agent": DIRECT_UA,
+      Accept: "text/html,application/xhtml+xml",
+    },
+    signal: AbortSignal.timeout(READER_MS),
+  });
+  const html = await directRes.text().catch(() => "");
+  if (!directRes.ok || !html || looksBlocked(directRes.status, html)) {
+    throw new ScrapeHttpError(directRes.status || 502, SCRAPE_BLOCKED);
+  }
+  const snippet = html.slice(0, MAX_HTML_BYTES);
+  const extracted = extractBody(snippet);
+  const stripped = snippet.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 5000);
+  const content = extracted.split(/\s+/).filter(Boolean).length >= 40 ? extracted : stripped;
+  return {
+    title: extractTitle(snippet).slice(0, 240) || "Web Article",
+    content,
+    publishedDate: extractDate(snippet),
+  };
+}
+
 export async function scrapePublicArticle(rawUrl: string): Promise<ScrapedArticle> {
   const fallback = fallbackArticleFromUrl(rawUrl);
-  const parsed = parsePublicHttpUrl(rawUrl);
-  if (!parsed) return fallback;
+  if (!parsePublicHttpUrl(rawUrl)) return fallback;
 
   try {
-    const res = await fetch(parsed.toString(), {
-      method: "GET",
-      redirect: "follow",
-      signal: AbortSignal.timeout(FETCH_MS),
-      headers: {
-        "User-Agent": BROWSER_UA,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-      },
-    });
-
-    if (!res.ok || [401, 403, 404, 407, 408, 429, 451, 500, 502, 503, 504].includes(res.status)) {
-      return fallback;
+    const scraped = await scrapeArticleText(rawUrl);
+    const words = scraped.content.split(/\s+/).filter(Boolean);
+    let domain = fallback.domain;
+    try {
+      domain = new URL(fallback.url).hostname.replace(/^www\./i, "");
+    } catch {
+      /* keep fallback domain */
     }
-
-    const declared = Number(res.headers.get("content-length") || 0);
-    if (declared && declared > MAX_HTML_BYTES) return fallback;
-
-    const html = await res.text().catch(() => "");
-    if (!html || looksBlocked(res.status, html)) return fallback;
-    if (html.length > MAX_HTML_BYTES) {
-      /* truncated parse may still yield a title */
-    }
-
-    const snippet = html.slice(0, MAX_HTML_BYTES);
-    const finalUrl = res.url || parsed.toString();
-    const publicFinal = parsePublicHttpUrl(finalUrl) ? finalUrl : parsed.toString();
-    const content = extractBody(snippet);
-    const words = content.split(/\s+/).filter(Boolean);
-    const domain = new URL(publicFinal).hostname.replace(/^www\./i, "");
     if (words.length < 40) {
       return {
         ...fallback,
-        url: publicFinal,
-        domain,
-        title: extractTitle(snippet).slice(0, 240) || fallback.title,
-        publishedDate: extractDate(snippet),
+        title: scraped.title || fallback.title,
+        publishedDate: scraped.publishedDate,
         fallback: true,
       };
     }
-
     return {
-      url: publicFinal,
-      title: extractTitle(snippet).slice(0, 240),
-      publishedDate: extractDate(snippet),
-      content,
+      url: fallback.url,
+      title: scraped.title || fallback.title,
+      publishedDate: scraped.publishedDate,
+      content: scraped.content,
       wordCount: words.length,
       domain,
       sourceType: PRESS_SOURCE_TYPE,
-      summary: extractDescription(snippet).slice(0, 400) || content.slice(0, 280),
+      summary: scraped.content.slice(0, 280),
     };
-  } catch {
+  } catch (err) {
+    console.warn("Article scrape failed:", err);
     return fallback;
   }
 }

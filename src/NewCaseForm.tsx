@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ArrowRight, Check, Loader2, Sparkles } from "lucide-react";
 import type { CaseStatus, SubjectProfile } from "./db/schema";
 import { fetchNamusRecord } from "./lib/namusClient";
-import { extractNamusId } from "./lib/namusRecord";
+import { extractNamusId, NAMUS_GATEWAY_NOTICE, namusNumericId } from "./lib/namusRecord";
 import { ALERT_LEVELS, formatAlertLabel } from "./lib/missingPerson";
 
 const mono = "font-mono";
@@ -50,23 +50,26 @@ export default function NewCaseForm({
   const [namusBusy, setNamusBusy] = useState(false);
   const [namusOk, setNamusOk] = useState(false);
   const [namusErr, setNamusErr] = useState("");
+  const [namusNotice, setNamusNotice] = useState("");
 
   const autoFillNamus = async () => {
     const query = fileIdentifier.trim() || title.trim();
-    if (!extractNamusId(query)) {
+    const cleanNamusId = query.trim().toUpperCase();
+    if (!namusNumericId(cleanNamusId) && !extractNamusId(cleanNamusId)) {
       setNamusOk(false);
-      setNamusErr("Enter a NamUs ID such as MP1028 in the case identifier field.");
+      setNamusNotice("");
+      setNamusErr("Enter a NamUs ID such as MP2316 in the case identifier field.");
       return;
     }
     setNamusBusy(true);
     setNamusOk(false);
     setNamusErr("");
+    setNamusNotice("");
     try {
-      const cleanNamusId = query.trim().toUpperCase();
       const response = await fetchNamusRecord(cleanNamusId);
       const data = response.data;
       if (!data?.name) {
-        setNamusErr(response.error || "NamUs did not return a usable record.");
+        setNamusNotice(NAMUS_GATEWAY_NOTICE);
         return;
       }
       onTitle(data.name);
@@ -76,8 +79,8 @@ export default function NewCaseForm({
       if (data.circumstances) onSummary(String(data.circumstances));
       onProfile({
         ...profile,
-        ageAtDisappearance: data.ageAtDisappearance != null ? String(data.ageAtDisappearance) : profile.ageAtDisappearance,
-        currentEstimatedAge: data.currentAge != null ? String(data.currentAge) : profile.currentEstimatedAge,
+        ageAtDisappearance: data.ageAtDisappearance != null && String(data.ageAtDisappearance) !== "0" ? String(data.ageAtDisappearance) : profile.ageAtDisappearance,
+        currentEstimatedAge: data.currentAge != null && String(data.currentAge) !== "0" ? String(data.currentAge) : profile.currentEstimatedAge,
         height: data.height || profile.height,
         weight: data.weight || profile.weight,
         hair: data.hair || profile.hair,
@@ -86,10 +89,15 @@ export default function NewCaseForm({
         clothingLastSeen: data.clothing || profile.clothingLastSeen,
         medicalAlerts: data.medicalAlerts || profile.medicalAlerts,
       });
-      setNamusErr("");
-      setNamusOk(true);
-    } catch (err) {
-      setNamusErr(err instanceof Error ? err.message : "NamUs lookup failed.");
+      if (response.source === "fallback" || response.notice) {
+        setNamusNotice(response.notice || NAMUS_GATEWAY_NOTICE);
+        setNamusOk(false);
+      } else {
+        setNamusNotice("");
+        setNamusOk(true);
+      }
+    } catch {
+      setNamusNotice(NAMUS_GATEWAY_NOTICE);
     } finally {
       setNamusBusy(false);
     }
@@ -121,7 +129,7 @@ export default function NewCaseForm({
         <div className="mb-1.5 flex flex-col gap-2 sm:flex-row sm:items-center">
           <input
             value={fileIdentifier}
-            onChange={(e) => { setNamusOk(false); setNamusErr(""); onFileIdentifier(e.target.value); }}
+            onChange={(e) => { setNamusOk(false); setNamusErr(""); setNamusNotice(""); onFileIdentifier(e.target.value); }}
             placeholder="MP1028, NamUs #, or agency case #"
             className={`${inputCls} h-11 flex-1 text-[14px]`}
           />
@@ -140,10 +148,12 @@ export default function NewCaseForm({
             <Check className="h-3.5 w-3.5" />
             Loaded from NamUs record
           </div>
+        ) : namusNotice ? (
+          <p className="mb-4 text-[12.5px] text-amber-800">{namusNotice}</p>
         ) : namusErr ? (
           <p className="mb-4 text-[12.5px] text-rose-700">{namusErr}</p>
         ) : (
-          <p className="mb-4 text-[12px] text-slate-400">Use a NamUs ID such as MP1028 to pull public case details into this form.</p>
+          <p className="mb-4 text-[12px] text-slate-400">Use a NamUs ID such as MP2316 to pull public case details into this form.</p>
         )}
         <div className="mb-4 grid gap-3 sm:grid-cols-2">
           <div>

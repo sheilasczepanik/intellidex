@@ -38,12 +38,24 @@ function leafItemClass(on: boolean, locked?: boolean) {
   }`;
 }
 
+export type PinDirectoryEntry = {
+  id: string;
+  caseId: string;
+  name: string;
+  role: string;
+  caseLabel: string;
+  notes?: string;
+  classification?: string;
+  pinned?: boolean;
+};
+
 export default function CaseSidebarTree({
   screen,
   personId,
   personLeaf,
   activeCase,
   people,
+  directory = [],
   intakeBadge,
   verifyBadge,
   locked,
@@ -57,12 +69,13 @@ export default function CaseSidebarTree({
   personLeaf: PersonLeaf | null;
   activeCase: CaseRecord | null;
   people: EntityRecord[];
+  directory?: PinDirectoryEntry[];
   intakeBadge?: number;
   verifyBadge?: number;
   locked: boolean;
   onGoCase: (screen: CaseNavScreen) => void;
   onGoPerson: (id: string, leaf: PersonLeaf) => void;
-  onPinPerson: (id: string) => void;
+  onPinPerson: (id: string, caseId?: string) => void;
   onUnpinPerson: (id: string) => void;
 }) {
   const [caseOpen, setCaseOpen] = useState(true);
@@ -78,10 +91,23 @@ export default function CaseSidebarTree({
     .filter((p): p is EntityRecord => Boolean(p));
   const pinCandidates = useMemo(() => {
     const q = pinQuery.trim().toLowerCase();
-    return people
-      .filter((p) => p.type === "person" && !pinnedIds.includes(p.id))
-      .filter((p) => !q || p.name.toLowerCase().includes(q) || formatRoleLabel(p.role).toLowerCase().includes(q));
-  }, [people, pinnedIds, pinQuery]);
+    const fromDirectory = directory.filter((p) => !p.pinned);
+    const pool = fromDirectory.length
+      ? fromDirectory
+      : people
+        .filter((p) => p.type === "person" && !pinnedIds.includes(p.id))
+        .map((p) => ({
+          id: p.id,
+          caseId: p.caseId,
+          name: p.name,
+          role: p.role,
+          caseLabel: "",
+          notes: p.notes,
+          classification: p.classification,
+          pinned: false,
+        }));
+    return pool.filter((p) => !q || p.name.toLowerCase().includes(q) || formatRoleLabel(p.role).toLowerCase().includes(q) || p.caseLabel.toLowerCase().includes(q));
+  }, [directory, people, pinnedIds, pinQuery]);
 
   useEffect(() => {
     if (personId) setOpenPeople((prev) => ({ ...prev, [personId]: true }));
@@ -155,37 +181,47 @@ export default function CaseSidebarTree({
         <div className="relative" ref={pinRef}>
           <button
             type="button"
-            disabled={locked}
+            disabled={pinCandidates.length === 0 && people.filter((p) => p.type === "person").length === 0}
             onClick={() => { setPinOpen((v) => !v); setPinQuery(""); }}
             className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-40"
           >
             <Plus className="h-3 w-3" />Pin
           </button>
           {pinOpen && (
-            <div className="absolute right-0 z-50 mt-1 w-[220px] rounded-[12px] border border-slate-200 bg-white p-2 shadow-lg">
-              <input
-                autoFocus
-                value={pinQuery}
-                onChange={(e) => setPinQuery(e.target.value)}
-                placeholder="Search people…"
-                className="mb-2 h-8 w-full rounded-md border border-slate-200 px-2 text-[12.5px] outline-none focus:border-blue-500"
-              />
-              <div className="max-h-48 overflow-auto">
-                {pinCandidates.length === 0 ? (
-                  <div className="px-1 py-3 text-center text-[12px] text-slate-500">No unpinned people.</div>
-                ) : pinCandidates.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => { onPinPerson(p.id); setPinOpen(false); setOpenPeople((prev) => ({ ...prev, [p.id]: true })); }}
-                    className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left hover:bg-slate-50"
-                  >
-                    <span className={`flex h-6 w-6 items-center justify-center rounded-full text-[9px] font-bold ${entityAvatarClass(p.role, "bg-slate-100 text-slate-700", p.notes, p.classification)}`}>
-                      {entityInitials(p.name)}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{p.name}</span>
-                  </button>
-                ))}
+            <div className="fixed inset-0 z-[80] flex items-start justify-center bg-slate-900/40 p-4 pt-24" onMouseDown={() => setPinOpen(false)}>
+              <div
+                className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <div className="mb-1 text-[16px] font-semibold">Pin a person</div>
+                <p className="mb-3 text-[12.5px] text-slate-500">Choose someone from any case to pin into that workspace.</p>
+                <input
+                  autoFocus
+                  value={pinQuery}
+                  onChange={(e) => setPinQuery(e.target.value)}
+                  placeholder="Search people…"
+                  className="mb-2 h-9 w-full rounded-lg border border-slate-200 px-2.5 text-[13px] outline-none focus:border-blue-500"
+                />
+                <div className="max-h-80 overflow-auto">
+                  {pinCandidates.length === 0 ? (
+                    <div className="px-1 py-6 text-center text-[12.5px] text-slate-500">No unpinned people.</div>
+                  ) : pinCandidates.map((p) => (
+                    <button
+                      key={`${p.caseId}-${p.id}`}
+                      type="button"
+                      onClick={() => { onPinPerson(p.id, p.caseId); setPinOpen(false); setOpenPeople((prev) => ({ ...prev, [p.id]: true })); }}
+                      className="flex w-full items-center gap-2 rounded-lg px-1.5 py-2 text-left hover:bg-slate-50"
+                    >
+                      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${entityAvatarClass(p.role, "bg-slate-100 text-slate-700", p.notes, p.classification)}`}>
+                        {entityInitials(p.name)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[13px] font-medium">{p.name}</span>
+                        <span className={`block truncate ${mono} text-[10px] text-slate-500`}>{formatRoleLabel(p.role) || "Person"}{p.caseLabel ? ` · ${p.caseLabel}` : ""}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           )}

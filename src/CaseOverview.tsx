@@ -6,7 +6,7 @@ import {
   MapPin, MoreHorizontal, Pencil, Phone, Plus, Radio, RefreshCw, Trash2, Upload,
 } from "lucide-react";
 import {
-  CONTACT_AFFILIATIONS, createCaseContact, db, deleteCaseContact, deleteEvidence, formatBytes,
+  CONTACT_AFFILIATIONS, createCaseContact, db, deleteCaseContact, deleteEvidence, ensureContactsForPeople, formatBytes,
   updateCaseContact,
   type CaseContactRecord, type CaseRecord,
   type EntityRecord, type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
@@ -31,6 +31,7 @@ import PinPersonButton from "./PinPersonButton";
 import SubjectProfile from "./SubjectProfile";
 import TimelineSnapshot from "./TimelineSnapshot";
 import { isSecondaryEvidence, sourceClassLabel } from "./lib/sourceTier";
+import { isSearchNetworkPerson, looksLikeIndividualName } from "./lib/personDirectory";
 
 const mono = "font-mono";
 
@@ -42,13 +43,15 @@ function isLivingRolodexContact(contact: CaseContactRecord, entities: EntityReco
   if (/\b(deceased|decedent)\b/i.test(`${contact.notes} ${contact.affiliation}`)) return false;
   if (/^victim$/i.test(contact.affiliation.trim())) return false;
   if (/missing person/i.test(contact.affiliation)) return false;
+  if (!looksLikeIndividualName(contact.name)) return false;
   const linked = contact.entityId ? entities.find((e) => e.id === contact.entityId) : undefined;
   if (linked) {
-    if (linked.type !== "person") return false;
+    if (!isSearchNetworkPerson(linked)) return false;
     if (isVictimOrDeceased(linked.role, linked.notes, linked.classification)) return false;
     return true;
   }
-  const named = entities.find((e) => e.type === "person" && e.name.trim().toLowerCase() === contact.name.trim().toLowerCase());
+  const named = entities.find((e) => e.name.trim().toLowerCase() === contact.name.trim().toLowerCase());
+  if (named && !isSearchNetworkPerson(named)) return false;
   if (named && isVictimOrDeceased(named.role, named.notes, named.classification)) return false;
   return true;
 }
@@ -226,6 +229,11 @@ export default function CaseOverview({
   const [ingestOpen, setIngestOpen] = useState(false);
   const [contactsExpanded, setContactsExpanded] = useState(false);
   const [clock, setClock] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!activeCase?.id) return;
+    void ensureContactsForPeople(activeCase.id);
+  }, [activeCase?.id]);
 
   useEffect(() => {
     const id = window.setInterval(() => setClock(Date.now()), 30_000);
@@ -606,7 +614,7 @@ export default function CaseOverview({
         <div className="mb-3.5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-baseline gap-3">
             <h2 className={`${mono} text-[11px] tracking-[0.14em] text-slate-500`}>SEARCH NETWORK & CONTACTS</h2>
-            <span className={`${mono} text-[11px] text-slate-400`}>{livingContacts.length} LIVING</span>
+            <span className={`${mono} text-[11px] text-slate-400`}>{livingContacts.length} LIVING CONTACTS</span>
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -645,7 +653,7 @@ export default function CaseOverview({
                 <select value={contactForm.entityId ?? ""} onChange={(e) => setContactForm({ ...contactForm, entityId: e.target.value })}
                   className="h-9 rounded-lg border border-slate-200 px-2.5 text-[13px] font-normal outline-none">
                   <option value="">None</option>
-                  {entities.filter((e) => e.type === "person" && !isVictimOrDeceased(e.role, e.notes, e.classification)).map((e) => <option key={e.id} value={e.id}>{e.name} · {formatRoleLabel(e.role) || e.type}</option>)}
+                  {entities.filter((e) => isSearchNetworkPerson(e) && !isVictimOrDeceased(e.role, e.notes, e.classification)).map((e) => <option key={e.id} value={e.id}>{e.name} · {formatRoleLabel(e.role) || e.type}</option>)}
                 </select>
               </label>
               <label className="flex flex-col gap-1 text-[11px] font-semibold text-slate-600">

@@ -40,6 +40,8 @@ import SourceDocumentViewer, { CitationPill } from "./SourceDocumentViewer";
 import TimelineToolbar, { TimelineDateStrip, TimelineHoverTip } from "./Timeline";
 import TimelineConflictInspector from "./TimelineConflictInspector";
 import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQueueCard";
+import VerifySourceSwitcher from "./VerifySourceSwitcher";
+import { draftsForSource } from "./lib/useExtraction";
 import WorkspacePreferences from "./WorkspacePreferences";
 import { ExtractSelectionTip, LogEvidenceModal, VERIFY_CATEGORIES, type ManualLogCategoryId } from "./Verify";
 import {
@@ -61,7 +63,7 @@ import {
 } from "./lib/extractSchema";
 import TimelineGrid from "./TimelineGrid";
 import { useTimelineConflicts } from "./lib/useTimelineConflicts";
-import { collectQuoteSpans, locateAnySnippet, narrativeSortKey, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
+import { collectQuoteSpans, locateAnySnippet, locateSnippet, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
 import {
   confidenceTierOf,
   coordinatesForEvent,
@@ -87,6 +89,8 @@ import { formatAlertLabel, ALERT_LEVELS } from "./lib/missingPerson";
 import LiveAlertsFeed from "./LiveAlertsFeed";
 import VerifyIngestDropzone from "./VerifyIngestDropzone";
 import CaseSidebarTree from "./CaseSidebarTree";
+import HubPersons from "./HubPersons";
+import { isSearchNetworkPerson } from "./lib/personDirectory";
 import PersonWorkspace from "./PersonWorkspace";
 import { alertTypeToCaseStatus, parseAlertMissingAt, type LiveMissingAlert } from "./lib/liveMissingAlert";
 import type { SubjectProfile } from "./db/schema";
@@ -479,6 +483,8 @@ export default function DesktopApp() {
       ?? null;
   const activeCase = hubCases?.find((c) => c.id === resolvedCaseId) ?? null;
 
+  const allEntities = useLiveQuery(() => db.entities.toArray(), []) ?? [];
+  const allEvents = useLiveQuery(() => db.timelineEvents.toArray(), []) ?? [];
   const caseEntities = useLiveQuery(
     () => (resolvedCaseId ? db.entities.where("caseId").equals(resolvedCaseId).toArray() : Promise.resolve([] as EntityRecord[])),
     [resolvedCaseId],
@@ -2226,9 +2232,17 @@ export default function DesktopApp() {
   const jobElapsed = ingestJob ? ingestElapsedSec(ingestJob, nowMs) : 0;
   const busy = extracting || (ingestJob != null && ingestJob.stage !== "done");
 
+  const sourcePending = useMemo(
+    () => draftsForSource(pendingDrafts, sourceEvidence?.id),
+    [pendingDrafts, sourceEvidence?.id],
+  );
+  const sourceDrafts = useMemo(
+    () => draftsForSource(highlightDrafts, sourceEvidence?.id),
+    [highlightDrafts, sourceEvidence?.id],
+  );
   const sourceQuoteSpans = useMemo(
-    () => collectQuoteSpans(documentText(sourceEvidence) || "", pendingDrafts),
-    [sourceEvidence?.rawText, sourceEvidence?.fullText, pendingDrafts],
+    () => collectQuoteSpans(documentText(sourceEvidence) || "", sourcePending),
+    [sourceEvidence?.rawText, sourceEvidence?.fullText, sourcePending],
   );
   const sourceQuoteSegments = useMemo(
     () => splitTextBySpans(documentText(sourceEvidence) || "", sourceQuoteSpans),
@@ -2236,20 +2250,16 @@ export default function DesktopApp() {
   );
   const narrativeQueue = useMemo(
     () => {
-      const byEvidence = new Map(caseEvidence.map((row) => [row.id, documentText(row) || row.rawText] as const));
       const current = documentText(sourceEvidence) || "";
-      const ordered = sortByNarrativeOrder(pendingDrafts, (draft) => {
-        if (current && Number.isFinite(narrativeSortKey(current, draft.snippet))) return current;
-        return byEvidence.get(draft.evidenceId) || current;
-      });
-      const logged = highlightDrafts.filter((d) =>
+      const ordered = sortByNarrativeOrder(sourcePending, () => current);
+      const logged = sourceDrafts.filter((d) =>
         (d.origin === "manual" || d.citation === "manual-observation") && d.status !== "rejected" && !ordered.some((p) => p.id === d.id),
       );
       const selection = ordered.filter((d) => d.citation === "selection");
       const rest = ordered.filter((d) => d.citation !== "selection");
       return [...logged, ...selection, ...rest];
     },
-    [caseEvidence, pendingDrafts, highlightDrafts, sourceEvidence?.rawText, sourceEvidence?.fullText],
+    [sourcePending, sourceDrafts, sourceEvidence?.rawText, sourceEvidence?.fullText],
   );
 
   const captureSourceSelection = () => {
@@ -2266,16 +2276,19 @@ export default function DesktopApp() {
       setExtractTip(null);
       return;
     }
-    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    const matched = sourceDrafts.find((draft) => {
+      const blob = `${draft.snippet} ${draft.sourceCitation?.exactQuote || ""}`;
+      return Boolean(locateSnippet(blob, text) || locateSnippet(text, draft.snippet));
+    });
+    if (matched) {
+      setExtractTip(null);
+      setHoveredCard(matched.id, "doc");
+      return;
+    }
     const el = node instanceof Element ? node : node?.parentElement;
     const pageEl = el?.closest("[data-pdf-page]");
     const pageNumber = Number(pageEl?.getAttribute("data-pdf-page"));
-    setExtractTip({
-      text,
-      x: Math.min(window.innerWidth - 24, Math.max(24, rect.left + rect.width / 2)),
-      y: Math.max(12, rect.top - 8),
-      pageNumber: Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : undefined,
-    });
+    void logCustomObservation(text, Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : undefined);
   };
 
   const persistLoggedEvidence = async (input: {
@@ -2320,7 +2333,45 @@ export default function DesktopApp() {
 
   const extractHighlightedText = async () => {
     if (!extractTip) return;
-    setLogModal({ quote: extractTip.text, pageNumber: extractTip.pageNumber });
+    await logCustomObservation(extractTip.text, extractTip.pageNumber);
+  };
+
+  const logCustomObservation = async (quote: string, pageNumber?: number) => {
+    if (!sourceEvidence || !activeCase) return;
+    const text = quote.replace(/\s+/g, " ").trim();
+    if (text.length < 2) return;
+    const rows = await addVerifyDrafts([{
+      caseId: activeCase.id,
+      evidenceId: sourceEvidence.id,
+      timestamp: Date.now(),
+      timestampLabel: pageNumber ? `Page ${pageNumber}` : "Manual extract",
+      entityId: "",
+      entityName: "Custom observation",
+      suggestNewEntity: true,
+      newEntityType: "",
+      category: "evidence",
+      title: "Custom Extracted Observation",
+      snippet: text,
+      details: "",
+      confidence: 1,
+      citation: "manual-observation",
+      origin: "manual",
+      sourceCitation: {
+        sourceId: sourceEvidence.id,
+        sourceName: sourceEvidence.fileName,
+        sourceType: inferSourceType(sourceEvidence),
+        exactQuote: text,
+        pageNumber,
+      },
+    }]);
+    const id = rows[0]?.id;
+    if (id) {
+      setEditingDraftId(id);
+      setHoveredCard(id, "doc");
+    }
+    setExtractTip(null);
+    setLogModal(null);
+    window.getSelection()?.removeAllRanges();
   };
 
   const setHoveredCard = (id: string | null, origin: "card" | "doc") => {
@@ -2358,6 +2409,11 @@ export default function DesktopApp() {
 
   useEffect(() => {
     verifyPdfPageRef.current = 1;
+    setActiveHoveredCardId(null);
+    setEditingDraftId(null);
+    setExtractTip(null);
+    setLogModal(null);
+    setExtractPreview((prev) => (prev && sourceEvidence?.id && prev.evidenceId !== sourceEvidence.id ? null : prev));
   }, [sourceEvidence?.id]);
 
   useEffect(() => {
@@ -2367,8 +2423,17 @@ export default function DesktopApp() {
       const card = document.getElementById(`verify-card-${activeHoveredCardId}`);
       const quote = document.getElementById(`source-hit-${activeHoveredCardId}`)
         ?? document.getElementById(`verify-quote-${activeHoveredCardId}`);
-      const el = origin === "doc" ? card : quote;
-      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (origin === "doc") {
+        card?.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      const scroller = sourcePaneRef.current?.querySelector<HTMLElement>("[data-pdf-scroll]");
+      if (quote && scroller) {
+        const top = quote.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 120;
+        scroller.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+        return;
+      }
+      quote?.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 40);
     return () => window.clearTimeout(timer);
   }, [activeHoveredCardId, screen, sourceEvidence?.id, sourceQuoteSegments.length]);
@@ -2428,13 +2493,28 @@ export default function DesktopApp() {
               personId={PERSON_SCREENS.includes(screen) ? workspacePersonId : null}
               personLeaf={PERSON_SCREENS.includes(screen) ? (PERSON_LEAF_BY_SCREEN[screen] ?? "overview") : null}
               activeCase={activeCase}
-              people={caseEntities.filter((e) => e.type === "person")}
+              people={caseEntities.filter((e) => isSearchNetworkPerson(e))}
+              directory={(hubCases ?? []).flatMap((c) => allEntities.filter((e) => e.caseId === c.id && isSearchNetworkPerson(e)).map((e) => ({
+                id: e.id,
+                caseId: e.caseId,
+                name: e.name,
+                role: e.role,
+                notes: e.notes,
+                classification: e.classification,
+                caseLabel: `${c.id} · ${c.subjectName || c.title}`,
+                pinned: (c.pinnedPersonIds ?? []).includes(e.id),
+              })))}
               intakeBadge={intakeNavBadge}
               verifyBadge={verifyNavBadge}
               locked={screen === "Hub" || screen === "Alerts" || !activeCase}
               onGoCase={(id) => goTo(id)}
               onGoPerson={(id, leaf) => goTo(SCREEN_BY_PERSON_LEAF[leaf] ?? "PersonOverview", resolvedCaseId, id)}
-              onPinPerson={(id) => { if (resolvedCaseId) void togglePinnedPerson(resolvedCaseId, id, true); }}
+              onPinPerson={(id, caseId) => {
+                const target = caseId || resolvedCaseId;
+                if (!target) return;
+                void togglePinnedPerson(target, id, true);
+                if (caseId && caseId !== resolvedCaseId) goTo("Overview", caseId);
+              }}
               onUnpinPerson={(id) => { if (resolvedCaseId) void togglePinnedPerson(resolvedCaseId, id, false); }}
             />
           </nav>
@@ -2782,6 +2862,20 @@ export default function DesktopApp() {
                     );
                   })}
                 </div>
+                <HubPersons
+                  people={allEntities.filter((entity) => isSearchNetworkPerson(entity))}
+                  cases={hubCases ?? []}
+                  events={allEvents}
+                  onOpenCase={(caseId) => {
+                    const row = (hubCases ?? []).find((item) => item.id === caseId);
+                    if (row) openExistingCase(row.id, row.title, row.summary, row.status);
+                    else goTo("Overview", caseId);
+                  }}
+                  onPin={(personId, caseId) => {
+                    void togglePinnedPerson(caseId, personId, true);
+                    goTo("Overview", caseId);
+                  }}
+                />
               </div>
               );
             })()}
@@ -3009,21 +3103,16 @@ export default function DesktopApp() {
             {screen === "Verify" && activeCase && (
               <div className="grid min-h-0 grid-cols-1 overflow-auto lg:h-[calc(100dvh-7.5rem)] lg:grid-cols-2 lg:overflow-hidden">
                 <section className="flex min-h-[min(52dvh,480px)] min-w-0 flex-col overflow-hidden border-b border-slate-200 lg:min-h-0 lg:border-b-0 lg:border-r">
-                  <div className="flex h-auto min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 sm:px-6">
-                    <div className={`flex min-w-0 max-w-full items-center gap-2.5 ${mono} text-[11px] tracking-[0.12em] text-slate-500`}>
-                      <FileText className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 truncate">
-                        SOURCE / {sourceEvidence?.fileName.toUpperCase() ?? "NO FILE"}
-                        {sourceEvidence?.pageCount ? ` · ${sourceEvidence.pageCount} PAGES` : sourceEvidence?.imageBase64 ? " · IMAGE" : ""}
-                      </span>
-                    </div>
-                    <div className="flex min-w-0 flex-wrap items-center gap-2">
-                      {caseEvidence.length > 1 && (
-                        <select value={sourceEvidence?.id ?? ""} onChange={(e) => setActiveEvidenceId(e.target.value)}
-                          className={`max-w-[min(180px,42vw)] rounded-md border border-slate-200 bg-white px-2 py-1 ${mono} text-[10.5px]`}>
-                          {caseEvidence.map((e) => <option key={e.id} value={e.id}>{e.fileName}</option>)}
-                        </select>
-                      )}
+                  <div className="flex h-auto min-h-12 shrink-0 flex-wrap items-end justify-between gap-2 border-b border-slate-200 px-3 py-2 sm:px-6">
+                    <VerifySourceSwitcher
+                      files={caseEvidence}
+                      activeId={sourceEvidence?.id ?? null}
+                      extractedIds={new Set(highlightDrafts.map((draft) => draft.evidenceId))}
+                      onSelect={(id) => setActiveEvidenceId(id)}
+                      onUpload={() => fileRef.current?.click()}
+                      onAddLink={() => goTo("Intake")}
+                    />
+                    <div className="flex min-w-0 flex-wrap items-center gap-2 pb-0.5">
                       <button
                         type="button"
                         disabled={busy || !(sourceEvidence?.fileBase64 || sourceEvidence?.imageBase64 || sourceEvidence?.rawText.trim())}
@@ -3048,29 +3137,47 @@ export default function DesktopApp() {
                         evidence={sourceEvidence}
                         citation={(() => {
                           const d = narrativeQueue.find((row) => row.id === activeHoveredCardId)
-                            ?? highlightDrafts.find((row) => row.id === activeHoveredCardId)
-                            ?? narrativeQueue[0]
-                            ?? highlightDrafts[0];
-                          return d ? citationFromDraft(d, caseEvidence.find((e) => e.id === d.evidenceId) ?? sourceEvidence) : null;
+                            ?? sourceDrafts.find((row) => row.id === activeHoveredCardId)
+                            ?? null;
+                          return d ? citationFromDraft(d, sourceEvidence) : null;
                         })()}
-                        anchors={highlightDrafts.map((row) => ({
+                        anchors={sourceDrafts.map((row) => ({
                           id: row.id,
-                          citation: citationFromDraft(row, caseEvidence.find((e) => e.id === row.evidenceId) ?? sourceEvidence),
+                          citation: citationFromDraft(row, sourceEvidence),
                           label: row.title,
+                          entityName: row.entityName,
                         }))}
+                        highlightTerms={sourceDrafts.map((row) => row.entityName).filter((name) => name.trim().length > 2)}
+                        onPasteArticle={async (text) => {
+                          if (!sourceEvidence) return;
+                          const words = text.split(/\s+/).filter(Boolean);
+                          await db.evidence.update(sourceEvidence.id, {
+                            rawText: text,
+                            fullText: text,
+                            wordCount: words.length,
+                            status: "indexed",
+                            lastError: "",
+                          });
+                          void runExtract(sourceEvidence.id, { stayOnWorkspace: true });
+                        }}
                         activeId={activeHoveredCardId}
                         showClose={false}
                         onSelectAnchor={(id) => {
+                          const known = sourceDrafts.some((row) => row.id === id);
+                          if (!known) {
+                            const text = document.getElementById(`source-hit-${CSS.escape(id)}`)?.textContent?.replace(/\s+/g, " ").trim() || "";
+                            if (text) void logCustomObservation(text);
+                            return;
+                          }
                           setHoveredCard(id, "doc");
-                          document.getElementById(`verify-card-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
                         }}
                         onVisiblePage={(page) => { verifyPdfPageRef.current = page; }}
                         onImageRegionSelect={({ box, previewDataUrl }) => {
                           setExtractTip(null);
                           setLogModal({ quote: "Selected image region", previewDataUrl, box });
                         }}
-                        onTextSelect={({ text, x, y, pageNumber }) => {
-                          setExtractTip({ text, x, y, pageNumber });
+                        onTextSelect={() => {
+                          /* Pane mouseup opens a Custom Extracted Observation for text that has no card. */
                         }}
                       />
                     </div>
@@ -3101,7 +3208,7 @@ export default function DesktopApp() {
                       <Inbox className="h-3.5 w-3.5 shrink-0" />AI EXTRACTION QUEUE
                     </div>
                     <span className={`shrink-0 whitespace-nowrap ${mono} text-[11px] text-slate-500`}>
-                      {pendingDrafts.length} UNRESOLVED
+                      {sourcePending.length} UNRESOLVED
                     </span>
                   </div>
 
@@ -3119,7 +3226,6 @@ export default function DesktopApp() {
                         entities={caseEntities}
                         parseEventTime={parseEventTime}
                         onHoverStart={() => {
-                          if (d.evidenceId && d.evidenceId !== sourceEvidence?.id) setActiveEvidenceId(d.evidenceId);
                           setHoveredCard(d.id, "card");
                         }}
                         onHoverEnd={() => setHoveredCard(null, "card")}
@@ -3138,7 +3244,7 @@ export default function DesktopApp() {
                       />
                     ))}
 
-                    {pendingDrafts.length === 0 && narrativeQueue.length === 0 && (
+                    {sourcePending.length === 0 && narrativeQueue.length === 0 && (
                       <div className="flex flex-col items-center gap-4 rounded-[14px] border border-dashed border-slate-300 px-5 py-10 text-center">
                         <CheckCheck className="h-[18px] w-[18px] text-blue-600" />
                         <div className="text-[20px] font-semibold">
@@ -3160,7 +3266,7 @@ export default function DesktopApp() {
                         />
                       </div>
                     )}
-                    {pendingDrafts.length === 0 && narrativeQueue.length > 0 && (
+                    {sourcePending.length === 0 && narrativeQueue.length > 0 && (
                       <VerifyIngestDropzone
                         busy={busy || extracting}
                         indexedFiles={intakeIndexedFiles}
@@ -3752,10 +3858,15 @@ export default function DesktopApp() {
                   <div className="flex gap-2">
                     <button
                       type="button"
-                      onClick={() => void updateTimelineEvent(drawerEvent.id, { isVerified: true, confidenceTier: "TIER_1_VERIFIED", flaggedNoise: false })}
-                      className="h-10 flex-1 rounded-[10px] bg-emerald-600 text-[12.5px] font-semibold text-white hover:bg-emerald-700"
+                      title={drawerEvent.isVerified ? "Mark as unverified" : "Verify event"}
+                      onClick={() => void updateTimelineEvent(drawerEvent.id, drawerEvent.isVerified
+                        ? { isVerified: false, confidenceTier: "TIER_2_UNVERIFIED", flaggedNoise: false }
+                        : { isVerified: true, confidenceTier: "TIER_1_VERIFIED", flaggedNoise: false })}
+                      className={drawerEvent.isVerified
+                        ? "h-10 flex-1 rounded-[10px] border border-emerald-300 bg-emerald-50 text-[12.5px] font-semibold text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                        : "h-10 flex-1 rounded-[10px] bg-emerald-600 text-[12.5px] font-semibold text-white hover:bg-emerald-700"}
                     >
-                      Verify
+                      {drawerEvent.isVerified ? "Verified ✓" : "Verify Event"}
                     </button>
                     <button
                       type="button"

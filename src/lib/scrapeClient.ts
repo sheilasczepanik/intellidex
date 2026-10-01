@@ -25,6 +25,20 @@ export type PageMetadata = {
   summary?: string;
 };
 
+/** A stored web capture is readable article text, not a stub or a tag list. */
+export function articleBodyReady(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed || /^External news report referenced from /i.test(trimmed)) return false;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length < 40) return false;
+  const lines = trimmed.split("\n").map((line) => line.replace(/^[-*•]\s*/, "").trim()).filter(Boolean);
+  if (lines.length >= 6) {
+    const tags = lines.filter((line) => line.split(/\s+/).length <= 3);
+    if (tags.length / lines.length >= 0.75) return false;
+  }
+  return true;
+}
+
 export function parseArticleUrl(raw: string): string | null {
   const trimmed = raw.trim();
   try {
@@ -104,7 +118,7 @@ export async function scrapeArticleFromUrl(url: string): Promise<ScrapedArticle>
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(20000),
     });
     const rawText = await res.text();
     let json: Record<string, unknown> = {};

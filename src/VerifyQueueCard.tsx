@@ -110,7 +110,7 @@ export default function VerifyQueueCard({
       onMouseEnter={onHoverStart}
       onMouseLeave={onHoverEnd}
       onClick={onHoverStart}
-      className={`cursor-pointer rounded-[14px] border p-4 transition-all duration-200 ${active ? "-translate-x-[3px] border-amber-400 bg-amber-50 ring-2 ring-amber-500/50" : "border-slate-200 bg-white shadow-sm"}`}
+      className={`cursor-pointer rounded-[14px] border p-4 transition-all duration-200 ${active ? "border-blue-500 bg-white ring-2 ring-blue-500 shadow-md" : "border-slate-200 bg-white shadow-sm"}`}
     >
       {editing ? (
         <div className="flex flex-col gap-2.5">

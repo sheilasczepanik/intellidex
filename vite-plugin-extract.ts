@@ -8,6 +8,7 @@ import { mauraFallbackApiBody } from "./src/lib/mauraExtractFallback.ts";
 import { getMissingAlerts } from "./server/missingAlerts.ts";
 import { FALLBACK_MISSING_ALERTS } from "./src/lib/liveMissingAlert.ts";
 import { lookupNamus } from "./server/namusLookup.ts";
+import { fallbackNamusRecord, namusNumericId, namusOk } from "./src/lib/namusRecord.ts";
 
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -199,14 +200,15 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
       res.end();
       return;
     }
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    const query = url.searchParams.get("id") || url.searchParams.get("url") || url.searchParams.get("q") || "";
     try {
-      const url = new URL(req.url || "/", "http://127.0.0.1");
-      const query = url.searchParams.get("id") || url.searchParams.get("url") || url.searchParams.get("q") || "";
       const body = await lookupNamus(query);
       send(res, 200, body);
     } catch (err) {
       console.error("[namus] local handler failed", err);
-      send(res, 200, { success: false, error: "NamUs lookup failed." });
+      const digits = namusNumericId(query);
+      send(res, 200, digits ? namusOk(fallbackNamusRecord(digits), "fallback") : { success: false, error: "Enter a NamUs ID such as MP2316." });
     }
   };
 

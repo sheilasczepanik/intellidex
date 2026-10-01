@@ -59,20 +59,29 @@ export type ExtractedEvent = {
   tier?: "primary" | "secondary";
 };
 
-export const EXTRACT_SYSTEM = `You are an investigative document analyst. Examine this scanned case document or report image.
-Extract all verified investigative facts and return strictly valid JSON matching this schema:
+export const EXTRACT_SYSTEM = `You are an expert cold case investigator analyzing law enforcement reports.
+Extract every single actionable investigative fact from this document.
+Do not just extract high-level tags. Extract specific actions, officer statements, witness responses, vehicle descriptions, dispatch calls, and physical observations.
+Cover:
+- Persons and roles: full names, agency titles, badge numbers.
+- Physical attributes and demographics: ages, gender, clothing, behaviors.
+- Locations and perimeters: exact routes, junctions, landmarks.
+- Timestamps and durations: precise hours and dispatch times.
+- Vehicles and evidence: makes, models, colors, condition.
+- Actions, inquiries, and responses: what was done, what was asked, and what the witness answered.
+Return strictly valid JSON:
 {
-  entities: [
+  "entities": [
     {
-      type: 'Person' | 'Location' | 'Timestamp' | 'Vehicle' | 'Evidence',
-      title: string,
-      details: string,
-      exactSnippet: string, // MUST be a verbatim contiguous string from the image for text anchoring
-      confidence: number // between 80 and 99
+      "type": "Person" | "Location" | "Vehicle" | "Timestamp" | "Action_Taken" | "Witness_Statement" | "Physical_Observation",
+      "title": "Concise label, e.g. Spotlight Search on Route 112",
+      "details": "Detailed context of what occurred, questions asked, or statements made",
+      "exactSnippet": "Contiguous verbatim string copied from the document for exact highlighting",
+      "confidence": 0.9
     }
   ]
 }
-If the text has OCR typos or scanning artifacts, understand the true context (e.g. state names, timestamps), but ensure \`exactSnippet\` matches the visible text on the page so it can be highlighted.`;
+exactSnippet must be copied character-for-character from the source, including the original spelling. Do not paraphrase it.`;
 
 export function unwrapModelJson(raw: string) {
   let s = raw.trim();
@@ -107,7 +116,7 @@ export function isIntelExtractCard(row: unknown): boolean {
   if (!row || typeof row !== "object") return false;
   const r = row as Record<string, unknown>;
   const t = String(r.type ?? "").toLowerCase().replace(/[\s-]+/g, "_");
-  if (!/^(person|location|timestamp|timeline_event|timeline|vehicle|evidence|exhibit)$/.test(t)) return false;
+  if (!/^(person|location|timestamp|timeline_event|timeline|vehicle|evidence|exhibit|action_taken|witness_statement|physical_observation)$/.test(t)) return false;
   return Boolean(
     String(r.title ?? r.name ?? "").trim()
     || String(r.exactSnippet ?? r.quote ?? r.details ?? "").trim(),
@@ -116,6 +125,9 @@ export function isIntelExtractCard(row: unknown): boolean {
 
 function normalizeCategory(value: unknown): ExtractCategory {
   const s = String(value ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  if (s.includes("action_taken") || s.includes("action") || s.includes("inquiry") || s.includes("response")) return "communication";
+  if (s.includes("witness_statement") || s.includes("witness") || s.includes("statement")) return "communication";
+  if (s.includes("physical_observation") || s.includes("physical") || s.includes("demographic") || s.includes("clothing")) return "physical_description";
   if (s.includes("timeline") || s === "time" || s.includes("time_window") || s.includes("timestamp") || s.includes("clock")) return "time";
   if (s.includes("telecom") || s.includes("phone") || s.includes("ping") || s.includes("tower") || s.includes("imei") || s.includes("handset")) return "telecom";
   if (s.includes("comm") || s.includes("radio") || s.includes("dispatch") || s.includes("interview") || s.includes("call_log")) return "communication";
@@ -167,7 +179,7 @@ function normalizeEvent(row: unknown): ExtractedEvent {
     : 0.88;
   const pageNumber = parsePageNumber(r.pageNumber ?? r.page);
   const boundingBox = normalizeBoundingBox(r.boundingBox ?? r.bbox);
-  const details = [displayBadge && !/^(person|location|timeline_event|vehicle|evidence|exhibit|time)$/i.test(displayBadge) ? displayBadge : "", String(r.details ?? r.summary ?? r.citation ?? "").trim()].filter(Boolean).join(" · ");
+  const details = String(r.details ?? r.summary ?? "").trim();
   return {
     timestamp: ts || null,
     timestampLabel,
@@ -636,13 +648,13 @@ export function userExtractPrompt(
   const excerpt = prioritizeLegalFacts(text, opts?.maxChars ?? EXTRACT_MODEL_MAX_CHARS);
   return [
     `Source file: ${fileName}`,
-    "Return JSON { \"entities\": [ ... ] } covering Person, Location, Timestamp, Vehicle, and Evidence.",
-    "Each card needs exactSnippet copied EXACTLY as a contiguous string visible on the page for highlighting.",
-    "Extract any recognizable investigative facts (dates, locations, department names, call numbers, officer names) despite OCR errors or redactions.",
+    "Return JSON { \"entities\": [ ... ] } covering Person, Location, Vehicle, Timestamp, Action_Taken, Witness_Statement, and Physical_Observation.",
+    "Each card needs exactSnippet copied EXACTLY as a contiguous string visible on the page for highlighting. Do not paraphrase the snippet.",
+    "Extract actionable facts: officer names and badge numbers, clothing and behavior, routes and landmarks, dispatch times, vehicle descriptions, actions taken, and questions with the witness's answer.",
     "OCR cleanup: correct obvious scanning typos, expand garbled place names, and keep incident dates separate from report dates.",
     opts?.summary
       ? "Mode: condensed summary of this excerpt only. Prefer fewer, high-confidence cards with verbatim quotes."
-      : "Mode: exhaustive extraction of every named person, last-known location, timestamped event, vehicle, and physical/digital exhibit in this excerpt.",
+      : "Mode: exhaustive extraction of every actionable investigative fact in this excerpt — people and roles, physical observations, locations, timestamps, vehicles, actions taken, and witness answers.",
     "Known case entities (match names when possible; still emit a card even if unmatched):",
     JSON.stringify(entities, null, 2),
     "",

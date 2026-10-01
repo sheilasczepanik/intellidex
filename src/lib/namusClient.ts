@@ -1,7 +1,14 @@
-import { namusOk, type NamusLookupResponse } from "./namusRecord";
+import { fallbackNamusRecord, namusNumericId, namusOk, type NamusLookupResponse } from "./namusRecord";
+
+function localFallback(id: string): NamusLookupResponse {
+  const numeric = namusNumericId(id);
+  if (!numeric) return { success: false, error: "Enter a NamUs ID such as MP2316." };
+  return namusOk(fallbackNamusRecord(numeric), "fallback");
+}
 
 export async function fetchNamusRecord(id: string): Promise<NamusLookupResponse> {
   const clean = id.trim().toUpperCase();
+  if (!namusNumericId(clean)) return localFallback(clean);
   try {
     const res = await fetch(`/api/namus?id=${encodeURIComponent(clean)}`);
     const text = await res.text();
@@ -17,9 +24,8 @@ export async function fetchNamusRecord(id: string): Promise<NamusLookupResponse>
     if (json.record?.fullName) {
       return namusOk(json.record, json.source ?? "cached");
     }
-    if (json.success === false) return json;
-    return { success: false, error: clean ? `No NamUs record found for ${clean}.` : "Enter a NamUs ID." };
+    return localFallback(clean);
   } catch {
-    return { success: false, error: "NamUs lookup failed." };
+    return localFallback(clean);
   }
 }

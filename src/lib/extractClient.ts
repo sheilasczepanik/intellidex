@@ -9,6 +9,7 @@ import {
   windowSourceText,
 } from "./extractSchema";
 import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource } from "./mauraExtractFallback";
+import { locateSnippet } from "./quoteAnchors";
 
 export type { ExtractedEvent, ExtractEntityHint, ScoutedEntity };
 
@@ -40,9 +41,24 @@ function apiErrorMessage(json: Record<string, unknown>, status: number, rawText 
   return body || EXTRACT_SERVICE_UNAVAILABLE;
 }
 
+function snapBundleToSource(bundle: ExtractBundle, source: string): ExtractBundle {
+  const haystack = source.trim();
+  if (!haystack || !bundle.events.length) return bundle;
+  return {
+    ...bundle,
+    events: bundle.events.map((event) => {
+      const quote = event.exactQuote || event.rawQuote || event.snippet;
+      const loc = locateSnippet(haystack, quote);
+      if (!loc) return event;
+      const literal = haystack.slice(loc.start, loc.end);
+      if (!literal) return event;
+      return { ...event, exactQuote: literal, snippet: literal, rawQuote: literal };
+    }),
+  };
+}
+
 function bundleFromResponse(json: Record<string, unknown>, fallbackText: string, fileName: string): ExtractBundle {
-  void fallbackText;
-  let bundle = coerceExtractBundle(json);
+  let bundle = snapBundleToSource(coerceExtractBundle(json), fallbackText);
   if (!bundle.events.length && isLocalMauraExtractSource(fileName)) {
     bundle = mauraVerifiedBundle();
   }

@@ -38,9 +38,13 @@ export type NamusLookupResponse = {
   success?: boolean;
   data?: NamusFormPayload;
   record?: NamusRecord;
-  source?: "live" | "cached";
+  source?: "live" | "cached" | "fallback";
+  notice?: string;
   error?: string;
 };
+
+export const NAMUS_GATEWAY_NOTICE =
+  "NamUs gateway busy: Record initialized. You can edit fields manually or add source PDFs.";
 
 /** Public NamUs MP#54 — Maura Murray (Haverhill, NH, 9 Feb 2004). */
 export const NAMUS_MP54: NamusRecord = {
@@ -81,12 +85,48 @@ export function namusRecordToPayload(record: NamusRecord): NamusFormPayload {
   };
 }
 
-export function namusOk(record: NamusRecord, source: "live" | "cached" = "cached"): NamusLookupResponse {
+export function namusOk(record: NamusRecord, source: "live" | "cached" | "fallback" = "cached"): NamusLookupResponse {
   return {
     success: true,
     data: namusRecordToPayload(record),
     record,
     source,
+    notice: source === "fallback" ? NAMUS_GATEWAY_NOTICE : undefined,
+  };
+}
+
+export function namusNumericId(raw: string) {
+  const parsed = extractNamusId(raw);
+  if (parsed?.numeric) return parsed.numeric;
+  const digits = raw.replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+  return digits || "";
+}
+
+function localToday() {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** Clean starter record when the NamUs gateway is unreachable. */
+export function fallbackNamusRecord(numericId: string): NamusRecord {
+  const numeric = numericId.replace(/\D/g, "") || numericId;
+  return {
+    namusId: `MP${numeric}`,
+    fullName: `NamUs Subject (MP${numeric})`,
+    lksDate: localToday(),
+    lksTime: "12:00",
+    location: "Pending jurisdiction confirmation",
+    ageAtDisappearance: "",
+    currentAge: "",
+    height: "",
+    weight: "",
+    hairColor: "",
+    eyeColor: "",
+    distinguishingMarks: "",
+    clothing: "",
+    medicalAlerts: "",
+    circumstances: "",
   };
 }
 

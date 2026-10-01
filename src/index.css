@@ -151,3 +151,32 @@ mark.extract-hit-active {
 .dark .dossier-scroll::-webkit-scrollbar-thumb {
   background: #3f3f46;
 }
+
+.article-prose {
+  color: #334155;
+  max-width: 68ch;
+}
+
+.article-prose h2 {
+  color: #0f172a;
+}
+
+.article-prose p {
+  margin: 0 0 1rem;
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+
+.dark .article-prose,
+.dark .article-prose h2 {
+  color: #e4e4e7;
+}
+
+@keyframes verify-flash {
+  0% { background-color: rgb(251 191 36 / 0.55); box-shadow: 0 0 0 2px rgb(245 158 11); }
+  100% { background-color: rgb(251 191 36 / 0.25); box-shadow: none; }
+}
+
+.extract-hit-active {
+  animation: verify-flash 1.1s ease;
+}

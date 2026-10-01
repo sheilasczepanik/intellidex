@@ -93,12 +93,18 @@ export function locateCardHighlight(
   haystack: string,
   card: { quote?: string; snippet?: string; exactQuote?: string; anchorText?: string; title?: string },
 ) {
-  const explicit = uniqueNeedles([card.exactQuote, card.quote, card.anchorText, card.snippet]);
+  const explicit = uniqueNeedles([card.exactQuote, card.quote, card.snippet]);
   for (const needle of explicit) {
     const loc = locateSnippet(haystack, needle);
     if (loc) return loc;
   }
-  const blob = `${explicit.join(" ")} ${card.title || ""}`;
+  if (explicit.length) return null;
+  const named = uniqueNeedles([card.anchorText]);
+  for (const needle of named) {
+    const loc = locateSnippet(haystack, needle);
+    if (loc) return loc;
+  }
+  const blob = `${named.join(" ")} ${card.title || ""}`;
   for (const ent of PRIORITY_ENTITIES) {
     if (!blob.includes(ent) && !blob.toLowerCase().includes(ent.toLowerCase())) continue;
     const loc = locateSnippet(haystack, ent);

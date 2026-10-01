@@ -4,6 +4,7 @@ import { namesLooselyMatch, parseEventTime } from "../lib/eventTime";
 import { classifySource } from "../lib/sourceTier";
 import { mapContactAffiliation, normalizeAlertLevel } from "../lib/missingPerson";
 import { isVictimOrDeceased } from "../utils/roleBadge";
+import { isSearchNetworkPerson } from "../lib/personDirectory";
 import { categoryAlreadyExists, customMediaCategoryId, sanitizeMediaCategoryLabel } from "../lib/mediaCategories";
 import type { SubjectProfile } from "./schema";
 import {
@@ -1050,16 +1051,38 @@ export async function deleteCaseContact(id: string) {
   await touchCase(rec.caseId);
 }
 
+const contactSyncs = new Map<string, Promise<void>>();
+
 /** Mirror extracted people onto the rolodex so Overview contacts update without a review gate. */
-export async function ensureContactsForPeople(caseId: string) {
+export function ensureContactsForPeople(caseId: string) {
+  const inflight = contactSyncs.get(caseId);
+  if (inflight) return inflight;
+  const job = syncContactsForPeople(caseId).finally(() => {
+    if (contactSyncs.get(caseId) === job) contactSyncs.delete(caseId);
+  });
+  contactSyncs.set(caseId, job);
+  return job;
+}
+
+async function syncContactsForPeople(caseId: string) {
   const people = (await db.entities.where("caseId").equals(caseId).toArray())
-    .filter((e) => e.type === "person" && !isVictimOrDeceased(e.role, e.notes, e.classification));
+    .filter((e) => isSearchNetworkPerson(e) && !isVictimOrDeceased(e.role, e.notes, e.classification));
   const contacts = await db.caseContacts.where("caseId").equals(caseId).toArray();
-  const byEntity = new Set(contacts.map((c) => c.entityId).filter(Boolean));
-  const byName = new Set(contacts.map((c) => c.name.trim().toLowerCase()));
+  const seenEntity = new Set<string>();
+  const seenName = new Set<string>();
+  for (const contact of contacts) {
+    const key = contact.name.trim().toLowerCase();
+    const duplicate = (contact.entityId && seenEntity.has(contact.entityId)) || seenName.has(key);
+    if (duplicate) {
+      await db.caseContacts.delete(contact.id);
+      continue;
+    }
+    if (contact.entityId) seenEntity.add(contact.entityId);
+    if (key) seenName.add(key);
+  }
   for (const person of people) {
     const key = person.name.trim().toLowerCase();
-    if (byEntity.has(person.id) || byName.has(key)) continue;
+    if (seenEntity.has(person.id) || seenName.has(key)) continue;
     await createCaseContact({
       caseId,
       name: person.name,
@@ -1070,8 +1093,8 @@ export async function ensureContactsForPeople(caseId: string) {
       address: "",
       notes: person.notes || "",
     });
-    byEntity.add(person.id);
-    byName.add(key);
+    seenEntity.add(person.id);
+    seenName.add(key);
   }
 }
 
