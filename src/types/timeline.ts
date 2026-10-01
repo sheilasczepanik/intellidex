@@ -7,7 +7,6 @@ export type SwimlaneGroupId = "subject" | "official" | "sightings";
 export type TimelineGeo = { lat: number; lng: number; label: string };
 
 const SIGHTING_RE = /sighting|civilian tip|\btip\b|witness|reported seen|last seen|seen near|caller reported/i;
-const OFFICIAL_RE = /dispatch|officer|sergeant|detective|investigator|police|trooper|sheriff|law enforcement|\b911\b|state police/i;
 
 export function parseTimeEnd(timeEnd: string | undefined, startMs: number): number | undefined {
   const raw = timeEnd?.trim();
@@ -58,11 +57,18 @@ export function swimlaneGroupFor(
   subjectName?: string,
 ): SwimlaneGroupId {
   const blob = `${lane.name} ${lane.role || ""} ${lane.note || ""}`;
+  const role = lane.role || "";
   const subject = (subjectName || "").trim().toLowerCase();
   const name = lane.name.trim().toLowerCase();
-  if (subject && (name === subject || name.includes(subject) || subject.includes(name))) return "subject";
-  if (/missing_person|missing person|\bsubject\b|\bvictim\b/i.test(lane.role || "")) return "subject";
-  if (OFFICIAL_RE.test(blob)) return "official";
+  const subjectMatch = Boolean(subject) && (name === subject || name.includes(subject) || subject.includes(name));
+  const official = /haverhill|grafton|dispatch|cecil smith|\b911\b|police|officer|sergeant|detective|trooper|sheriff|law enforcement|state police/i.test(blob);
+  const sighting = /butch atwood|faith westman|sighting|civilian tip|community tip|uncorroborated|road sighting|\btip\b|witness/i.test(blob);
+  if (subjectMatch || /missing_person|missing person|\bvictim\b/i.test(role)) return "subject";
+  if (official) return "official";
+  if (sighting || /witness/i.test(role)) return "sightings";
+  if (/\batm\b|withdraw|itinerary|personal|saturn|verified vehicle/i.test(blob)) return "subject";
+  if (lane.type === "vehicle" && /unverified/i.test(role)) return "sightings";
+  if (lane.type === "vehicle" || lane.type === "person") return "subject";
   return "sightings";
 }
 

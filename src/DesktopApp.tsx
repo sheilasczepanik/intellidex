@@ -3295,13 +3295,18 @@ export default function DesktopApp() {
                         subjectName={activeCase?.subjectName || activeCase?.title}
                         collapsed={collapsedGroups}
                         onToggle={(id) => setCollapsedGroups((curr) => ({ ...curr, [id]: !curr[id] }))}
-                        renderLane={({ def, height, placed, tracks, count }) => {
+                        renderLane={({ def, height, placed, tracks, count }, groupId) => {
                         const dim = (selected != null && selected !== def.id)
                           || (focusMerged && !chrono.mergedLaneIds.includes(def.id));
                         const KindIcon = ENTITY_ICON[TYPE_KIND[def.type]] ?? Clock;
+                        const laneAccent = groupId === "official"
+                          ? "border-l-4 border-l-emerald-500"
+                          : groupId === "sightings"
+                            ? "border-l-4 border-l-amber-500"
+                            : "border-l-4 border-l-blue-500";
                         return (
                           <div key={def.id} className={`relative overflow-visible border-b border-slate-200 transition-opacity ${dim ? "opacity-40" : "opacity-100"}`} style={{ height }}>
-                            <div className={`sticky left-0 z-[3] flex h-full min-h-[56px] flex-col justify-center gap-1 border-r border-slate-200 bg-slate-50 py-2 pl-5 pr-3.5 text-left ${mono} text-[11px] uppercase leading-snug tracking-[0.06em] text-slate-600`}
+                            <div className={`sticky left-0 z-[3] flex h-full min-h-[52px] flex-col justify-center gap-1 border-r border-slate-200 bg-slate-50 py-2 pl-5 pr-3.5 text-left ${mono} text-[11px] uppercase leading-snug tracking-[0.06em] text-slate-600`}
                               style={{ width: LANE_PAD }}
                             >
                               <TimelineHoverTip
@@ -3331,7 +3336,7 @@ export default function DesktopApp() {
                                 key={e.id}
                                 id={`timeline-node-${e.id}`}
                                 onClick={() => openEventDrawer(e.id, e.mergedIds)}
-                                className={`absolute z-[2] flex min-w-[228px] items-start gap-2 overflow-visible rounded-[10px] border border-l-2 px-2.5 py-1.5 text-left shadow-sm transition-colors hover:border-blue-300 ${sightingCard ? "border-amber-300 border-l-amber-500 bg-amber-50" : e.secondary ? "border-dashed border-amber-400 border-l-amber-500 bg-white" : e.flag ? "border-amber-300 border-l-amber-600 bg-white ring-[3px] ring-amber-500/10" : `border-slate-200 bg-white ${getCategoryColor(e.semantic, "border")}`} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
+                                className={`absolute z-[2] flex min-w-[228px] items-start gap-2 overflow-visible rounded-[10px] border px-2.5 py-1.5 text-left shadow-sm transition-colors hover:border-blue-300 ${laneAccent} ${sightingCard ? "border-amber-300 bg-amber-50" : e.secondary ? "border-dashed border-amber-400 bg-white" : e.flag ? "border-amber-300 bg-white ring-[3px] ring-amber-500/10" : "border-slate-200 bg-white"} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
                                 style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width, height: CARD_H }}
                               >
                                 <KindIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${e.flag || sightingCard ? "text-amber-700" : getCategoryColor(e.semantic, "text")}`} />
