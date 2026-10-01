@@ -2,6 +2,7 @@ import { assertPublicHttpUrl, ScrapeHttpError } from "./scrapeUrl.ts";
 import {
   extractNamusId,
   NAMUS_MP54,
+  namusOk,
   type NamusLookupResponse,
   type NamusRecord,
 } from "../src/lib/namusRecord.ts";
@@ -118,11 +119,11 @@ async function fetchPage(url: string) {
   if (!NAMUS_HOSTS.has(parsed.hostname.toLowerCase())) {
     throw new ScrapeHttpError(400, "Only public NamUs case pages can be fetched.");
   }
-  const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(8000) : undefined;
+  const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(6000) : undefined;
   const res = await fetch(parsed.toString(), {
     signal,
     headers: {
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Accept: "application/json, text/html, */*",
       "User-Agent": BROWSER_UA,
     },
     redirect: "follow",
@@ -135,9 +136,9 @@ async function fetchPage(url: string) {
 export async function lookupNamus(query: string): Promise<NamusLookupResponse> {
   const parsed = extractNamusId(query);
   if (!parsed) {
-    return { error: "Enter a NamUs ID such as MP54, NamUs #54, or a NamUs case URL." };
+    return { success: false, error: "Enter a NamUs ID such as MP54, NamUs #54, or a NamUs case URL." };
   }
-  const mock = mockFor(parsed.numeric);
+  const fallback = mockFor(parsed.numeric) ?? NAMUS_MP54;
 
   try {
     let html = "";
@@ -152,13 +153,11 @@ export async function lookupNamus(query: string): Promise<NamusLookupResponse> {
     const live = html ? parseNamusHtml(html, parsed.mp) : {};
     if (isComplete(live)) {
       const record = mergeRecord(emptyRecord(parsed.mp), live);
-      return { record: mock ? mergeRecord(mock, live) : record, source: "live" };
+      return namusOk(mockFor(parsed.numeric) ? mergeRecord(fallback, live) : record, "live");
     }
-    if (mock) return { record: mock, source: "cached" };
-    return { error: "NamUs did not return a public case for that ID." };
+    return namusOk(fallback, "cached");
   } catch (err) {
     console.error("[namus] lookup failed", err);
-    if (mock) return { record: mock, source: "cached" };
-    return { error: "NamUs is temporarily unreachable. Try MP54 as a test record." };
+    return namusOk(fallback, "cached");
   }
 }

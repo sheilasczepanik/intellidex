@@ -30,12 +30,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const payload = await readJsonBody(req);
-  const result = await dispatchExtract({
-    payload,
-    headerKey: header(req, "x-dossier-key") || header(req, "x-api-key"),
-    headerProvider: header(req, "x-dossier-provider"),
-    env: process.env,
-  });
-  return res.status(200).json(result.body);
+  try {
+    const payload = await readJsonBody(req);
+    const result = await dispatchExtract({
+      payload,
+      headerKey: header(req, "x-dossier-key") || header(req, "x-api-key"),
+      headerProvider: header(req, "x-dossier-provider"),
+      env: process.env,
+    });
+    return res.status(200).json(result.body);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Extraction service unavailable (verify API key or document size)";
+    console.error("[Extraction] Endpoint error", message);
+    return res.status(200).json({
+      engine: "fallback",
+      warning: message,
+      events: [],
+      items: [],
+      entities: [],
+      relationships: [],
+    });
+  }
 }

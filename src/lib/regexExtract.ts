@@ -70,3 +70,28 @@ export function regexExtractFromText(text: string, fileName: string): ExtractBun
 
   return { events: events.slice(0, 20), entities: entities.slice(0, 24), relationships: [] };
 }
+
+/** Guaranteed cards so Verify is usable when the extract API is down. */
+export function sampleExtractedCards(fileName: string): ExtractBundle {
+  const label = fileName.replace(/\.[^.]+$/, "") || "Sample source";
+  return {
+    events: [
+      eventFrom(
+        "Last known location (sample)",
+        label,
+        "Unknown",
+        "Sample card — extraction service was unavailable. Confirm, edit, or reject after retrying with a valid API key.",
+        "location",
+      ),
+      eventFrom(
+        "Timeline placeholder (sample)",
+        label,
+        "Unknown",
+        `Placeholder event generated from ${fileName} so verification can continue without the model.`,
+        "time",
+      ),
+    ],
+    entities: [{ name: label, type: "person", classification: "UNVERIFIED", identifiers: [] }],
+    relationships: [],
+  };
+}

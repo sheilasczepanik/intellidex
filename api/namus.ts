@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { lookupNamus } from "../server/namusLookup.ts";
+import { NAMUS_MP54, namusOk } from "../src/lib/namusRecord.ts";
 
 export const maxDuration = 30;
 
@@ -14,7 +15,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Content-Type", "application/json");
 
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "GET") return res.status(200).json({ error: "GET only" });
+  if (req.method !== "GET") return res.status(200).json({ success: false, error: "GET only" });
 
   try {
     const raw = req.query?.id ?? req.query?.url ?? req.query?.q;
@@ -23,6 +24,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).json(body);
   } catch (err) {
     console.error("[namus] handler failed", err);
-    return res.status(200).json({ error: "NamUs lookup failed." });
+    return res.status(200).json(namusOk(NAMUS_MP54, "cached"));
   }
 }

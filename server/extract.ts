@@ -1,5 +1,7 @@
 import {
-  EXTRACT_MAX_CHARS,
+  EXTRACT_MODEL_MAX_CHARS,
+  EXTRACT_SERVICE_UNAVAILABLE,
+  mergeExtractBundles,
   type ExtractBundle,
   type ExtractedEvent,
   type ExtractEntityHint,
@@ -12,6 +14,7 @@ import {
   structuredToBundle,
   type ExtractEngine,
 } from "./structuredExtract.ts";
+import { regexExtractFromText } from "../src/lib/regexExtract.ts";
 
 export type { ExtractBundle, ExtractedEvent, ExtractEntityHint, ScoutedEntity };
 export { ExtractHttpError };
@@ -37,7 +40,7 @@ export async function runExtraction(input: {
     entities: input.entities,
     summary: input.summary,
     maxPages: input.maxPages,
-    maxChars: input.maxChars ?? EXTRACT_MAX_CHARS,
+    maxChars: input.maxChars ?? EXTRACT_MODEL_MAX_CHARS,
   });
   return bundle;
 }
@@ -128,14 +131,15 @@ export async function runEntityScout(input: {
   }));
 }
 
-function emptyBody(extra?: Record<string, unknown>) {
+function fallbackBody(fileName: string, text: string, warning: string) {
+  const bundle = regexExtractFromText(text || fileName, fileName);
   return {
-    engine: "gpt-4o",
-    events: [],
-    items: [],
-    entities: [],
-    relationships: [],
-    ...extra,
+    engine: "fallback",
+    warning,
+    events: bundle.events,
+    items: bundle.events,
+    entities: bundle.entities,
+    relationships: bundle.relationships,
   };
 }
 
@@ -145,18 +149,18 @@ export async function dispatchExtract(input: {
   headerProvider?: string;
   env: Record<string, string | undefined>;
 }): Promise<{ status: number; body: Record<string, unknown> }> {
+  const payload = input.payload;
+  const fileName = String(payload.filename || payload.fileName || "evidence");
+  const text = String(payload.text || "");
   try {
     const resolved = resolveExtractEngine({
       headerKey: input.headerKey,
       headerProvider: input.headerProvider,
       env: input.env,
     });
-    const payload = input.payload;
     const kind = String(payload.type || "").toLowerCase();
-    const fileName = String(payload.filename || payload.fileName || "evidence");
     const entities = Array.isArray(payload.entities) ? payload.entities as ExtractEntityHint[] : [];
     const pages = Array.isArray(payload.pages) ? payload.pages as { pageNumber?: number; imageBase64?: string }[] : [];
-    const text = String(payload.text || "");
 
     let bundle: ExtractBundle;
 
@@ -183,9 +187,13 @@ export async function dispatchExtract(input: {
         text,
         fileName,
         entities,
-        maxChars: EXTRACT_MAX_CHARS,
+        maxChars: EXTRACT_MODEL_MAX_CHARS,
         summary: Boolean(payload.summary),
       })).bundle;
+    }
+
+    if (!bundle.events.length && !bundle.entities.length) {
+      bundle = mergeExtractBundles([bundle, regexExtractFromText(text || fileName, fileName)]);
     }
 
     if (payload.mode === "entities") {
@@ -202,10 +210,8 @@ export async function dispatchExtract(input: {
       },
     };
   } catch (err) {
-    const status = err instanceof ExtractHttpError ? err.status : 200;
-    const message = err instanceof Error ? err.message : "Extraction failed.";
-    console.error("[Extraction] Handler error", status, message);
-    if (status === 401) return { status: 200, body: { error: message, ...emptyBody() } };
-    return { status: 200, body: emptyBody({ warning: message }) };
+    const message = err instanceof Error ? err.message : EXTRACT_SERVICE_UNAVAILABLE;
+    console.error("[Extraction] Handler error", message);
+    return { status: 200, body: fallbackBody(fileName, text, EXTRACT_SERVICE_UNAVAILABLE) };
   }
 }

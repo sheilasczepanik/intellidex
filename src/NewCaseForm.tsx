@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ArrowRight, Check, Loader2, Sparkles } from "lucide-react";
 import type { CaseStatus, SubjectProfile } from "./db/schema";
 import { fetchNamusRecord } from "./lib/namusClient";
-import { extractNamusId, namusLksDatetime } from "./lib/namusRecord";
+import { extractNamusId } from "./lib/namusRecord";
 import { ALERT_LEVELS, formatAlertLabel } from "./lib/missingPerson";
 
 const mono = "font-mono";
@@ -62,30 +62,30 @@ export default function NewCaseForm({
     setNamusOk(false);
     setNamusErr("");
     try {
-      const data = await fetchNamusRecord(query);
-      const record = data.record;
-      if (!record?.fullName) {
-        setNamusErr(data.error || "NamUs did not return a usable record.");
+      const response = await fetchNamusRecord(query);
+      const data = response.data;
+      if (!data?.name) {
+        setNamusErr(response.error || "NamUs did not return a usable record.");
         return;
       }
-      onTitle(record.fullName);
-      onFileIdentifier(record.namusId ? `NamUs #${record.namusId}` : fileIdentifier);
-      onJurisdiction(record.location);
-      const lks = namusLksDatetime(record);
-      if (lks) onLksAt(lks);
-      if (record.circumstances) onSummary(record.circumstances);
+      onTitle(data.name);
+      onFileIdentifier(data.caseId ? String(data.caseId) : fileIdentifier);
+      onJurisdiction(data.location || "");
+      if (data.lksDate) onLksAt(String(data.lksDate));
+      if (data.circumstances) onSummary(String(data.circumstances));
       onProfile({
         ...profile,
-        ageAtDisappearance: record.ageAtDisappearance || profile.ageAtDisappearance,
-        currentEstimatedAge: record.currentAge || profile.currentEstimatedAge,
-        height: record.height || profile.height,
-        weight: record.weight || profile.weight,
-        hair: record.hairColor || profile.hair,
-        eyes: record.eyeColor || profile.eyes,
-        distinguishingMarks: record.distinguishingMarks || profile.distinguishingMarks,
-        clothingLastSeen: record.clothing || profile.clothingLastSeen,
-        medicalAlerts: record.medicalAlerts || profile.medicalAlerts,
+        ageAtDisappearance: data.ageAtDisappearance != null ? String(data.ageAtDisappearance) : profile.ageAtDisappearance,
+        currentEstimatedAge: data.currentAge != null ? String(data.currentAge) : profile.currentEstimatedAge,
+        height: data.height || profile.height,
+        weight: data.weight || profile.weight,
+        hair: data.hair || profile.hair,
+        eyes: data.eyes || profile.eyes,
+        distinguishingMarks: data.marks || profile.distinguishingMarks,
+        clothingLastSeen: data.clothing || profile.clothingLastSeen,
+        medicalAlerts: data.medicalAlerts || profile.medicalAlerts,
       });
+      setNamusErr("");
       setNamusOk(true);
     } catch (err) {
       setNamusErr(err instanceof Error ? err.message : "NamUs lookup failed.");

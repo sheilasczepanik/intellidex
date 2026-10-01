@@ -1,7 +1,8 @@
 import OpenAI from "openai";
 import { z } from "zod";
 import {
-  EXTRACT_MAX_CHARS,
+  EXTRACT_MODEL_MAX_CHARS,
+  EXTRACT_SERVICE_UNAVAILABLE,
   EXTRACT_SYSTEM,
   coerceExtractBundle,
   prioritizeLegalFacts,
@@ -133,7 +134,7 @@ export async function runStructuredExtraction(input: {
   images?: MediaPart[];
 }): Promise<{ bundle: ExtractBundle; engine: string }> {
   void input.engine;
-  const cap = Math.min(input.maxChars ?? EXTRACT_MAX_CHARS, EXTRACT_MAX_CHARS);
+  const cap = Math.min(input.maxChars ?? EXTRACT_MODEL_MAX_CHARS, EXTRACT_MODEL_MAX_CHARS);
   const source = prioritizeLegalFacts(input.text || "Extract facts visible in the attached media.", cap);
   const prompt = userExtractPrompt(source, input.fileName, input.entities, {
     summary: input.summary,
@@ -176,7 +177,12 @@ async function extractWithGpt4o(input: {
     return parseModelContent(completion.choices[0]?.message?.content);
   } catch (err) {
     if (err instanceof ExtractHttpError) throw err;
-    console.error("[Extraction] GPT-4o request failed:", err instanceof Error ? err.message : err);
-    return EMPTY;
+    const message = err instanceof Error ? err.message : String(err);
+    const status = typeof err === "object" && err && "status" in err ? Number((err as { status?: number }).status) : 0;
+    console.error("[Extraction] GPT-4o request failed:", message);
+    if (status === 401 || status === 403 || /invalid api key|incorrect api key|authentication|unauthorized/i.test(message)) {
+      throw new ExtractHttpError(401, EXTRACT_SERVICE_UNAVAILABLE);
+    }
+    throw new ExtractHttpError(status >= 400 ? status : 502, EXTRACT_SERVICE_UNAVAILABLE);
   }
 }

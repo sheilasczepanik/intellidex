@@ -16,7 +16,27 @@ export type NamusRecord = {
   circumstances: string;
 };
 
+/** Shape returned as `data` from `/api/namus` for the new-case form. */
+export type NamusFormPayload = {
+  name: string;
+  caseId: string;
+  lksDate: string;
+  location: string;
+  ageAtDisappearance: number | string;
+  currentAge: number | string;
+  height: string;
+  weight: string;
+  hair: string;
+  eyes: string;
+  marks: string;
+  clothing: string;
+  medicalAlerts: string;
+  circumstances: string;
+};
+
 export type NamusLookupResponse = {
+  success?: boolean;
+  data?: NamusFormPayload;
   record?: NamusRecord;
   source?: "live" | "cached";
   error?: string;
@@ -28,19 +48,47 @@ export const NAMUS_MP54: NamusRecord = {
   fullName: "Maura Murray",
   lksDate: "2004-02-09",
   lksTime: "19:27",
-  location: "Haverhill, Grafton County, NH",
+  location: "Route 112, Haverhill, Grafton County, NH",
   ageAtDisappearance: "21",
   currentAge: "43",
-  height: "5'3\"",
+  height: "5'7\"",
   weight: "120 lbs",
-  hairColor: "Brown",
-  eyeColor: "Blue",
-  distinguishingMarks: "Scar on right knee",
-  clothing: "Dark coat, jeans",
-  medicalAlerts: "",
+  hairColor: "Light Brown",
+  eyeColor: "Green / Hazel",
+  distinguishingMarks: "Dimple on right cheek, small scar above right eyebrow",
+  clothing: "Dark jacket, jeans, backpack",
+  medicalAlerts: "None recorded",
   circumstances:
-    "Last seen after a single-vehicle crash on Route 112 in Haverhill, New Hampshire. Left the University of Massachusetts Amherst campus earlier that day. NamUs MP#54.",
+    "Maura was last seen at approximately 7:27 PM following a single-car accident on Route 112 in Woodsville/Haverhill, New Hampshire.",
 };
+
+export function namusRecordToPayload(record: NamusRecord): NamusFormPayload {
+  return {
+    name: record.fullName,
+    caseId: record.namusId,
+    lksDate: namusLksDatetime(record) || record.lksDate,
+    location: record.location,
+    ageAtDisappearance: Number(record.ageAtDisappearance) || record.ageAtDisappearance,
+    currentAge: Number(record.currentAge) || record.currentAge,
+    height: record.height,
+    weight: record.weight,
+    hair: record.hairColor,
+    eyes: record.eyeColor,
+    marks: record.distinguishingMarks,
+    clothing: record.clothing,
+    medicalAlerts: record.medicalAlerts,
+    circumstances: record.circumstances,
+  };
+}
+
+export function namusOk(record: NamusRecord, source: "live" | "cached" = "cached"): NamusLookupResponse {
+  return {
+    success: true,
+    data: namusRecordToPayload(record),
+    record,
+    source,
+  };
+}
 
 export function extractNamusId(raw: string): { numeric: string; mp: string } | null {
   const s = raw.trim();
@@ -69,6 +117,7 @@ export function extractNamusId(raw: string): { numeric: string; mp: string } | n
 
 export function namusLksDatetime(record: NamusRecord) {
   const day = (record.lksDate || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(day)) return day.slice(0, 16);
   const isoDay = day.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] || parseLooseDay(day);
   if (!isoDay) return "";
   const time = (record.lksTime || "").trim();

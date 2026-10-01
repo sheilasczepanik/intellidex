@@ -8,7 +8,7 @@ import {
 } from "./db";
 import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
 import { extractPdfText, renderPdfPagesToJpeg, ocrImageSource, documentText } from "./lib/pdfHelpers";
-import { regexExtractFromText } from "./lib/regexExtract";
+import { regexExtractFromText, sampleExtractedCards } from "./lib/regexExtract";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
 import { scrapeArticleFromUrl } from "./lib/scrapeClient";
@@ -54,6 +54,7 @@ import {
   CLAUDE_MAX_CHARS,
   CLAUDE_MAX_PAGES,
   CLAUDE_RETRY_PAGES,
+  EXTRACT_SERVICE_UNAVAILABLE,
   mergeExtractBundles,
   prioritizeLegalFacts,
   type ExtractBundle,
@@ -82,7 +83,7 @@ import {
   ArrowLeft, ArrowRight, Archive, ArchiveRestore, Check, CheckCheck, Clock, FileDown,
   FileText, FolderPlus, GitCommitHorizontal, HeartHandshake, Inbox, KeyRound, LayoutDashboard,
   LayoutGrid, Lock, MapPin, Menu, MoreHorizontal, PanelLeftClose,
-  PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, StickyNote, Trash2, Truck,
+  PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, StickyNote, Trash2, Truck,
   TriangleAlert, User, Users, UserRound, X, Box, Image as ImageIcon,
 } from "lucide-react";
 
@@ -1723,6 +1724,10 @@ export default function DesktopApp() {
         bundle = mergeExtractBundles([bundle, fallback]);
         usedFallback = true;
       }
+      if (bundle.warning) {
+        usedFallback = true;
+        setExtractError(EXTRACT_SERVICE_UNAVAILABLE);
+      }
 
       const events = bundle.events;
       const clarity = ev.textClarity ?? assessTextClarity(sourceText || ev.rawText, ev.pageCount ?? 1);
@@ -1878,39 +1883,70 @@ export default function DesktopApp() {
       if (!stayOnWorkspace) goTo("Verify", caseId);
       setIngestJob(null);
     } catch (err) {
-      const fallback = regexExtractFromText(sourceText || ev.rawText, ev.fileName);
-      if (fallback.events.length || fallback.entities.length) {
-        if (deferApply) {
-          await applyExtractedGraph({
-            caseId,
-            evidenceId: ev.id,
-            entities: fallback.entities,
-            relationships: fallback.relationships,
-            bundle: fallback,
-          });
-          await ensureContactsForPeople(caseId);
-          setExtractPreview({
-            evidenceId: ev.id,
-            fileName: ev.fileName,
-            entities: fallback.entities,
-            events: fallback.events,
-            relationships: fallback.relationships,
-            usedFallback: true,
-            autoApplied: true,
-            bundle: fallback,
-          });
-          setSelectedExtractNames(new Set(fallback.entities.map((ent) => ent.name)));
-          setExtractNotice({ fileName: ev.fileName, entityCount: fallback.entities.length });
-          await db.evidence.update(ev.id, { status: "indexed", lastError: "" });
-          setExtractError(null);
-          setIngestJob(null);
-          return;
-        }
-      }
-      const message = err instanceof Error ? err.message : "Extraction failed.";
-      await db.evidence.update(ev.id, { status: "failed", lastError: message });
-      setExtractError(deferApply ? null : message);
       setIngestJob(null);
+      const banner = EXTRACT_SERVICE_UNAVAILABLE;
+      const fallback = mergeExtractBundles([
+        regexExtractFromText(sourceText || ev.rawText, ev.fileName),
+        sampleExtractedCards(ev.fileName),
+      ]);
+      try {
+        await applyExtractedGraph({
+          caseId,
+          evidenceId: ev.id,
+          entities: fallback.entities,
+          relationships: fallback.relationships,
+          bundle: fallback,
+        });
+        await ensureContactsForPeople(caseId);
+        const roster = await db.entities.where("caseId").equals(caseId).toArray();
+        const matchEntity = (id: string | null, name: string) => {
+          if (id && roster.some((e) => e.id === id)) return id;
+          const needle = name.trim().toLowerCase();
+          if (!needle) return "";
+          return roster.find((e) => e.name.trim().toLowerCase() === needle)?.id
+            ?? roster.find((e) => namesLooselyMatch(e.name, name))?.id
+            ?? "";
+        };
+        if (fallback.events.length) {
+          await addVerifyDrafts(fallback.events.map((event) => {
+            const entityId = matchEntity(event.entityId, event.entityName);
+            return {
+              caseId,
+              evidenceId: ev.id,
+              timestamp: parseEventTime(event.timestamp, event.timestampLabel, {
+                extraText: `${event.details} ${event.rawQuote} ${event.citation} ${sourceText.slice(0, 2500)}`,
+              }),
+              timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
+              entityId,
+              entityName: event.entityName,
+              suggestNewEntity: !entityId,
+              newEntityType: event.newEntityType ?? event.entityType ?? "",
+              category: event.category,
+              title: event.title,
+              snippet: event.rawQuote || event.snippet,
+              details: event.details,
+              confidence: event.confidence,
+              citation: event.citation,
+              sourceCitation: {
+                sourceId: ev.id,
+                sourceName: ev.fileName,
+                sourceType: inferSourceType(ev),
+                pageNumber: event.pageNumber,
+                exactQuote: event.exactQuote || event.rawQuote || event.snippet,
+                boundingBox: event.boundingBox,
+                sourceUrl: ev.sourceUrl,
+              },
+            };
+          }), { replacePendingForEvidence: ev.id });
+        }
+        await db.evidence.update(ev.id, { status: "flagged", lastError: banner });
+        setExtractError(banner);
+        if (!stayOnWorkspace) goTo("Verify", caseId);
+      } catch {
+        const message = err instanceof Error ? err.message : banner;
+        await db.evidence.update(ev.id, { status: "failed", lastError: message });
+        setExtractError(banner);
+      }
     } finally {
       setExtracting(false);
     }
@@ -2043,6 +2079,72 @@ export default function DesktopApp() {
   };
 
   const sourceEvidence = caseEvidence.find((e) => e.id === activeEvidenceId) ?? caseEvidence[0] ?? null;
+  const extractUnavailable = Boolean(
+    extractError
+    && (extractError === EXTRACT_SERVICE_UNAVAILABLE
+      || /extract failed|api key|unavailable|timed out after|openai/i.test(extractError)),
+  );
+
+  const generateSampleExtractedCards = async () => {
+    const caseId = resolvedCaseId;
+    const ev = sourceEvidence;
+    if (!caseId || !ev) {
+      setExtractError("Add a source document first.");
+      return;
+    }
+    setIngestJob(null);
+    setExtracting(false);
+    const bundle = sampleExtractedCards(ev.fileName);
+    await applyExtractedGraph({
+      caseId,
+      evidenceId: ev.id,
+      entities: bundle.entities,
+      relationships: bundle.relationships,
+      bundle,
+    });
+    await ensureContactsForPeople(caseId);
+    const roster = await db.entities.where("caseId").equals(caseId).toArray();
+    const matchEntity = (id: string | null, name: string) => {
+      if (id && roster.some((e) => e.id === id)) return id;
+      const needle = name.trim().toLowerCase();
+      if (!needle) return "";
+      return roster.find((row) => row.name.trim().toLowerCase() === needle)?.id
+        ?? roster.find((row) => namesLooselyMatch(row.name, name))?.id
+        ?? "";
+    };
+    await addVerifyDrafts(bundle.events.map((event) => {
+      const entityId = matchEntity(event.entityId, event.entityName);
+      return {
+        caseId,
+        evidenceId: ev.id,
+        timestamp: parseEventTime(event.timestamp, event.timestampLabel, {
+          extraText: `${event.details} ${event.rawQuote} ${event.citation}`,
+        }),
+        timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
+        entityId,
+        entityName: event.entityName,
+        suggestNewEntity: !entityId,
+        newEntityType: event.newEntityType ?? event.entityType ?? "",
+        category: event.category,
+        title: event.title,
+        snippet: event.rawQuote || event.snippet,
+        details: event.details,
+        confidence: event.confidence,
+        citation: event.citation,
+        sourceCitation: {
+          sourceId: ev.id,
+          sourceName: ev.fileName,
+          sourceType: inferSourceType(ev),
+          pageNumber: event.pageNumber,
+          exactQuote: event.exactQuote || event.rawQuote || event.snippet,
+          boundingBox: event.boundingBox,
+          sourceUrl: ev.sourceUrl,
+        },
+      };
+    }), { replacePendingForEvidence: ev.id });
+    await db.evidence.update(ev.id, { status: "flagged", lastError: EXTRACT_SERVICE_UNAVAILABLE });
+    setExtractError(EXTRACT_SERVICE_UNAVAILABLE);
+  };
   const intakeIndexedFiles = useMemo(
     () => {
       const visible = caseEvidence.filter((row) => isIntakeCompleteStatus(row.status) && isVisibleInStagingQueue(row));
@@ -2859,10 +2961,34 @@ export default function DesktopApp() {
                     </div>
                   </div>
                   <div ref={sourcePaneRef} onScroll={syncQueueToSourceScroll} onMouseUp={captureSourceSelection} className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                    {extractError && !(sourceEvidence && inferSourceType(sourceEvidence) !== "pdf" && /pdf/i.test(extractError)) && (
-                      <div className="mx-3 mt-3 flex items-start gap-2.5 rounded-[10px] border border-red-200 bg-red-50 px-3.5 py-2.5 text-[12.5px] text-red-800">
-                        <TriangleAlert className="mt-0.5 h-[15px] w-[15px] shrink-0" />
-                        {extractError}
+                    {extractError && !(sourceEvidence && inferSourceType(sourceEvidence) !== "pdf" && /pdf/i.test(extractError) && !extractUnavailable) && (
+                      <div className="mx-3 mt-3 flex flex-col gap-2.5 rounded-[10px] border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-950">
+                        <div className="flex items-start gap-2.5">
+                          <TriangleAlert className="mt-0.5 h-[15px] w-[15px] shrink-0" />
+                          <span>{extractUnavailable ? EXTRACT_SERVICE_UNAVAILABLE : extractError}</span>
+                        </div>
+                        {extractUnavailable && (
+                          <div className="flex flex-wrap gap-2 pl-[22px]">
+                            <button
+                              type="button"
+                              disabled={busy || !sourceEvidence}
+                              onClick={() => sourceEvidence && void runExtract(sourceEvidence.id, { stayOnWorkspace: true })}
+                              className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-700 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
+                            >
+                              <RefreshCw className={`h-3 w-3 ${extracting ? "animate-spin" : ""}`} />
+                              Retry Extraction
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!sourceEvidence}
+                              onClick={() => { void generateSampleExtractedCards(); }}
+                              className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-700 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              Generate Sample Extracted Cards
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
                     <div className="min-h-0 flex-1">
@@ -2959,12 +3085,16 @@ export default function DesktopApp() {
                       <div className="flex flex-col items-center gap-4 rounded-[14px] border border-dashed border-slate-300 px-5 py-10 text-center">
                         <CheckCheck className="h-[18px] w-[18px] text-blue-600" />
                         <div className="text-[20px] font-semibold">
-                          {extractError || (sourceEvidence && isUnreadableScan(sourceEvidence.rawText))
+                          {extractUnavailable
+                            ? (caseEvidence.length ? "Queue cleared" : "Nothing to verify")
+                            : extractError || (sourceEvidence && isUnreadableScan(sourceEvidence.rawText))
                             ? "Extraction blocked"
                             : caseEvidence.length ? "Queue cleared" : "Nothing to verify"}
                         </div>
                         <p className="max-w-[34ch] text-[12.5px] text-slate-500 text-pretty">
-                          {extractError
+                          {extractUnavailable
+                            ? EXTRACT_SERVICE_UNAVAILABLE
+                            : extractError
                             ? extractError
                             : sourceEvidence && isUnreadableScan(sourceEvidence.rawText)
                             ? UNREADABLE_SCAN_ALERT
@@ -2974,6 +3104,28 @@ export default function DesktopApp() {
                             ? "Confirmed events are on the chronology. Rejected cards stay dismissed. Drop a new source below to extract, or highlight text in the viewer."
                             : "Drop a document here to extract entities, or pull an indexed file from Intake."}
                         </p>
+                        {extractUnavailable && (
+                          <div className="flex flex-wrap justify-center gap-2">
+                            <button
+                              type="button"
+                              disabled={busy || !sourceEvidence}
+                              onClick={() => sourceEvidence && void runExtract(sourceEvidence.id, { stayOnWorkspace: true })}
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 text-[12px] font-medium text-slate-700 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
+                            >
+                              <RefreshCw className={`h-3 w-3 ${extracting ? "animate-spin" : ""}`} />
+                              Retry Extraction
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!sourceEvidence}
+                              onClick={() => { void generateSampleExtractedCards(); }}
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 text-[12px] font-medium text-slate-700 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              Generate Sample Extracted Cards
+                            </button>
+                          </div>
+                        )}
                         <VerifyIngestDropzone
                           busy={busy || extracting}
                           indexedFiles={intakeIndexedFiles}

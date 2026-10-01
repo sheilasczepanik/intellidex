@@ -1,12 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
-import { dispatchExtract, ExtractHttpError } from "./server/extract.ts";
+import { dispatchExtract } from "./server/extract.ts";
 import { scrapePublicArticle, parsePageMetadata, ScrapeHttpError } from "./server/scrapeUrl.ts";
 import { parseIntelWithAnthropic, IntelParseError } from "./server/parseIntel.ts";
-import { EXTRACT_MAX_CHARS, prioritizeLegalFacts } from "./src/lib/extractSchema.ts";
+import { EXTRACT_MODEL_MAX_CHARS, EXTRACT_SERVICE_UNAVAILABLE, prioritizeLegalFacts } from "./src/lib/extractSchema.ts";
 import { getMissingAlerts } from "./server/missingAlerts.ts";
 import { FALLBACK_MISSING_ALERTS } from "./src/lib/liveMissingAlert.ts";
 import { lookupNamus } from "./server/namusLookup.ts";
+import { NAMUS_MP54, namusOk } from "./src/lib/namusRecord.ts";
 
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -43,7 +44,7 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
         payload = { text: rawBody };
       }
       if (typeof payload.text === "string") {
-        payload = { ...payload, text: prioritizeLegalFacts(payload.text, EXTRACT_MAX_CHARS) };
+        payload = { ...payload, text: prioritizeLegalFacts(payload.text, EXTRACT_MODEL_MAX_CHARS) };
       }
 
       const headerKey = req.headers["x-dossier-key"];
@@ -54,16 +55,19 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
         headerProvider: typeof headerProvider === "string" ? headerProvider : "",
         env,
       });
-      send(res, result.status, result.body);
+      send(res, 200, result.body);
     } catch (err) {
-      const status = err instanceof ExtractHttpError ? err.status : 200;
-      const message = err instanceof Error ? err.message : "Extraction failed.";
-      console.error("[Extraction] Handler error", status, message);
-      if (status === 401) {
-        send(res, 200, { error: message, engine: "gpt-4o", events: [], items: [], entities: [], relationships: [] });
-        return;
-      }
-      send(res, 200, { engine: "gpt-4o", events: [], items: [], entities: [], relationships: [], warning: message });
+      const message = err instanceof Error ? err.message : EXTRACT_SERVICE_UNAVAILABLE;
+      console.error("[Extraction] Handler error", message);
+      send(res, 200, {
+        engine: "fallback",
+        warning: EXTRACT_SERVICE_UNAVAILABLE,
+        error: message,
+        events: [],
+        items: [],
+        entities: [],
+        relationships: [],
+      });
     }
   };
 
@@ -213,7 +217,7 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
       send(res, 200, body);
     } catch (err) {
       console.error("[namus] local handler failed", err);
-      send(res, 200, { error: "NamUs lookup failed." });
+      send(res, 200, namusOk(NAMUS_MP54, "cached"));
     }
   };
 

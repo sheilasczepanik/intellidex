@@ -240,6 +240,7 @@ export type ExtractBundle = {
   lks?: ExtractedLks | null;
   searchLocations?: ExtractedSearchLocation[];
   contacts?: ExtractedContactHint[];
+  warning?: string;
 };
 
 function stringList(value: unknown): string[] {
@@ -476,7 +477,11 @@ export function parseExtractBundle(raw: string): ExtractBundle {
 }
 
 export const EXTRACT_MAX_CHARS = 60_000;
-export const CLAUDE_MAX_CHARS = EXTRACT_MAX_CHARS;
+/** ~5k tokens — keep GPT-4o requests inside a 60s serverless window, including 38-page PDFs. */
+export const EXTRACT_MODEL_MAX_CHARS = 20_000;
+export const CLAUDE_MAX_CHARS = EXTRACT_MODEL_MAX_CHARS;
+export const EXTRACT_SERVICE_UNAVAILABLE =
+  "Extraction service unavailable (verify API key or document size)";
 export const CLAUDE_MAX_PAGES = 40;
 export const CLAUDE_RETRY_PAGES = 8;
 export const EXTRACT_CHUNK_TRIGGER = EXTRACT_MAX_CHARS;
@@ -577,7 +582,7 @@ export function mergeExtractBundles(parts: ExtractBundle[]): ExtractBundle {
       contacts.push(c);
     }
   }
-  return { events, entities, relationships, subject, lks, searchLocations, contacts };
+  return { events, entities, relationships, subject, lks, searchLocations, contacts, warning: parts.find((p) => p.warning)?.warning };
 }
 
 /** Strip control chars and hard-cap for Claude. PDF OCR often injects NUL / C0 bytes that 500 the API. */
@@ -602,13 +607,18 @@ export function windowSourceText(text: string, opts?: { maxPages?: number; maxCh
 }
 
 export function coerceExtractBundle(body: Record<string, unknown>): ExtractBundle {
+  const warning = typeof body.warning === "string" && body.warning.trim()
+    ? body.warning
+    : typeof body.error === "string" && String(body.engine || "") === "fallback"
+      ? body.error
+      : undefined;
   try {
-    return parseExtractBundle(JSON.stringify(body));
+    return { ...parseExtractBundle(JSON.stringify(body)), warning };
   } catch {
     const graph = parseExtractGraph(body);
     const rawEvents = Array.isArray(body.events) ? body.events : Array.isArray(body.items) ? body.items : [];
     const events = rawEvents.map(normalizeEvent).filter((e) => e.title.trim() || e.rawQuote.trim() || e.entityName.trim());
-    return { events, entities: graph.entities, relationships: graph.relationships };
+    return { events, entities: graph.entities, relationships: graph.relationships, warning };
   }
 }
 
@@ -618,7 +628,7 @@ export function userExtractPrompt(
   entities: ExtractEntityHint[],
   opts?: { summary?: boolean; maxPages?: number; maxChars?: number },
 ) {
-  const excerpt = prioritizeLegalFacts(text, opts?.maxChars ?? EXTRACT_MAX_CHARS);
+  const excerpt = prioritizeLegalFacts(text, opts?.maxChars ?? EXTRACT_MODEL_MAX_CHARS);
   return [
     `Source file: ${fileName}`,
     opts?.summary
