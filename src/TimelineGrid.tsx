@@ -1,30 +1,32 @@
 import type { ReactNode } from "react";
-import { ChevronDown, ChevronRight, Eye, Shield, User } from "lucide-react";
+import { Eye, Shield, User } from "lucide-react";
 import { LANE_PAD } from "./lib/timelineView";
 import { useTimelineEvents, type TimelineLaneLike } from "./lib/useTimelineEvents";
 import type { SwimlaneGroupId } from "./types/timeline";
 
+const GROUP_WASH: Record<SwimlaneGroupId, string> = {
+  subject: "bg-slate-100/90 dark:bg-zinc-800/90 border-y border-slate-200 dark:border-zinc-700",
+  official: "bg-emerald-50/80 dark:bg-emerald-950/30 border-y border-emerald-200 dark:border-emerald-800",
+  sightings: "bg-amber-50/80 dark:bg-amber-950/30 border-y border-amber-200 dark:border-amber-800",
+};
+
 const GROUP_CHROME: Record<SwimlaneGroupId, {
   title: (subjectName?: string) => string;
-  badge: string;
   iconWrap: string;
   Icon: typeof User;
 }> = {
   subject: {
     title: (subjectName) => `Subject Movements (${subjectName?.trim() || "Maura Murray"})`,
-    badge: "border-indigo-200 bg-indigo-50 text-indigo-900",
-    iconWrap: "bg-slate-800 text-white",
+    iconWrap: "bg-blue-600 text-white",
     Icon: User,
   },
   official: {
     title: () => "Official Dispatch & Law Enforcement",
-    badge: "border-emerald-200 bg-emerald-50 text-emerald-900",
     iconWrap: "bg-emerald-600 text-white",
     Icon: Shield,
   },
   sightings: {
     title: () => "Witness Sightings & Civilian Tips",
-    badge: "border-amber-200 bg-amber-50 text-amber-950",
     iconWrap: "bg-amber-500 text-white",
     Icon: Eye,
   },
@@ -57,26 +59,25 @@ export default function TimelineGrid<T extends TimelineGridLane>({
         const Icon = chrome.Icon;
         const closed = collapsed[group.id];
         const title = chrome.title(subjectName);
+        const activeLanes = group.rows.filter((row) => (row.placed?.length ?? row.count) > 0).length;
         return (
-          <section key={group.id}>
-            <div className="relative h-10 border-b border-slate-200 bg-white">
+          <section key={group.id} className="w-full">
+            <div className={`relative w-full ${GROUP_WASH[group.id]}`}>
               <button
                 type="button"
                 onClick={() => onToggle(group.id)}
                 aria-expanded={!closed}
-                className="sticky left-0 z-[4] flex h-10 max-w-full items-center gap-2 bg-white/95 px-4 text-left backdrop-blur-sm"
+                className="sticky left-0 z-[4] flex h-10 w-max max-w-full items-center gap-2 px-4 text-left"
               >
-                {closed
-                  ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden />
-                  : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden />}
-                <span className={`inline-flex min-w-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[12px] font-semibold ${chrome.badge}`}>
-                  <span className={`flex h-4 w-4 items-center justify-center rounded-full ${chrome.iconWrap}`}>
-                    <Icon className="h-2.5 w-2.5" />
-                  </span>
-                  <span className="truncate">{title}</span>
+                <span className="w-3 shrink-0 text-[12px] text-slate-600 dark:text-zinc-300" aria-hidden>
+                  {closed ? "▸" : "▾"}
                 </span>
-                <span className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-600">
-                  {group.events} {group.events === 1 ? "Event" : "Events"}
+                <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${chrome.iconWrap}`}>
+                  <Icon className="h-3 w-3" />
+                </span>
+                <span className="truncate text-[13px] font-semibold text-slate-900 dark:text-zinc-100">{title}</span>
+                <span className="shrink-0 rounded-full border border-slate-300/80 bg-white/80 px-2 py-0.5 text-[11px] font-medium text-slate-700 dark:border-zinc-600 dark:bg-zinc-900/70 dark:text-zinc-200">
+                  {activeLanes} Active {activeLanes === 1 ? "Lane" : "Lanes"} · {group.events} {group.events === 1 ? "Event" : "Events"}
                 </span>
               </button>
             </div>
@@ -84,7 +85,7 @@ export default function TimelineGrid<T extends TimelineGridLane>({
               className={`grid transition-[grid-template-rows] duration-200 ease-out ${closed ? "grid-rows-[0fr]" : "grid-rows-[1fr]"}`}
             >
               <div className="overflow-hidden">
-                {group.events === 0 ? (
+                {group.rows.length === 0 ? (
                   <div className="flex min-h-9 items-center border-b border-slate-100 bg-slate-50/60">
                     <div
                       className="sticky left-0 flex min-h-9 items-center bg-slate-50/90 px-5 text-[12px] text-slate-400"

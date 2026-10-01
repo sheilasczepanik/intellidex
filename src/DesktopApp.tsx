@@ -37,7 +37,7 @@ import ExportDossierModal from "./ExportDossierModal";
 import GlobalSearch from "./GlobalSearch";
 import ProfileSettings from "./ProfileSettings";
 import SourceDocumentViewer, { CitationPill } from "./SourceDocumentViewer";
-import TimelineToolbar, { TimelineHoverTip } from "./Timeline";
+import TimelineToolbar, { TimelineDateStrip, TimelineHoverTip } from "./Timeline";
 import TimelineConflictInspector from "./TimelineConflictInspector";
 import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQueueCard";
 import WorkspacePreferences from "./WorkspacePreferences";
@@ -76,9 +76,9 @@ import { clusterMergeableEvents, detectLocationConflicts } from "./lib/timelineD
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
 import { joinLocalDateTime, localDayKey, namesLooselyMatch, splitLocalDateTime } from "./lib/eventTime";
 import {
-  HOUR_MS, LANE_PAD, UNASSIGNED_LANE_ID, busiestDayKey, eventInHourWindow, fitPxPerHour,
-  formatClockRange, formatDaySelector, paddedBounds, pxForPreset, tickMsFor, uniqueDayKeys,
-  windowHours, type TickPreset, type TimeWindow,
+  HOUR_MS, LANE_PAD, UNASSIGNED_LANE_ID, busiestDayKey, eventAxisBounds, eventInHourWindow, fillDayStrip, fitPxPerHour,
+  formatClockRange, midnightsInRange, pxForPreset, spanDayKeys, tickMsFor, uniqueDayKeys,
+  windowHours, type DayScope, type TickPreset, type TimeWindow,
 } from "./lib/timelineView";
 import { getCategoryColor, resolveSemanticCategory } from "./utils/categoryColors";
 import { formatRoleLabel, normalizePersonRole, PERSON_ROLE_VALUES, roleDisplayClass } from "./utils/roleBadge";
@@ -379,7 +379,7 @@ Network records show the handset registered to J. Vance ceased reporting to any 
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
 
-const CARD_W = 228, CARD_H = 58, CARD_GAP = 10, CARD_PAD = 12, RULER_H = 35;
+const CARD_W = 260, CARD_H = 52, CARD_GAP = 10, CARD_PAD = 12, RULER_H = 35;
 const TRANSIT_CONFLICT_MS = 50 * 60 * 1000;
 
 const TONE_CHIP: Record<Tone, string> = {
@@ -557,13 +557,14 @@ export default function DesktopApp() {
   const [providerDraft, setProviderDraft] = useState<LlmProvider>(getLocalProvider);
   const [viewDay, setViewDay] = useState("");
   const [viewAllDates, setViewAllDates] = useState(false);
+  const [dayScope, setDayScope] = useState<DayScope>(1);
+  const [showInactiveLanes, setShowInactiveLanes] = useState(false);
   const [timeWindow, setTimeWindow] = useState<TimeWindow>("full");
   const [customStart, setCustomStart] = useState("00:00");
   const [customEnd, setCustomEnd] = useState("23:59");
   const [tickPreset, setTickPreset] = useState<TickPreset>("1h");
   const [pxPerHour, setPxPerHour] = useState(80);
   const [viewportFit, setViewportFit] = useState(true);
-  const [dateMenu, setDateMenu] = useState(false);
   const [timeMenu, setTimeMenu] = useState(false);
   const [conflictInspectorOpen, setConflictInspectorOpen] = useState(false);
   const [focusMerged, setFocusMerged] = useState(false);
@@ -770,11 +771,13 @@ export default function DesktopApp() {
     }
     const busiest = busiestDayKey(caseEvents.map((e) => e.timestamp));
     const activeDay = viewDay || busiest;
+    const spanKeys = !viewAllDates && activeDay ? spanDayKeys(activeDay, dayScope) : [];
+    const span = new Set(spanKeys);
     const { startH, endH } = windowHours(timeWindow, customStart, customEnd);
 
     let scoped = caseEvents;
-    if (!viewAllDates && activeDay) {
-      scoped = scoped.filter((e) => localDayKey(e.timestamp) === activeDay);
+    if (span.size) {
+      scoped = scoped.filter((e) => span.has(localDayKey(e.timestamp)));
     }
     if (timeWindow !== "full") {
       scoped = scoped.filter((e) => eventInHourWindow(e.timestamp, startH, endH));
@@ -783,24 +786,19 @@ export default function DesktopApp() {
     const fallbackStart = activeDay
       ? Date.parse(`${activeDay}T00:00:00`)
       : Date.now();
-    let start: number;
-    let end: number;
-    if (viewportFit || viewAllDates || timeWindow === "full") {
-      const bounds = paddedBounds(scoped.map((e) => e.timestamp), Number.isNaN(fallbackStart) ? Date.now() : fallbackStart);
-      start = bounds.minTime;
-      end = bounds.maxTime;
-    } else if (activeDay) {
-      const [y, m, d] = activeDay.split("-").map(Number);
-      start = new Date(y, (m ?? 1) - 1, d ?? 1, Math.floor(startH), Math.round((startH % 1) * 60), 0, 0).getTime();
-      if (endH >= 24) {
-        end = new Date(y, (m ?? 1) - 1, (d ?? 1) + 1, 0, 0, 0, 0).getTime();
-      } else {
-        end = new Date(y, (m ?? 1) - 1, d ?? 1, Math.floor(endH), Math.round((endH % 1) * 60), 0, 0).getTime();
+    const stamps = scoped.flatMap((event) => {
+      const endMs = parseTimeEnd(event.timeEnd, event.timestamp);
+      return endMs && endMs > event.timestamp ? [event.timestamp, endMs] : [event.timestamp];
+    });
+    const bounds = eventAxisBounds(stamps, Number.isNaN(fallbackStart) ? Date.now() : fallbackStart);
+    let start = bounds.minTime;
+    let end = bounds.maxTime;
+    if (dayScope === 2 && spanKeys[1]) {
+      const midnight = Date.parse(`${spanKeys[1]}T00:00:00`);
+      if (Number.isFinite(midnight)) {
+        if (midnight < start) start = midnight;
+        if (midnight > end) end = midnight + 30 * 60 * 1000;
       }
-    } else {
-      const bounds = paddedBounds(scoped.map((e) => e.timestamp), Date.now());
-      start = bounds.minTime;
-      end = bounds.maxTime;
     }
     if (end <= start) end = start + 2 * HOUR_MS;
 
@@ -902,12 +900,9 @@ export default function DesktopApp() {
       };
     });
 
-    const laneIds = [...new Set(conflictsOnly
-      ? plotted.map((e) => e.entityId)
-      : [
-        ...caseEvents.map((e) => (entityMap.has(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID)),
-        ...plotted.map((e) => e.entityId),
-      ])];
+    const activeLaneIds = plotted.map((e) => e.entityId);
+    const catalogLaneIds = caseEntities.map((entity) => entity.id);
+    const laneIds = [...new Set(showInactiveLanes ? [...catalogLaneIds, ...activeLaneIds] : activeLaneIds)];
     laneIds.sort((a, b) => {
       if (a === UNASSIGNED_LANE_ID) return 1;
       if (b === UNASSIGNED_LANE_ID) return -1;
@@ -999,20 +994,22 @@ export default function DesktopApp() {
       ticks,
       tickMs,
       pxPerHour,
-      width: LANE_PAD + hours * pxPerHour + 80,
+      width: LANE_PAD + hours * pxPerHour + CARD_W,
       xOf,
-      rangeLabel: formatRangeLabel(start, end, viewAllDates || dayKeys.length > 1),
+      rangeLabel: formatRangeLabel(start, end, viewAllDates || spanKeys.length > 1),
       dayKeys,
       dayCounts,
+      stripDays: fillDayStrip(dayKeys),
+      spanKeys: spanKeys.length ? spanKeys : (activeDay ? [activeDay] : []),
+      midnights: midnightsInRange(start, end),
       busiest,
       activeDay,
       conflictPairs,
       mergedCount: plotted.filter((row) => row.mergeCount > 1).reduce((sum, row) => sum + row.mergeCount, 0),
       mergedLaneIds: plotted.filter((row) => row.mergeCount > 1).map((row) => row.entityId),
-      dayLabel: viewAllDates ? "All dates" : (activeDay ? formatDaySelector(activeDay) : "No date"),
       timeLabel: formatClockRange(start, end),
     };
-  }, [activeCase?.subjectName, activeCase?.title, caseEvents, caseEntities, caseEvidence, viewDay, viewAllDates, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit, conflictsOnly, timelineConflicts]);
+  }, [activeCase?.subjectName, activeCase?.title, caseEvents, caseEntities, caseEvidence, viewDay, viewAllDates, dayScope, showInactiveLanes, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit, conflictsOnly, timelineConflicts]);
 
   useEffect(() => {
     setViewDay("");
@@ -1020,31 +1017,40 @@ export default function DesktopApp() {
     setViewportFit(true);
     setTimeWindow("full");
     setTickPreset("1h");
-    setDateMenu(false);
+    setDayScope(1);
+    setShowInactiveLanes(false);
     setTimeMenu(false);
   }, [resolvedCaseId]);
 
   useEffect(() => {
     if (screen !== "Timeline" || !viewportFit || !caseEvents.length) return;
     const active = viewDay || busiestDayKey(caseEvents.map((e) => e.timestamp));
-    const pool = viewAllDates
-      ? caseEvents
-      : caseEvents.filter((e) => localDayKey(e.timestamp) === active);
-    const times = (pool.length ? pool : caseEvents).map((e) => e.timestamp);
-    const { minTime, maxTime } = paddedBounds(times, Date.now());
+    const span = new Set(viewAllDates || !active ? [] : spanDayKeys(active, dayScope));
+    const pool = span.size
+      ? caseEvents.filter((e) => span.has(localDayKey(e.timestamp)))
+      : caseEvents;
+    const times = (pool.length ? pool : caseEvents).flatMap((e) => {
+      const endMs = parseTimeEnd(e.timeEnd, e.timestamp);
+      return endMs && endMs > e.timestamp ? [e.timestamp, endMs] : [e.timestamp];
+    });
+    const { minTime, maxTime } = eventAxisBounds(times, Date.now());
     const width = timelineContainerRef.current?.clientWidth ?? 960;
     setPxPerHour(fitPxPerHour(maxTime - minTime, width));
-  }, [screen, viewportFit, resolvedCaseId, caseEvents, viewDay, viewAllDates]);
+  }, [screen, viewportFit, resolvedCaseId, caseEvents, viewDay, viewAllDates, dayScope]);
 
   const fitToEvents = () => {
     setViewportFit(true);
     setTimeWindow("full");
     const active = viewDay || busiestDayKey(caseEvents.map((e) => e.timestamp));
-    const pool = viewAllDates || !active
-      ? caseEvents
-      : caseEvents.filter((e) => localDayKey(e.timestamp) === active);
-    const times = (pool.length ? pool : caseEvents).map((e) => e.timestamp);
-    const { minTime, maxTime } = paddedBounds(times, Date.now());
+    const span = new Set(viewAllDates || !active ? [] : spanDayKeys(active, dayScope));
+    const pool = span.size
+      ? caseEvents.filter((e) => span.has(localDayKey(e.timestamp)))
+      : caseEvents;
+    const times = (pool.length ? pool : caseEvents).flatMap((e) => {
+      const endMs = parseTimeEnd(e.timeEnd, e.timestamp);
+      return endMs && endMs > e.timestamp ? [e.timestamp, endMs] : [e.timestamp];
+    });
+    const { minTime, maxTime } = eventAxisBounds(times, Date.now());
     const el = timelineContainerRef.current;
     setPxPerHour(fitPxPerHour(maxTime - minTime, el?.clientWidth ?? 960));
     requestAnimationFrame(() => el?.scrollTo({ left: 0, top: 0, behavior: "smooth" }));
@@ -3168,47 +3174,17 @@ export default function DesktopApp() {
                     <span className="h-4 w-px shrink-0 bg-slate-200" />
                     <TimelineToolbar
                       rangeLabel={chrono.rangeLabel}
-                      dayLabel={chrono.dayLabel}
                       timeLabel={chrono.timeLabel}
-                      dayKeys={chrono.dayKeys}
-                      dayCounts={chrono.dayCounts}
-                      viewAllDates={viewAllDates}
-                      activeDay={chrono.activeDay}
-                      eventCount={viewAllDates ? caseEvents.length : (chrono.dayCounts[chrono.activeDay] ?? chrono.all.length)}
-                      canPrevDay={chrono.dayKeys.indexOf(chrono.activeDay) > 0}
-                      canNextDay={chrono.dayKeys.indexOf(chrono.activeDay) >= 0 && chrono.dayKeys.indexOf(chrono.activeDay) < chrono.dayKeys.length - 1}
+                      dayScope={dayScope}
+                      onDayScope={(scope) => { setDayScope(scope); setViewAllDates(false); setViewportFit(true); }}
+                      showInactiveLanes={showInactiveLanes}
+                      onShowInactiveLanes={setShowInactiveLanes}
                       timeWindow={timeWindow}
                       customStart={customStart}
                       customEnd={customEnd}
                       tickPreset={tickPreset}
-                      dateMenu={dateMenu}
                       timeMenu={timeMenu}
-                      onToggleDateMenu={() => { setDateMenu((v) => !v); setTimeMenu(false); }}
-                      onToggleTimeMenu={() => { setTimeMenu((v) => !v); setDateMenu(false); }}
-                      onSelectDay={(day) => {
-                        if (day === "all") {
-                          setViewAllDates(true);
-                        } else {
-                          setViewAllDates(false);
-                          setViewDay(day);
-                        }
-                        setViewportFit(true);
-                        setDateMenu(false);
-                      }}
-                      onPrevDay={() => {
-                        const idx = chrono.dayKeys.indexOf(chrono.activeDay);
-                        if (idx <= 0) return;
-                        setViewAllDates(false);
-                        setViewDay(chrono.dayKeys[idx - 1]);
-                        setViewportFit(true);
-                      }}
-                      onNextDay={() => {
-                        const idx = chrono.dayKeys.indexOf(chrono.activeDay);
-                        if (idx < 0 || idx >= chrono.dayKeys.length - 1) return;
-                        setViewAllDates(false);
-                        setViewDay(chrono.dayKeys[idx + 1]);
-                        setViewportFit(true);
-                      }}
+                      onToggleTimeMenu={() => setTimeMenu((v) => !v)}
                       onSelectWindow={(w) => {
                         setTimeWindow(w);
                         setViewportFit(w === "full");
@@ -3262,6 +3238,17 @@ export default function DesktopApp() {
                     </button>
                   </div>
 
+                  <TimelineDateStrip
+                    dayKeys={chrono.stripDays}
+                    dayCounts={chrono.dayCounts}
+                    spanKeys={chrono.spanKeys}
+                    onSelectDay={(day) => {
+                      setViewAllDates(false);
+                      setViewDay(day);
+                      setViewportFit(true);
+                    }}
+                  />
+
                   <div ref={timelineContainerRef} className="flex-1 overflow-auto">
                     {chrono.lanes.length === 0 ? (
                       <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
@@ -3273,9 +3260,21 @@ export default function DesktopApp() {
                         </p>
                       </div>
                     ) : (
-                    <div className="relative min-h-full pb-15" style={{ width: chrono.width }}>
+                    <div className="relative min-h-full pb-15 pr-12" style={{ width: chrono.width }}>
                       <div className="pointer-events-none absolute inset-y-0 right-0"
                         style={{ left: LANE_PAD, backgroundImage: `repeating-linear-gradient(to right, #f1f5f9 0 1px, transparent 1px ${chrono.pxPerHour * (chrono.tickMs / HOUR_MS)}px)` }} />
+
+                      {chrono.midnights.map((mark) => (
+                        <div
+                          key={mark.ts}
+                          className="pointer-events-none absolute bottom-0 top-0 z-[1] border-l border-dashed border-slate-400 dark:border-zinc-500"
+                          style={{ left: chrono.xOf(mark.ts) }}
+                        >
+                          <span className="sticky top-2 ml-2 inline-flex rounded-md border border-slate-300 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-700 shadow-sm dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200">
+                            [ {mark.label} ]
+                          </span>
+                        </div>
+                      ))}
 
                       <div className="relative h-[34px] border-b border-slate-200">
                         {chrono.ticks.map((ts) => {
@@ -3298,7 +3297,6 @@ export default function DesktopApp() {
                         renderLane={({ def, height, placed, tracks, count }, groupId) => {
                         const dim = (selected != null && selected !== def.id)
                           || (focusMerged && !chrono.mergedLaneIds.includes(def.id));
-                        const KindIcon = ENTITY_ICON[TYPE_KIND[def.type]] ?? Clock;
                         const laneAccent = groupId === "official"
                           ? "border-l-4 border-l-emerald-500"
                           : groupId === "sightings"
@@ -3336,10 +3334,9 @@ export default function DesktopApp() {
                                 key={e.id}
                                 id={`timeline-node-${e.id}`}
                                 onClick={() => openEventDrawer(e.id, e.mergedIds)}
-                                className={`absolute z-[2] flex min-w-[228px] items-start gap-2 overflow-visible rounded-[10px] border px-2.5 py-1.5 text-left shadow-sm transition-colors hover:border-blue-300 ${laneAccent} ${sightingCard ? "border-amber-300 bg-amber-50" : e.secondary ? "border-dashed border-amber-400 bg-white" : e.flag ? "border-amber-300 bg-white ring-[3px] ring-amber-500/10" : "border-slate-200 bg-white"} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
-                                style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width, height: CARD_H }}
+                                className={`absolute z-[2] flex min-w-[248px] items-center gap-2 overflow-visible rounded-lg border px-2 py-1.5 text-left shadow-xs transition-colors hover:border-blue-300 ${laneAccent} ${sightingCard ? "border-amber-300 bg-amber-50" : e.secondary ? "border-dashed border-amber-400 bg-white" : e.flag ? "border-amber-300 bg-white ring-[3px] ring-amber-500/10" : "border-slate-200 bg-white"} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
+                                style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width: Math.max(width, 248), height: CARD_H }}
                               >
-                                <KindIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${e.flag || sightingCard ? "text-amber-700" : getCategoryColor(e.semantic, "text")}`} />
                                 <span
                                   role="button"
                                   title="Open source citation"
@@ -3350,18 +3347,10 @@ export default function DesktopApp() {
                                     if (!rec) return;
                                     setTimelineInspect({ eventId: rec.id, citation: citationFromEvent(rec, src) });
                                   }}
-                                  className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-amber-700 hover:bg-amber-50"
+                                  className={`shrink-0 whitespace-nowrap rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.04em] ${e.flag || sightingCard ? "border-amber-500/30 bg-amber-500/10 text-amber-700" : "border-slate-200 bg-slate-50 text-slate-700"}`}
                                 >
-                                  <FileText className="h-3 w-3" />
-                                </span>
-                                <span className={`shrink-0 rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] ${e.flag || sightingCard ? "bg-amber-500/10 text-amber-700 border-amber-500/30" : getCategoryColor(e.semantic, "badge")}`}>
                                   {e.time}{e.timeEndMs ? `–${formatClock(e.timeEndMs)}` : ""}
                                 </span>
-                                {sightingCard ? (
-                                  <span className="shrink-0 rounded-full border border-amber-400 bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.04em] text-amber-900">
-                                    Sighting / Tip
-                                  </span>
-                                ) : null}
                                 <TimelineHoverTip
                                   entityName={e.entityName}
                                   timestamp={e.timestamp}
@@ -3370,7 +3359,7 @@ export default function DesktopApp() {
                                   mergeCount={e.mergeCount}
                                   grow
                                 >
-                                  <span className="min-w-0 flex-1 whitespace-normal text-[12.5px] font-medium leading-snug text-slate-900 line-clamp-2">{e.title}</span>
+                                  <span className="min-w-0 flex-1 truncate whitespace-nowrap text-[12.5px] font-medium leading-none text-slate-900">{e.title}</span>
                                 </TimelineHoverTip>
                                 {e.flag ? (
                                   <span
@@ -3379,9 +3368,9 @@ export default function DesktopApp() {
                                       ev.stopPropagation();
                                       inspectContradiction(`${e.id}`);
                                     }}
-                                    className="shrink-0 text-[10px] font-semibold text-amber-800 underline"
+                                    className="shrink-0 whitespace-nowrap text-[10px] font-semibold text-amber-800 underline"
                                   >
-                                    Review Conflict
+                                    Review
                                   </span>
                                 ) : null}
                                 {e.mergeCount > 1 ? (
@@ -3392,23 +3381,11 @@ export default function DesktopApp() {
                                       ev.stopPropagation();
                                       openEventDrawer(e.id, e.mergedIds);
                                     }}
-                                    className="shrink-0 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[9.5px] font-semibold text-amber-900"
+                                    className="ml-auto whitespace-nowrap rounded border border-amber-300 bg-amber-100 px-1.5 py-0.5 font-mono text-[10px] text-amber-800"
                                   >
                                     Merged ({e.mergeCount})
                                   </span>
                                 ) : null}
-                                {e.citeUrl ? (
-                                  <a
-                                    href={e.citeUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    onClick={(ev) => ev.stopPropagation()}
-                                    className="shrink-0 text-[10px] font-semibold text-amber-800 underline"
-                                  >
-                                    Article
-                                  </a>
-                                ) : null}
-                                {e.flag && <TriangleAlert className="h-3 w-3 shrink-0 text-amber-700" />}
                               </button>
                               );
                             })}

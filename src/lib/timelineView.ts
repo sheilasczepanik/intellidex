@@ -89,18 +89,82 @@ export function eventInHourWindow(ts: number, startH: number, endH: number) {
 }
 
 export function paddedBounds(timestamps: number[], fallbackStart: number) {
+  return eventAxisBounds(timestamps, fallbackStart);
+}
+
+const AXIS_BUFFER_MS = 30 * 60 * 1000;
+
+export type DayScope = 1 | 2;
+
+export function shiftDayKey(dayKey: string, delta: number) {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  const date = new Date(y, (m ?? 1) - 1, d ?? 1);
+  date.setDate(date.getDate() + delta);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+export function spanDayKeys(activeDay: string, scope: DayScope) {
+  if (!activeDay) return [] as string[];
+  return scope === 2 ? [activeDay, shiftDayKey(activeDay, 1)] : [activeDay];
+}
+
+/** Event days plus one empty day on each side, with gaps filled. */
+export function fillDayStrip(eventDays: string[]) {
+  if (!eventDays.length) return [] as string[];
+  const sorted = [...eventDays].sort();
+  const start = shiftDayKey(sorted[0]!, -1);
+  const end = shiftDayKey(sorted[sorted.length - 1]!, 1);
+  const out: string[] = [];
+  let cursor = start;
+  for (let guard = 0; cursor <= end && guard < 90; guard += 1) {
+    out.push(cursor);
+    cursor = shiftDayKey(cursor, 1);
+  }
+  return out;
+}
+
+export function formatDayPill(dayKey: string) {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  const date = new Date(y, (m ?? 1) - 1, d ?? 1);
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+export function formatMidnightBadge(ts: number) {
+  return new Date(ts).toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+export function eventAxisBounds(timestamps: number[], fallbackStart: number) {
   if (!timestamps.length) {
     const d = new Date(fallbackStart);
     const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 8, 0, 0, 0).getTime();
-    return { minTime: start, maxTime: start + 8 * HOUR_MS };
+    return { minTime: start, maxTime: start + 4 * HOUR_MS };
   }
-  const minTime = Math.min(...timestamps) - HOUR_MS;
-  const maxTime = Math.max(...timestamps) + HOUR_MS;
-  return { minTime, maxTime };
+  return {
+    minTime: Math.min(...timestamps) - AXIS_BUFFER_MS,
+    maxTime: Math.max(...timestamps) + AXIS_BUFFER_MS,
+  };
+}
+
+export function midnightsInRange(start: number, end: number) {
+  const marks: { ts: number; label: string }[] = [];
+  const cursor = new Date(start);
+  cursor.setHours(0, 0, 0, 0);
+  if (cursor.getTime() <= start) cursor.setDate(cursor.getDate() + 1);
+  while (cursor.getTime() > start && cursor.getTime() < end) {
+    marks.push({ ts: cursor.getTime(), label: formatMidnightBadge(cursor.getTime()) });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return marks;
 }
 
 export function fitPxPerHour(spanMs: number, viewportWidth: number) {
   const hours = Math.max(2, spanMs / HOUR_MS);
-  const avail = Math.max(320, viewportWidth - LANE_PAD - 48);
+  const avail = Math.max(280, viewportWidth - LANE_PAD - 280);
   return Math.max(22, Math.min(180, avail / hours));
 }

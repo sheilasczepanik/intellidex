@@ -1,9 +1,10 @@
 import { useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Calendar, ChevronDown, ChevronLeft, ChevronRight, Minus, Plus } from "lucide-react";
+import { Minus, Plus } from "lucide-react";
 import {
-  formatDaySelector,
+  formatDayPill,
   TIME_WINDOW_OPTIONS,
+  type DayScope,
   type TickPreset,
   type TimeWindow,
 } from "./lib/timelineView";
@@ -12,26 +13,17 @@ const mono = "font-mono";
 
 type Props = {
   rangeLabel: string;
-  dayLabel: string;
   timeLabel: string;
-  dayKeys: string[];
-  dayCounts: Record<string, number>;
-  viewAllDates: boolean;
-  activeDay: string;
-  eventCount: number;
-  canPrevDay: boolean;
-  canNextDay: boolean;
+  dayScope: DayScope;
+  onDayScope: (scope: DayScope) => void;
+  showInactiveLanes: boolean;
+  onShowInactiveLanes: (value: boolean) => void;
   timeWindow: TimeWindow;
   customStart: string;
   customEnd: string;
   tickPreset: TickPreset;
-  dateMenu: boolean;
   timeMenu: boolean;
-  onToggleDateMenu: () => void;
   onToggleTimeMenu: () => void;
-  onSelectDay: (day: string | "all") => void;
-  onPrevDay: () => void;
-  onNextDay: () => void;
   onSelectWindow: (w: TimeWindow) => void;
   onCustomStart: (v: string) => void;
   onCustomEnd: (v: string) => void;
@@ -62,13 +54,12 @@ export function TimelineHoverTip({
 
   const show = (node: HTMLElement) => {
     const rect = node.getBoundingClientRect();
-    const place = rect.top < 168 ? "bottom" : "top";
-    const half = 150;
+    const half = 140;
     const left = Math.min(window.innerWidth - 16 - half, Math.max(16 + half, rect.left + rect.width / 2));
     setTip({
       left,
-      top: place === "top" ? rect.top - 8 : rect.bottom + 8,
-      place,
+      top: rect.top - 8,
+      place: "top",
     });
   };
 
@@ -83,7 +74,7 @@ export function TimelineHoverTip({
       {children}
       {tip && createPortal(
         <span
-          className="pointer-events-none fixed z-50 w-max max-w-[300px] rounded-xl border border-slate-200 bg-white p-3 text-left shadow-xl dark:border-zinc-800 dark:bg-zinc-900"
+          className="pointer-events-none fixed z-50 w-max max-w-[280px] rounded-xl border border-slate-200 bg-white p-3 text-left shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
           style={{
             left: tip.left,
             top: tip.top,
@@ -94,7 +85,7 @@ export function TimelineHoverTip({
           <span className={`mt-1.5 block ${mono} text-[10.5px] text-slate-500`}>
             {new Date(timestamp).toLocaleString()}
           </span>
-          <span className="mt-1 block max-w-[260px] text-[11.5px] leading-snug break-words text-slate-600">
+          <span className="mt-1 block max-w-[240px] truncate break-words text-[11.5px] leading-snug text-slate-600 dark:text-zinc-300" title={source || "No source document"}>
             {source || "No source document"}
           </span>
           {mergeCount && mergeCount > 1 ? (
@@ -115,28 +106,57 @@ export function TimelineHoverTip({
   );
 }
 
-export default function TimelineToolbar({
-  rangeLabel,
-  dayLabel,
-  timeLabel,
+export function TimelineDateStrip({
   dayKeys,
   dayCounts,
-  viewAllDates,
-  activeDay,
-  eventCount,
-  canPrevDay,
-  canNextDay,
+  spanKeys,
+  onSelectDay,
+}: {
+  dayKeys: string[];
+  dayCounts: Record<string, number>;
+  spanKeys: string[];
+  onSelectDay: (day: string) => void;
+}) {
+  if (!dayKeys.length) return null;
+  return (
+    <div className="flex shrink-0 gap-1.5 overflow-x-auto border-b border-slate-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950">
+      {dayKeys.map((day) => {
+        const count = dayCounts[day] ?? 0;
+        const active = spanKeys.includes(day);
+        const label = formatDayPill(day);
+        const text = count > 0 ? `${label} • ${count} ${count === 1 ? "event" : "events"}` : label;
+        return (
+          <button
+            key={day}
+            type="button"
+            onClick={() => onSelectDay(day)}
+            className={`shrink-0 rounded-lg border px-2.5 py-1.5 text-[12.5px] font-medium tabular-nums ${
+              active
+                ? "border-blue-600 bg-blue-600 text-white"
+                : "border-slate-200 bg-white text-slate-700 hover:border-blue-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+            }`}
+          >
+            [ {text} ]
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export default function TimelineToolbar({
+  rangeLabel,
+  timeLabel,
+  dayScope,
+  onDayScope,
+  showInactiveLanes,
+  onShowInactiveLanes,
   timeWindow,
   customStart,
   customEnd,
   tickPreset,
-  dateMenu,
   timeMenu,
-  onToggleDateMenu,
   onToggleTimeMenu,
-  onSelectDay,
-  onPrevDay,
-  onNextDay,
   onSelectWindow,
   onCustomStart,
   onCustomEnd,
@@ -145,77 +165,29 @@ export default function TimelineToolbar({
   onZoomOut,
   onTickPreset,
 }: Props) {
-  const total = Object.values(dayCounts).reduce((sum, n) => sum + n, 0);
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <div className="relative">
-        <button
-          type="button"
-          aria-label="Choose timeline date"
-          onClick={onToggleDateMenu}
-          className="inline-flex h-8 max-w-[min(22rem,calc(100vw-4rem))] items-center gap-2 rounded-lg border border-slate-300 bg-white px-2.5 text-left text-[12.5px] text-slate-800 shadow-sm transition-colors hover:border-blue-500 hover:bg-slate-50"
-        >
-          <Calendar className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-          <span className="min-w-0 truncate font-medium">
-            Date: {dayLabel} ({eventCount} {eventCount === 1 ? "event" : "events"})
-          </span>
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-        </button>
-        {dateMenu && (
-          <div className="absolute left-0 top-full z-20 mt-1 w-[min(18rem,calc(100vw-1.5rem))] min-w-0 rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
-            <button
-              type="button"
-              onClick={() => onSelectDay("all")}
-              className={`flex w-full items-center justify-between px-3 py-2 text-left text-[12.5px] ${viewAllDates ? "bg-blue-50 font-medium text-blue-800" : "text-slate-700 hover:bg-slate-50"}`}
-            >
-              All dates
-              <span className={`${mono} text-[10px] text-slate-500`}>{total}</span>
-            </button>
-            {dayKeys.map((day) => {
-              const count = dayCounts[day] ?? 0;
-              const active = !viewAllDates && activeDay === day;
-              return (
-                <button
-                  key={day}
-                  type="button"
-                  onClick={() => onSelectDay(day)}
-                  className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[12.5px] ${active ? "bg-blue-50 font-medium text-blue-800" : "text-slate-700 hover:bg-slate-50"} ${count > 0 ? "font-medium" : "opacity-70"}`}
-                >
-                  <span>{formatDaySelector(day)}</span>
-                  <span className={`rounded-full px-2 py-0.5 ${mono} text-[10px] ${count > 0 ? "bg-slate-100 text-slate-700" : "text-slate-400"}`}>
-                    {count} {count === 1 ? "event" : "events"}
-                  </span>
-                </button>
-              );
-            })}
-            {!dayKeys.length && (
-              <div className="px-3 py-2 text-[12px] text-slate-400">No dated events yet</div>
-            )}
-          </div>
-        )}
+      <div className="inline-flex h-8 items-center rounded-lg border border-slate-200 bg-white p-0.5 dark:border-zinc-700 dark:bg-zinc-900" role="group" aria-label="View scope">
+        {([1, 2] as DayScope[]).map((scope) => (
+          <button
+            key={scope}
+            type="button"
+            onClick={() => onDayScope(scope)}
+            className={`h-7 rounded-md px-2.5 text-[12px] font-semibold ${dayScope === scope ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-100 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
+          >
+            [ {scope} {scope === 1 ? "Day" : "Days"} ]
+          </button>
+        ))}
       </div>
-      {!viewAllDates && activeDay ? (
-        <div className="inline-flex items-center gap-1">
-          <button
-            type="button"
-            aria-label="Previous day"
-            disabled={!canPrevDay}
-            onClick={onPrevDay}
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 text-slate-600 hover:border-blue-500 hover:bg-slate-50 disabled:opacity-35"
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            aria-label="Next day"
-            disabled={!canNextDay}
-            onClick={onNextDay}
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 text-slate-600 hover:border-blue-500 hover:bg-slate-50 disabled:opacity-35"
-          >
-            <ChevronRight className="h-4 w-4" />
-          </button>
-        </div>
-      ) : null}
+      <label className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[12px] font-medium text-slate-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+        <input
+          type="checkbox"
+          checked={showInactiveLanes}
+          onChange={(e) => onShowInactiveLanes(e.target.checked)}
+          className="h-3.5 w-3.5 accent-blue-600"
+        />
+        Show inactive lanes
+      </label>
       <span className="text-[11px] text-slate-300">·</span>
       <div className="relative">
         <button
