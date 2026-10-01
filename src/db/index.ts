@@ -631,9 +631,12 @@ export async function addVerifyDrafts(
 }
 
 export type ManualEvidenceCategoryId =
-  | "subject_sighting"
+  | "person"
   | "location"
+  | "time"
   | "vehicle"
+  | "evidence"
+  | "subject_sighting"
   | "physical_description"
   | "timeline"
   | "contact";
@@ -644,9 +647,12 @@ const MANUAL_SPEC: Record<ManualEvidenceCategoryId, {
   extract: ExtractCategory;
   role: string;
 }> = {
+  person: { label: "Person", entityType: "person", extract: "person", role: "UNVERIFIED" },
+  location: { label: "Location", entityType: "place", extract: "location", role: "UNVERIFIED" },
+  time: { label: "Time/Date", entityType: "person", extract: "time", role: "UNVERIFIED" },
+  vehicle: { label: "Vehicle", entityType: "vehicle", extract: "vehicle", role: "UNVERIFIED" },
+  evidence: { label: "Physical Evidence", entityType: "exhibit", extract: "evidence", role: "UNVERIFIED" },
   subject_sighting: { label: "Subject Sighting", entityType: "person", extract: "person", role: "UNVERIFIED" },
-  location: { label: "Location / Address", entityType: "place", extract: "location", role: "UNVERIFIED" },
-  vehicle: { label: "Vehicle / Plate", entityType: "vehicle", extract: "vehicle", role: "UNVERIFIED" },
   physical_description: { label: "Physical Description", entityType: "person", extract: "physical_description", role: "UNVERIFIED" },
   timeline: { label: "Timeline Event", entityType: "person", extract: "time", role: "UNVERIFIED" },
   contact: { label: "Contact", entityType: "person", extract: "person", role: "WITNESS" },
@@ -657,6 +663,7 @@ export async function saveManualEvidence(input: {
   evidenceId: string;
   quote: string;
   notes: string;
+  title?: string;
   category: ManualEvidenceCategoryId;
   pageNumber?: number;
   boundingBox?: SourceCitation["boundingBox"];
@@ -666,7 +673,7 @@ export async function saveManualEvidence(input: {
 }) {
   const spec = MANUAL_SPEC[input.category];
   const quote = input.quote.replace(/\s+/g, " ").trim();
-  const name = quote.slice(0, 72) || spec.label;
+  const name = (input.title || quote).replace(/\s+/g, " ").trim().slice(0, 72) || spec.label;
   const notes = [input.notes.trim(), quote && `“${quote}”`].filter(Boolean).join("\n");
   const citation: SourceCitation = {
     sourceId: input.evidenceId,
@@ -705,24 +712,11 @@ export async function saveManualEvidence(input: {
       notes,
     });
   }
-  if (input.category === "timeline" || input.category === "subject_sighting") {
-    await createTimelineEvent({
-      caseId: input.caseId,
-      entityId: entity.id,
-      timestamp: Date.now(),
-      title: name,
-      description: notes,
-      sourceDocId: input.evidenceId,
-      isVerified: true,
-      sourceCitation: citation,
-      origin: "manual",
-    });
-  }
   const drafts = await addVerifyDrafts([{
     caseId: input.caseId,
     evidenceId: input.evidenceId,
     timestamp: Date.now(),
-    timestampLabel: input.pageNumber ? `Page ${input.pageNumber}` : "Manual observation",
+    timestampLabel: input.pageNumber ? `Page ${input.pageNumber}` : "Manual extract",
     entityId: entity.id,
     entityName: entity.name,
     suggestNewEntity: false,
@@ -735,7 +729,7 @@ export async function saveManualEvidence(input: {
     citation: "manual-observation",
     sourceCitation: citation,
     origin: "manual",
-    status: "confirmed",
+    status: "pending",
   }]);
   return { entity, draft: drafts[0] };
 }

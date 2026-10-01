@@ -144,7 +144,7 @@ function PdfPage({
     >
       {visible ? (
         <>
-          <canvas ref={canvasRef} className="block h-auto w-full bg-white" />
+          <canvas ref={canvasRef} className="pointer-events-none block h-auto w-full bg-white" />
           <div className="pointer-events-none absolute inset-0 z-[1]">
             {boxes.map((box, i) => (
               <button
@@ -152,7 +152,7 @@ function PdfPage({
                 type="button"
                 id={box.id === (activeId || "focus") ? `source-hit-${box.id}` : undefined}
                 onClick={() => onSelectAnchor?.(box.id)}
-                className={`absolute rounded-sm border-2 ${box.id === (activeId || "focus") ? "border-amber-500 bg-amber-300/35" : "border-amber-300/80 bg-amber-200/25"}`}
+                className={`pointer-events-none absolute rounded-sm border-2 ${box.id === (activeId || "focus") ? "border-amber-500 bg-amber-300/35" : "border-amber-300/80 bg-amber-200/25"}`}
                 style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.width}%`, height: `${Math.max(box.height, 1.2)}%` }}
               />
             ))}

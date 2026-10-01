@@ -31,21 +31,20 @@ export function ExtractSelectionTip({
       <button
         type="button"
         onClick={onExtract}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-[12px] font-semibold text-amber-950 shadow-lg hover:bg-amber-50"
+        className="inline-flex items-center gap-1.5 rounded-full border border-blue-300 bg-white px-3 py-1.5 text-[12px] font-semibold text-blue-800 shadow-lg hover:bg-blue-50"
       >
-        + Log as Evidence
+        + Extract Card
       </button>
     </div>
   );
 }
 
 export const MANUAL_EVIDENCE_CATEGORIES = [
-  { id: "subject_sighting", label: "Subject Sighting" },
-  { id: "location", label: "Location / Address" },
-  { id: "vehicle", label: "Vehicle / Plate" },
-  { id: "physical_description", label: "Physical Description" },
-  { id: "timeline", label: "Timeline Event" },
-  { id: "contact", label: "Contact" },
+  { id: "person", label: "Person" },
+  { id: "location", label: "Location" },
+  { id: "time", label: "Time/Date" },
+  { id: "vehicle", label: "Vehicle" },
+  { id: "evidence", label: "Physical Evidence" },
 ] as const;
 
 export type ManualLogCategoryId = (typeof MANUAL_EVIDENCE_CATEGORIES)[number]["id"];
@@ -60,28 +59,49 @@ export function LogEvidenceModal({
   quote: string;
   pageNumber?: number;
   previewDataUrl?: string;
-  onSave: (input: { quote: string; category: ManualLogCategoryId; notes: string; pageNumber?: number }) => void;
+  onSave: (input: { quote: string; category: ManualLogCategoryId; notes: string; title: string; pageNumber?: number }) => void;
   onDismiss: () => void;
 }) {
   const [text, setText] = useState(quote);
-  const [category, setCategory] = useState<ManualLogCategoryId>("subject_sighting");
+  const [title, setTitle] = useState(quote.replace(/\s+/g, " ").trim().slice(0, 72));
+  const [category, setCategory] = useState<ManualLogCategoryId>("person");
   const [notes, setNotes] = useState("");
   const [page, setPage] = useState(pageNumber ? String(pageNumber) : "");
   return (
     <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="log-evidence-title">
       <div className="w-full max-w-md rounded-[16px] border border-slate-200 bg-white p-5 shadow-xl">
-        <h2 id="log-evidence-title" className="text-[16px] font-semibold text-slate-900">Log as Evidence</h2>
-        <p className="mt-1 text-[12.5px] text-slate-500">This observation is stored on the case immediately and tagged as a manual highlight.</p>
+        <h2 id="log-evidence-title" className="text-[16px] font-semibold text-slate-900">Extract Card</h2>
+        <p className="mt-1 text-[12.5px] text-slate-500">Adds an unresolved card to the AI extraction queue. Confirm it later to write it to the chronology.</p>
         {previewDataUrl ? (
           <img src={previewDataUrl} alt="" className="mt-3 max-h-28 w-full rounded-md bg-slate-100 object-contain" />
         ) : null}
         <label className="mt-3 block text-[11px] text-slate-500">
-          Extracted Content / Quote
+          Selected text / quote
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={4}
             className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-2 text-[13px] text-slate-900 outline-none focus:border-blue-500"
+          />
+        </label>
+        <label className="mt-2 block text-[11px] text-slate-500">
+          Type
+          <select
+            value={category}
+            onChange={(e) => setCategory(e.target.value as ManualLogCategoryId)}
+            className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-[13px] text-slate-900"
+          >
+            {MANUAL_EVIDENCE_CATEGORIES.map((opt) => (
+              <option key={opt.id} value={opt.id}>{opt.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="mt-2 block text-[11px] text-slate-500">
+          Title / Summary
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-[13px] text-slate-900 outline-none focus:border-blue-500"
           />
         </label>
         <label className="mt-2 block text-[11px] text-slate-500">
@@ -95,19 +115,7 @@ export function LogEvidenceModal({
           />
         </label>
         <label className="mt-2 block text-[11px] text-slate-500">
-          Evidence Category
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value as ManualLogCategoryId)}
-            className="mt-1 w-full rounded-lg border border-slate-200 px-2.5 py-1.5 text-[13px] text-slate-900"
-          >
-            {MANUAL_EVIDENCE_CATEGORIES.map((opt) => (
-              <option key={opt.id} value={opt.id}>{opt.label}</option>
-            ))}
-          </select>
-        </label>
-        <label className="mt-2 block text-[11px] text-slate-500">
-          Relevance / Notes
+          Investigator note
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -121,13 +129,14 @@ export function LogEvidenceModal({
             type="button"
             onClick={() => onSave({
               quote: text.trim() || quote,
+              title: title.trim() || text.trim().slice(0, 72) || quote.slice(0, 72),
               category,
               notes: notes.trim(),
               pageNumber: page ? Number.parseInt(page, 10) || pageNumber : pageNumber,
             })}
             className="rounded-lg bg-blue-600 px-3 py-2 text-[13px] font-semibold text-white hover:bg-blue-700"
           >
-            Save Evidence
+            Add to Queue
           </button>
         </div>
       </div>
@@ -138,7 +147,7 @@ export function LogEvidenceModal({
 export function ManualObservationBadge() {
   return (
     <span className={`inline-flex items-center rounded-md border border-violet-200 bg-violet-50 px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] text-violet-800`}>
-      Manual Observation
+      Manual Extract
     </span>
   );
 }
@@ -160,7 +169,7 @@ export function VerifyConfidenceChip({ confidence }: { confidence: number }) {
       : "text-rose-700 bg-rose-50 border border-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-800";
   return (
     <span
-      title={`Claude confidence: ${pct}% based on verbatim match in source report`}
+      title={`Model confidence: ${pct}% based on verbatim match in source report`}
       className={`ml-auto inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${tier}`}
     >
       AI Match: {pct}%

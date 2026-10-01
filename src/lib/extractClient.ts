@@ -1,11 +1,13 @@
 import { getLocalApiKey, getLocalProvider } from "./settings";
 import type { ExtractedEvent, ExtractBundle, ExtractEntityHint, ScoutedEntity } from "./extractSchema";
 import {
+  EXTRACT_CORE_PAGES,
   EXTRACT_MODEL_MAX_CHARS,
   EXTRACT_SERVICE_UNAVAILABLE,
   coerceExtractBundle,
   mergeExtractBundles,
   sanitizeExtractText,
+  windowSourceText,
 } from "./extractSchema";
 import { regexExtractFromText, sampleExtractedCards } from "./regexExtract";
 
@@ -41,10 +43,11 @@ function apiErrorMessage(json: Record<string, unknown>, status: number, rawText 
 
 function bundleFromResponse(json: Record<string, unknown>, fallbackText: string, fileName: string): ExtractBundle {
   let bundle = coerceExtractBundle(json);
+  const failed = json.engine === "fallback" || Boolean(json.warning);
   if (!bundle.events.length && !bundle.entities.length) {
     bundle = mergeExtractBundles([bundle, regexExtractFromText(fallbackText || fileName, fileName)]);
   }
-  if (!bundle.events.length) {
+  if (failed && !bundle.events.length) {
     bundle = mergeExtractBundles([bundle, sampleExtractedCards(fileName)]);
   }
   return bundle;
@@ -106,7 +109,10 @@ async function extractOneTextChunk(input: {
   maxChars?: number;
 }): Promise<ExtractBundle> {
   const cap = Math.min(input.maxChars ?? EXTRACT_MODEL_MAX_CHARS, EXTRACT_MODEL_MAX_CHARS);
-  const text = sanitizeExtractText(input.text, 250_000);
+  const text = windowSourceText(sanitizeExtractText(input.text, 250_000), {
+    maxPages: input.maxPages ?? EXTRACT_CORE_PAGES,
+    maxChars: cap,
+  });
   return postExtract({ type: "text", ...input, text, maxChars: cap }, text, input.fileName);
 }
 
@@ -136,7 +142,7 @@ export async function extractEventsFromRenderedPages(input: {
     type: "rendered_pages",
     filename: input.fileName,
     fileName: input.fileName,
-    pages: input.pages,
+    pages: input.pages.slice(0, EXTRACT_CORE_PAGES),
     entities: input.entities,
   }, input.fileName, input.fileName);
   console.log("[Extraction] Rendered-page items count:", bundle.events.length);

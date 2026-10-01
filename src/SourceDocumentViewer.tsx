@@ -64,6 +64,7 @@ type Props = {
   onSelectAnchor?: (id: string) => void;
   showClose?: boolean;
   onImageRegionSelect?: (payload: { box: SourceBoundingBox; previewDataUrl: string; x: number; y: number }) => void;
+  onTextSelect?: (payload: { text: string; x: number; y: number; pageNumber?: number }) => void;
 };
 
 export default function SourceDocumentViewer({
@@ -75,6 +76,7 @@ export default function SourceDocumentViewer({
   onSelectAnchor,
   showClose = true,
   onImageRegionSelect,
+  onTextSelect,
 }: Props) {
   const kind = evidence ? inferSourceType(evidence) : citation?.sourceType ?? "text";
   const title = evidence?.fileName || citation?.sourceName || "Source";
@@ -192,6 +194,35 @@ export default function SourceDocumentViewer({
     const el = document.getElementById(`source-hit-${activeId || "focus"}`);
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [activeId, quote, textSegments]);
+
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el || !onTextSelect) return;
+    const handle = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) return;
+      const node = sel.anchorNode ?? sel.focusNode;
+      const host = node instanceof Element ? node : node?.parentElement;
+      if (!host || !el.contains(host)) return;
+      const text = sel.toString().replace(/\s+/g, " ").trim();
+      if (text.length < 2) return;
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      const pageEl = host.closest("[data-pdf-page]");
+      const pageNumber = Number(pageEl?.getAttribute("data-pdf-page"));
+      onTextSelect({
+        text,
+        x: Math.min(window.innerWidth - 24, Math.max(24, rect.left + (rect.width || 0) / 2)),
+        y: Math.max(12, (rect.top || 0) - 8),
+        pageNumber: Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : undefined,
+      });
+    };
+    el.addEventListener("mouseup", handle);
+    el.addEventListener("touchend", handle);
+    return () => {
+      el.removeEventListener("mouseup", handle);
+      el.removeEventListener("touchend", handle);
+    };
+  }, [onTextSelect]);
 
   const imageSrc = evidence ? (evidence.imageBase64 || evidence.fileBase64 || evidenceImageSrc(evidence)) : "";
   const imageBoxes: OverlayBox[] = [];
@@ -390,7 +421,7 @@ export default function SourceDocumentViewer({
         ) : (
           <div className="mx-auto max-w-[62ch] px-4 py-6 sm:px-8 sm:py-8" style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }}>
             <h2 className="mb-4 text-[22px] font-semibold tracking-tight">{title}</h2>
-            <p className="whitespace-pre-wrap text-[16px] leading-[1.8] text-slate-700">
+            <p className="select-text whitespace-pre-wrap text-[16px] leading-[1.8] text-slate-700">
               {textSegments.length ? textSegments.map((part) => {
                 if (part.type === "text") return <span key={part.key}>{part.value}</span>;
                 const active = part.draftId === (activeId || "focus");

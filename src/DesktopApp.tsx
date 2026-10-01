@@ -56,7 +56,7 @@ import {
   CLAUDE_RETRY_PAGES,
   EXTRACT_SERVICE_UNAVAILABLE,
   mergeExtractBundles,
-  prioritizeLegalFacts,
+  windowSourceText,
   type ExtractBundle,
   type ExtractedEvent,
 } from "./lib/extractSchema";
@@ -1666,7 +1666,6 @@ export default function DesktopApp() {
       }
 
       const textUsable = Boolean(sourceText.trim()) && !isUnreadableScan(sourceText);
-      const windowed = Boolean(opts?.summary || opts?.maxPages);
       let bundle: ExtractBundle;
       let usedFallback = false;
 
@@ -1708,9 +1707,10 @@ export default function DesktopApp() {
           ? { ...job, stage: "claude", llmStartedAt: Date.now() }
           : job));
         bundle = await extractEventsFromText({
-          text: windowed
-            ? prioritizeLegalFacts(sourceText, opts?.maxChars ?? CLAUDE_MAX_CHARS)
-            : sourceText,
+          text: windowSourceText(sourceText, {
+            maxPages: opts?.maxPages ?? CLAUDE_MAX_PAGES,
+            maxChars: opts?.maxChars ?? CLAUDE_MAX_CHARS,
+          }),
           fileName: ev.fileName,
           entities: hints,
           summary: opts?.summary,
@@ -1727,6 +1727,8 @@ export default function DesktopApp() {
       if (bundle.warning) {
         usedFallback = true;
         setExtractError(EXTRACT_SERVICE_UNAVAILABLE);
+      } else {
+        setExtractError(null);
       }
 
       const events = bundle.events;
@@ -2188,23 +2190,25 @@ export default function DesktopApp() {
   const captureSourceSelection = () => {
     const sel = window.getSelection();
     const pane = sourcePaneRef.current;
-    if (!sel || sel.isCollapsed || !pane || !sel.anchorNode || !pane.contains(sel.anchorNode)) {
+    const node = sel?.anchorNode ?? sel?.focusNode;
+    const inPane = Boolean(node && pane && pane.contains(node instanceof Element ? node : node.parentElement));
+    if (!sel || sel.isCollapsed || !pane || !inPane) {
       setExtractTip(null);
       return;
     }
     const text = sel.toString().replace(/\s+/g, " ").trim();
-    if (text.length < 3) {
+    if (text.length < 2) {
       setExtractTip(null);
       return;
     }
     const rect = sel.getRangeAt(0).getBoundingClientRect();
-    const node = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode.parentElement;
-    const pageEl = node?.closest("[data-pdf-page]");
+    const el = node instanceof Element ? node : node?.parentElement;
+    const pageEl = el?.closest("[data-pdf-page]");
     const pageNumber = Number(pageEl?.getAttribute("data-pdf-page"));
     setExtractTip({
       text,
-      x: rect.left + rect.width / 2,
-      y: rect.top - 6,
+      x: Math.min(window.innerWidth - 24, Math.max(24, rect.left + rect.width / 2)),
+      y: Math.max(12, rect.top - 8),
       pageNumber: Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : undefined,
     });
   };
@@ -2213,6 +2217,7 @@ export default function DesktopApp() {
     quote: string;
     category: ManualLogCategoryId;
     notes: string;
+    title?: string;
     pageNumber?: number;
   }) => {
     if (!logModal || !sourceEvidence) return;
@@ -2222,6 +2227,7 @@ export default function DesktopApp() {
       caseId,
       evidenceId: sourceEvidence.id,
       quote: input.quote || logModal.quote,
+      title: input.title,
       notes: input.notes,
       category: input.category,
       pageNumber: input.pageNumber ?? logModal.pageNumber,
@@ -2244,7 +2250,7 @@ export default function DesktopApp() {
     setLogModal(null);
     setExtractTip(null);
     window.getSelection()?.removeAllRanges();
-    setToast("Manual observation saved to the case.");
+    setToast("Card added to the extraction queue.");
   };
 
   const extractHighlightedText = async () => {
@@ -2960,8 +2966,8 @@ export default function DesktopApp() {
                       </button>
                     </div>
                   </div>
-                  <div ref={sourcePaneRef} onScroll={syncQueueToSourceScroll} onMouseUp={captureSourceSelection} className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                    {extractError && !(sourceEvidence && inferSourceType(sourceEvidence) !== "pdf" && /pdf/i.test(extractError) && !extractUnavailable) && (
+                  <div ref={sourcePaneRef} onScroll={syncQueueToSourceScroll} onMouseUp={captureSourceSelection} onTouchEnd={captureSourceSelection} className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+                    {extractError && !(extractUnavailable && pendingDrafts.length > 0) && !(sourceEvidence && inferSourceType(sourceEvidence) !== "pdf" && /pdf/i.test(extractError) && !extractUnavailable) && (
                       <div className="mx-3 mt-3 flex flex-col gap-2.5 rounded-[10px] border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-950">
                         <div className="flex items-start gap-2.5">
                           <TriangleAlert className="mt-0.5 h-[15px] w-[15px] shrink-0" />
@@ -3014,6 +3020,9 @@ export default function DesktopApp() {
                         onImageRegionSelect={({ box, previewDataUrl }) => {
                           setExtractTip(null);
                           setLogModal({ quote: "Selected image region", previewDataUrl, box });
+                        }}
+                        onTextSelect={({ text, x, y, pageNumber }) => {
+                          setExtractTip({ text, x, y, pageNumber });
                         }}
                       />
                     </div>

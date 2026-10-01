@@ -59,7 +59,7 @@ export type ExtractedEvent = {
   tier?: "primary" | "secondary";
 };
 
-export const EXTRACT_SYSTEM = `You are a missing persons intelligence specialist. Extract actionable search data from police blotters, missing flyers, witness statements, search logs, and news reports. Ignore court procedural boilerplate.
+export const EXTRACT_SYSTEM = `You are a missing persons intelligence specialist. Extract high-confidence investigative facts from police blotters, missing flyers, witness statements, search logs, and news reports.
 
 Return ONLY a JSON object with this exact shape:
 {
@@ -84,13 +84,23 @@ Return ONLY a JSON object with this exact shape:
   ],
   "contacts": [
     { "name": string, "role": string, "relation": string }
+  ],
+  "entities": [
+    { "name": string, "category": "person" | "location" | "vehicle" | "phone" | "exhibit", "role": string, "context": string }
+  ],
+  "events": [
+    { "date": string, "time": string, "title": string, "summary": string, "sourceReference": string }
   ]
 }
 
 Rules:
-- Prefer last-known-sighting facts, clothing, medical alerts, search grids, cell pings, and named responders.
-- tier "primary" for official records / verified sightings; "secondary" for community tips, news, and social leads.
-- date as YYYY-MM-DD or the source date string; time as HH:MM or "" if unknown.
+- Normalize OCR typos before extracting (e.g. MASSACHUSEATS → Massachusetts; fix split names and garbled titles).
+- Distinguish report/file dates from incident dates. Prefer the incident / last-known-sighting date.
+- Extract only high-confidence items: named people, last-known locations, times, key narrative statements, vehicles, and physical evidence.
+- Format dates as YYYY-MM-DD when possible; times as HH:MM (24h) or "".
+- title and summary must be clean investigator language, not raw OCR fragments.
+- tier "primary" for official records / verified sightings; "secondary" for tips and press.
+- Skip court boilerplate, headers, page numbers, and unreadable OCR garbage.
 - If the excerpt has no search facts, return empty arrays and empty strings.`;
 
 export function unwrapModelJson(raw: string) {
@@ -477,13 +487,14 @@ export function parseExtractBundle(raw: string): ExtractBundle {
 }
 
 export const EXTRACT_MAX_CHARS = 60_000;
-/** ~5k tokens — keep GPT-4o requests inside a 60s serverless window, including 38-page PDFs. */
-export const EXTRACT_MODEL_MAX_CHARS = 20_000;
+/** ~4k tokens — first 4–5 pages so GPT-4o returns in a few seconds. */
+export const EXTRACT_MODEL_MAX_CHARS = 16_000;
 export const CLAUDE_MAX_CHARS = EXTRACT_MODEL_MAX_CHARS;
 export const EXTRACT_SERVICE_UNAVAILABLE =
   "Extraction service unavailable (verify API key or document size)";
-export const CLAUDE_MAX_PAGES = 40;
-export const CLAUDE_RETRY_PAGES = 8;
+export const EXTRACT_CORE_PAGES = 5;
+export const CLAUDE_MAX_PAGES = EXTRACT_CORE_PAGES;
+export const CLAUDE_RETRY_PAGES = EXTRACT_CORE_PAGES;
 export const EXTRACT_CHUNK_TRIGGER = EXTRACT_MAX_CHARS;
 export const EXTRACT_CHUNK_SIZE = EXTRACT_MAX_CHARS;
 export const EXTRACT_CHUNK_OVERLAP = 0;
@@ -631,9 +642,10 @@ export function userExtractPrompt(
   const excerpt = prioritizeLegalFacts(text, opts?.maxChars ?? EXTRACT_MODEL_MAX_CHARS);
   return [
     `Source file: ${fileName}`,
+    "OCR cleanup: correct obvious scanning typos, expand garbled place names, and keep incident dates separate from report dates.",
     opts?.summary
       ? "Mode: condensed summary of this excerpt only. Prefer fewer, high-confidence items."
-      : "Mode: exhaustive extraction of last-known-sighting facts, clothing, medical alerts, search grids, cell pings, named contacts, official records, and community tips. Skip court procedural boilerplate.",
+      : "Mode: extract people, last-known locations, times, vehicles, physical evidence, and key narrative facts from this excerpt only (first pages / current window). Skip court boilerplate.",
     "Known case entities (match entityId / entityName when possible):",
     JSON.stringify(entities, null, 2),
     "",
