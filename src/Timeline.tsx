@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Calendar, ChevronDown, ChevronLeft, ChevronRight, Minus, Plus } from "lucide-react";
 import {
   formatDaySelector,
@@ -45,27 +46,60 @@ export function TimelineHoverTip({
   timestamp,
   source,
   verified,
+  grow,
   children,
 }: {
   entityName: string;
   timestamp: number;
   source: string;
   verified: boolean;
+  grow?: boolean;
   children: ReactNode;
 }) {
+  const [tip, setTip] = useState<{ left: number; top: number; place: "top" | "bottom" } | null>(null);
+
+  const show = (node: HTMLElement) => {
+    const rect = node.getBoundingClientRect();
+    const place = rect.top < 168 ? "bottom" : "top";
+    setTip({
+      left: rect.left + rect.width / 2,
+      top: place === "top" ? rect.top - 8 : rect.bottom + 8,
+      place,
+    });
+  };
+
   return (
-    <span className="group/tip relative min-w-0 flex-1">
+    <span
+      className={`relative min-w-0 ${grow ? "flex-1" : ""}`}
+      onMouseEnter={(e) => show(e.currentTarget)}
+      onMouseLeave={() => setTip(null)}
+      onFocus={(e) => show(e.currentTarget)}
+      onBlur={() => setTip(null)}
+    >
       {children}
-      <span className="pointer-events-none invisible absolute left-0 top-[calc(100%+8px)] z-30 w-[min(16rem,calc(100vw-2rem))] rounded-xl border border-slate-200 bg-white p-3 text-left shadow-xl group-hover/tip:visible">
-        <span className="block text-[12.5px] font-semibold leading-snug text-slate-900">{entityName}</span>
-        <span className={`mt-1.5 block ${mono} text-[10.5px] text-slate-500`}>
-          {new Date(timestamp).toLocaleString()}
-        </span>
-        <span className="mt-1 block text-[11.5px] leading-snug text-slate-600">{source || "No source document"}</span>
-        <span className={`mt-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold ${verified ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
-          {verified ? "Verified" : "Unverified"}
-        </span>
-      </span>
+      {tip && createPortal(
+        <span
+          className="pointer-events-none fixed z-50 w-[min(16rem,calc(100vw-2rem))] rounded-xl border border-slate-200 bg-white p-3 text-left shadow-xl"
+          style={{
+            left: tip.left,
+            top: tip.top,
+            transform: tip.place === "top" ? "translate(-50%, -100%)" : "translate(-50%, 0)",
+          }}
+        >
+          <span className="block text-[12.5px] font-semibold leading-snug text-slate-900">{entityName}</span>
+          <span className={`mt-1.5 block ${mono} text-[10.5px] text-slate-500`}>
+            {new Date(timestamp).toLocaleString()}
+          </span>
+          <span className="mt-1 block text-[11.5px] leading-snug text-slate-600">{source || "No source document"}</span>
+          <span className={`mt-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold ${verified ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
+            {verified ? "Verified" : "Unverified"}
+          </span>
+          <span
+            className={`absolute left-1/2 h-2 w-2 -translate-x-1/2 rotate-45 border-slate-200 bg-white ${tip.place === "top" ? "top-full -mt-1 border-r border-b" : "bottom-full -mb-1 border-l border-t"}`}
+          />
+        </span>,
+        document.body,
+      )}
     </span>
   );
 }

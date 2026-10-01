@@ -106,3 +106,29 @@ body {
   background: rgb(253 230 138 / 0.85);
   color: transparent;
 }
+
+.dossier-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+.dossier-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.dossier-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dossier-scroll::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+.dark .dossier-scroll {
+  scrollbar-color: #3f3f46 transparent;
+}
+
+.dark .dossier-scroll::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+}

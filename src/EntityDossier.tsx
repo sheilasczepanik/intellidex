@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Pin, Search } from "lucide-react";
 import type { ComponentType } from "react";
 import { getCategoryColor, resolveSemanticCategory, type CategoryColorInput } from "./utils/categoryColors";
@@ -60,6 +60,8 @@ export default function EntityDossier({ open, selected, lanes, onToggle, onSelec
   const [pill, setPill] = useState<Pill>("all");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ top: false, bottom: false });
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -79,6 +81,20 @@ export default function EntityDossier({ open, selected, lanes, onToggle, onSelec
       items: filtered.filter((lane) => groupFor(lane) === group.id),
     })).filter((group) => group.items.length > 0);
   }, [filtered]);
+
+  const syncEdges = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const { scrollTop, scrollHeight, clientHeight } = el;
+    setEdges({
+      top: scrollTop > 4,
+      bottom: scrollTop + clientHeight < scrollHeight - 4,
+    });
+  };
+
+  useLayoutEffect(() => {
+    syncEdges();
+  }, [filtered, collapsed, expanded, open]);
 
   return (
     <aside className={`flex shrink-0 flex-col overflow-hidden border-slate-200 bg-slate-50/60 transition-[width] duration-200 max-lg:absolute max-lg:z-20 max-lg:h-full ${open ? "w-[min(288px,86vw)] border-r" : "w-0 border-0 max-lg:pointer-events-none lg:w-[58px] lg:border-r"}`}>
@@ -121,7 +137,12 @@ export default function EntityDossier({ open, selected, lanes, onToggle, onSelec
               ))}
             </div>
           </div>
-          <div className="flex flex-1 flex-col gap-3 overflow-auto px-3.5 pb-6 pt-3">
+          <div className="relative min-h-0 flex-1">
+            <div
+              ref={scrollRef}
+              onScroll={syncEdges}
+              className="dossier-scroll flex h-full flex-col gap-3 overflow-y-auto px-3.5 pb-6 pt-3"
+            >
             {grouped.map((group) => {
               const shut = collapsed[group.id];
               const showAll = expanded[group.id];
@@ -139,7 +160,7 @@ export default function EntityDossier({ open, selected, lanes, onToggle, onSelec
                     <span className={`${mono} text-[10px] text-slate-400`}>{group.items.length}</span>
                   </button>
                   {!shut && (
-                    <div className="flex max-h-[min(22rem,50vh)] flex-col gap-1.5 overflow-y-auto">
+                    <div className="flex flex-col gap-1.5">
                       {visible.map(({ def, count }) => {
                         const on = selected === def.id;
                         const semantic = resolveSemanticCategory(def.category);
@@ -200,6 +221,13 @@ export default function EntityDossier({ open, selected, lanes, onToggle, onSelec
                   : "No entities match that search or filter."}
               </div>
             )}
+            </div>
+            {edges.top ? (
+              <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-slate-50 to-transparent dark:from-zinc-950" />
+            ) : null}
+            {edges.bottom ? (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-6 bg-gradient-to-t from-slate-50 to-transparent dark:from-zinc-950" />
+            ) : null}
           </div>
         </div>
       )}

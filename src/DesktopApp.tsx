@@ -3386,7 +3386,7 @@ export default function DesktopApp() {
                         const KindIcon = ENTITY_ICON[TYPE_KIND[def.type]] ?? Clock;
                         return (
                           <div key={def.id} className={`relative overflow-visible border-b border-slate-200 transition-opacity ${dim ? "opacity-40" : "opacity-100"}`} style={{ height }}>
-                            <div className={`sticky left-0 z-[3] flex h-full flex-col justify-center gap-1 border-r border-slate-200 bg-slate-50 pl-5 pr-3.5 ${mono} text-[11px] uppercase leading-snug tracking-[0.06em] text-slate-600`}
+                            <div className={`sticky left-0 z-[3] flex h-full min-h-[56px] flex-col justify-center gap-1 border-r border-slate-200 bg-slate-50 py-2 pl-5 pr-3.5 text-left ${mono} text-[11px] uppercase leading-snug tracking-[0.06em] text-slate-600`}
                               style={{ width: LANE_PAD }}
                             >
                               <TimelineHoverTip
@@ -3440,6 +3440,7 @@ export default function DesktopApp() {
                                   timestamp={e.timestamp}
                                   source={e.sourceName}
                                   verified={e.verified}
+                                  grow
                                 >
                                   <span className="min-w-0 flex-1 whitespace-normal text-[12.5px] font-medium leading-snug text-slate-900 line-clamp-2">{e.title}</span>
                                 </TimelineHoverTip>
