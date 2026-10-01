@@ -11,7 +11,7 @@ import { extractPdfText, renderPdfPagesToJpeg, ocrImageSource, documentText } fr
 import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource, MAURA_FALLBACK_ENTITIES } from "./lib/mauraExtractFallback";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
-import { scrapeArticleFromUrl } from "./lib/scrapeClient";
+import { scrapeArticleFromUrl, fallbackArticleFromUrl } from "./lib/scrapeClient";
 import { generateAndDownloadDossier, type DossierExportOptions } from "./lib/DossierPdfGenerator";
 import WorkingTheory from "./WorkingTheory";
 import { applyExtractedGraph } from "./lib/applyExtractGraph";
@@ -1544,16 +1544,22 @@ export default function DesktopApp() {
   ) => {
     const extract = opts?.extract ?? true;
     onProgress("scraping");
-    const article = await scrapeArticleFromUrl(url);
+    let article = fallbackArticleFromUrl(url);
+    try {
+      article = await scrapeArticleFromUrl(url);
+    } catch {
+      article = fallbackArticleFromUrl(url);
+    }
     onProgress("staging");
+    const body = article.content || article.summary || `External news report referenced from ${article.url}`;
     const sha256Hash = await calculateSHA256(
-      new TextEncoder().encode(article.content).buffer as ArrayBuffer,
+      new TextEncoder().encode(body).buffer as ArrayBuffer,
     );
-    const bytes = new TextEncoder().encode(article.content).length;
+    const bytes = new TextEncoder().encode(body).length;
     const row = await ingestText({
       fileName: article.title,
       fileType: "web_article",
-      rawText: article.content,
+      rawText: body,
       fileSize: bytes,
       mimeType: "text/html",
       sha256Hash,
@@ -1563,7 +1569,7 @@ export default function DesktopApp() {
       publishedDate: article.publishedDate ?? undefined,
       wordCount: article.wordCount,
     });
-    if (row?.id && extract) {
+    if (row?.id && extract && !article.fallback && article.wordCount >= 40) {
       extractChain.current = extractChain.current.then(() =>
         runExtract(row.id, { stayOnWorkspace: screen !== "Intake" }),
       );
@@ -2962,13 +2968,7 @@ export default function DesktopApp() {
                 onRetrySummary={(id) => { void runExtract(id, { maxPages: CLAUDE_RETRY_PAGES, maxChars: 8_000, summary: true }); }}
                 onSkipVerify={() => setScreen("Verify")}
                 onImportUrl={async (url, onProgress) => {
-                  try {
-                    await ingestWebArticle(url, onProgress);
-                  } catch (err) {
-                    const message = err instanceof Error ? err.message : "Could not import that article.";
-                    setExtractError(message);
-                    throw err;
-                  }
+                  await ingestWebArticle(url, onProgress);
                 }}
                 highlightDropzone={intakeHighlight}
                 onHighlightConsumed={() => setIntakeHighlight(false)}

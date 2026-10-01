@@ -1,16 +1,36 @@
 export const SCRAPE_BLOCKED =
   "Unable to scrape article directly. Please paste article copy into 'Paste narrative' below.";
 
+export const PRESS_SOURCE_TYPE = "External Press / Secondary Intelligence";
+const BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const FETCH_MS = 6000;
+const MAX_HTML_BYTES = 800_000;
+
 export type ScrapedArticle = {
   url: string;
   title: string;
   publishedDate: string | null;
   content: string;
   wordCount: number;
+  domain: string;
+  sourceType: string;
+  summary: string;
+  fallback?: boolean;
 };
 
-const BROWSER_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+export type PageMetadata = {
+  url: string;
+  title: string;
+  description: string;
+  author: string;
+  favicon: string;
+  image: string;
+  publishedDate: string | null;
+  domain: string;
+  sourceType: string;
+  summary: string;
+};
 
 export class ScrapeHttpError extends Error {
   status: number;
@@ -35,20 +55,87 @@ function isPrivateHostname(host: string) {
   return false;
 }
 
-export function assertPublicHttpUrl(raw: string) {
-  let parsed: URL;
+export function parsePublicHttpUrl(raw: string): URL | null {
   try {
-    parsed = new URL(raw.trim());
+    const parsed = new URL(raw.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    if (isPrivateHostname(parsed.hostname)) return null;
+    return parsed;
   } catch {
-    throw new ScrapeHttpError(400, "Enter a valid http:// or https:// URL.");
+    return null;
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new ScrapeHttpError(400, "Enter a valid http:// or https:// URL.");
-  }
-  if (isPrivateHostname(parsed.hostname)) {
-    throw new ScrapeHttpError(400, "That URL cannot be fetched from the scrape service.");
-  }
+}
+
+export function assertPublicHttpUrl(raw: string) {
+  const parsed = parsePublicHttpUrl(raw);
+  if (!parsed) throw new ScrapeHttpError(400, "Enter a valid http:// or https:// URL.");
   return parsed;
+}
+
+export function titleFromUrlSlug(rawUrl: string) {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    const parts = parsed.pathname.split("/").filter(Boolean).map((part) => part.replace(/\.[a-z0-9]{1,8}$/i, ""));
+    const slug = [...parts].reverse().find((part) => /[a-z]{3,}[-_][a-z]/i.test(part))
+      || [...parts].reverse().find((part) => /[a-z]{4,}/i.test(part) && !/^\d+$/.test(part))
+      || parts.at(-1)
+      || "";
+    const words = slug.replace(/[-_]+/g, " ").trim();
+    if (words) {
+      return words
+        .split(/\s+/)
+        .map((word) => {
+          if (word.length <= 3) return word.toUpperCase();
+          return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(" ");
+    }
+    return parsed.hostname.replace(/^www\./i, "");
+  } catch {
+    return rawUrl.trim() || "External article";
+  }
+}
+
+export function fallbackArticleFromUrl(rawUrl: string): ScrapedArticle {
+  const trimmed = rawUrl.trim();
+  let url = trimmed;
+  let domain = "";
+  try {
+    const parsed = new URL(trimmed);
+    url = parsed.toString();
+    domain = parsed.hostname.replace(/^www\./i, "");
+  } catch {
+    domain = trimmed.replace(/^https?:\/\//i, "").split("/")[0] || "";
+  }
+  const title = titleFromUrlSlug(trimmed);
+  const summary = `External news report referenced from ${url}`;
+  return {
+    url,
+    title,
+    publishedDate: null,
+    content: summary,
+    wordCount: summary.split(/\s+/).filter(Boolean).length,
+    domain,
+    sourceType: PRESS_SOURCE_TYPE,
+    summary,
+    fallback: true,
+  };
+}
+
+export function fallbackPageMetadata(rawUrl: string): PageMetadata {
+  const article = fallbackArticleFromUrl(rawUrl);
+  return {
+    url: article.url,
+    title: article.title,
+    description: article.summary,
+    author: "",
+    favicon: "",
+    image: "",
+    publishedDate: null,
+    domain: article.domain,
+    sourceType: article.sourceType,
+    summary: article.summary,
+  };
 }
 
 function decodeEntities(text: string) {
@@ -149,15 +236,15 @@ function extractBody(html: string) {
 }
 
 export async function scrapePublicArticle(rawUrl: string): Promise<ScrapedArticle> {
-  const parsed = assertPublicHttpUrl(rawUrl);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 20_000);
-  let res: Response;
+  const fallback = fallbackArticleFromUrl(rawUrl);
+  const parsed = parsePublicHttpUrl(rawUrl);
+  if (!parsed) return fallback;
+
   try {
-    res = await fetch(parsed.toString(), {
+    const res = await fetch(parsed.toString(), {
       method: "GET",
       redirect: "follow",
-      signal: ctrl.signal,
+      signal: AbortSignal.timeout(FETCH_MS),
       headers: {
         "User-Agent": BROWSER_UA,
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -165,48 +252,51 @@ export async function scrapePublicArticle(rawUrl: string): Promise<ScrapedArticl
         "Cache-Control": "no-cache",
       },
     });
+
+    if (!res.ok || [401, 403, 404, 407, 408, 429, 451, 500, 502, 503, 504].includes(res.status)) {
+      return fallback;
+    }
+
+    const declared = Number(res.headers.get("content-length") || 0);
+    if (declared && declared > MAX_HTML_BYTES) return fallback;
+
+    const html = await res.text().catch(() => "");
+    if (!html || looksBlocked(res.status, html)) return fallback;
+    if (html.length > MAX_HTML_BYTES) {
+      /* truncated parse may still yield a title */
+    }
+
+    const snippet = html.slice(0, MAX_HTML_BYTES);
+    const finalUrl = res.url || parsed.toString();
+    const publicFinal = parsePublicHttpUrl(finalUrl) ? finalUrl : parsed.toString();
+    const content = extractBody(snippet);
+    const words = content.split(/\s+/).filter(Boolean);
+    const domain = new URL(publicFinal).hostname.replace(/^www\./i, "");
+    if (words.length < 40) {
+      return {
+        ...fallback,
+        url: publicFinal,
+        domain,
+        title: extractTitle(snippet).slice(0, 240) || fallback.title,
+        publishedDate: extractDate(snippet),
+        fallback: true,
+      };
+    }
+
+    return {
+      url: publicFinal,
+      title: extractTitle(snippet).slice(0, 240),
+      publishedDate: extractDate(snippet),
+      content,
+      wordCount: words.length,
+      domain,
+      sourceType: PRESS_SOURCE_TYPE,
+      summary: extractDescription(snippet).slice(0, 400) || content.slice(0, 280),
+    };
   } catch {
-    throw new ScrapeHttpError(422, SCRAPE_BLOCKED);
-  } finally {
-    clearTimeout(timer);
+    return fallback;
   }
-
-  const html = await res.text();
-  if (!res.ok || looksBlocked(res.status, html)) {
-    throw new ScrapeHttpError(422, SCRAPE_BLOCKED);
-  }
-
-  const finalUrl = res.url || parsed.toString();
-  try {
-    assertPublicHttpUrl(finalUrl);
-  } catch {
-    throw new ScrapeHttpError(422, SCRAPE_BLOCKED);
-  }
-
-  const content = extractBody(html);
-  const words = content.split(/\s+/).filter(Boolean);
-  if (words.length < 40) {
-    throw new ScrapeHttpError(422, SCRAPE_BLOCKED);
-  }
-
-  return {
-    url: finalUrl,
-    title: extractTitle(html).slice(0, 240),
-    publishedDate: extractDate(html),
-    content,
-    wordCount: words.length,
-  };
 }
-
-export type PageMetadata = {
-  url: string;
-  title: string;
-  description: string;
-  author: string;
-  favicon: string;
-  image: string;
-  publishedDate: string | null;
-};
 
 function extractAuthor(html: string) {
   return attrMatch(html, ["article:author", "author", "og:article:author", "twitter:creator", "parsely-author"]) || "";
@@ -241,50 +331,48 @@ function extractFavicon(html: string, base: URL) {
 
 /** Lightweight metadata parse for Media Vault URL cards — does not require article body. */
 export async function parsePageMetadata(rawUrl: string): Promise<PageMetadata> {
-  const parsed = assertPublicHttpUrl(rawUrl);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12_000);
-  let res: Response;
+  const fallback = fallbackPageMetadata(rawUrl);
+  const parsed = parsePublicHttpUrl(rawUrl);
+  if (!parsed) return fallback;
   try {
-    res = await fetch(parsed.toString(), {
+    const res = await fetch(parsed.toString(), {
       method: "GET",
       redirect: "follow",
-      signal: ctrl.signal,
+      signal: AbortSignal.timeout(FETCH_MS),
       headers: {
         "User-Agent": BROWSER_UA,
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
       },
     });
-  } catch {
+    if (!res.ok || [403, 404, 408, 429].includes(res.status)) return fallback;
+    const declared = Number(res.headers.get("content-length") || 0);
+    if (declared && declared > MAX_HTML_BYTES) return fallback;
+    const html = (await res.text().catch(() => "")).slice(0, MAX_HTML_BYTES);
+    if (!html || looksBlocked(res.status, html)) return fallback;
+    const finalUrl = res.url || parsed.toString();
+    let base: URL;
+    try {
+      base = new URL(finalUrl);
+    } catch {
+      base = parsed;
+    }
+    const domain = base.hostname.replace(/^www\./i, "");
+    const title = extractTitle(html).slice(0, 240) || titleFromUrlSlug(finalUrl);
+    const description = extractDescription(html).slice(0, 400) || fallback.summary;
     return {
-      url: parsed.toString(),
-      title: parsed.hostname.replace(/^www\./, ""),
-      description: "",
-      author: "",
-      favicon: new URL("/favicon.ico", parsed).toString(),
-      image: "",
-      publishedDate: null,
+      url: finalUrl,
+      title,
+      description,
+      author: extractAuthor(html).slice(0, 160),
+      favicon: extractFavicon(html, base),
+      image: extractOgImage(html, base),
+      publishedDate: extractDate(html),
+      domain,
+      sourceType: PRESS_SOURCE_TYPE,
+      summary: description,
     };
-  } finally {
-    clearTimeout(timer);
-  }
-  const html = await res.text().catch(() => "");
-  const finalUrl = res.url || parsed.toString();
-  let base: URL;
-  try {
-    base = new URL(finalUrl);
   } catch {
-    base = parsed;
+    return fallback;
   }
-  const title = extractTitle(html).slice(0, 240) || base.hostname.replace(/^www\./, "");
-  return {
-    url: finalUrl,
-    title,
-    description: extractDescription(html).slice(0, 400),
-    author: extractAuthor(html).slice(0, 160),
-    favicon: extractFavicon(html, base),
-    image: extractOgImage(html, base),
-    publishedDate: extractDate(html),
-  };
 }

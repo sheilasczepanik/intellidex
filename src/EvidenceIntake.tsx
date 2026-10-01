@@ -287,10 +287,13 @@ export default function EvidenceIntake({
     setScrapeStage("scraping");
     try {
       await onImportUrl(parsed, setScrapeStage);
-      setArticleUrl("");
     } catch (err) {
-      setUrlError(err instanceof Error ? err.message : "Unable to scrape article directly. Please paste article copy into 'Paste narrative' below.");
+      const message = err instanceof Error ? err.message : "";
+      if (message && !/FUNCTION_INVOCATION|INTERNAL_SERVER|<!DOCTYPE|Vercel/i.test(message)) {
+        setUrlError(message);
+      }
     } finally {
+      setArticleUrl("");
       setScrapeStage("idle");
     }
   };
@@ -498,11 +501,15 @@ export default function EvidenceIntake({
                 <button type="button" className="min-w-0 text-left" onClick={() => setActiveEvidenceId(q.id)}>
                   <div className={`mb-1 flex min-w-0 items-center gap-2 ${mono} text-[13px]`}>
                     <span className="truncate">{q.fileName}</span>
-                    {secondary && (
+                    {isWeb ? (
+                      <span className="shrink-0 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[9.5px] tracking-[0.06em] text-amber-900">
+                        Press / Secondary Intelligence
+                      </span>
+                    ) : secondary ? (
                       <span className="shrink-0 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[9.5px] tracking-[0.06em] text-amber-900">
                         {sourceClassLabel(q.sourceClass) || "SECONDARY"}
                       </span>
-                    )}
+                    ) : null}
                   </div>
                   <div className="text-[11.5px] text-slate-500">
                     {job

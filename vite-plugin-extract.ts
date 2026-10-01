@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import { dispatchExtract } from "./server/extract.ts";
-import { scrapePublicArticle, parsePageMetadata, ScrapeHttpError } from "./server/scrapeUrl.ts";
+import { scrapePublicArticle, parsePageMetadata, fallbackArticleFromUrl, fallbackPageMetadata } from "./server/scrapeUrl.ts";
 import { parseIntelWithAnthropic, IntelParseError } from "./server/parseIntel.ts";
 import { EXTRACT_MODEL_MAX_CHARS, EXTRACT_SERVICE_UNAVAILABLE, prioritizeLegalFacts } from "./src/lib/extractSchema.ts";
 import { mauraFallbackApiBody } from "./src/lib/mauraExtractFallback.ts";
@@ -85,10 +85,8 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
       }
       const meta = await parsePageMetadata(payload.url || "");
       send(res, 200, meta);
-    } catch (err) {
-      const status = err instanceof ScrapeHttpError ? err.status : 500;
-      const message = err instanceof Error ? err.message : "Metadata parse failed.";
-      send(res, status, { error: message });
+    } catch {
+      send(res, 200, fallbackPageMetadata(""));
     }
   };
 
@@ -112,10 +110,8 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
       }
       const article = await scrapePublicArticle(payload.url || "");
       send(res, 200, article);
-    } catch (err) {
-      const status = err instanceof ScrapeHttpError ? err.status : 500;
-      const message = err instanceof Error ? err.message : "Scrape failed.";
-      send(res, status, { error: message });
+    } catch {
+      send(res, 200, fallbackArticleFromUrl(""));
     }
   };
 

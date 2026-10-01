@@ -99,7 +99,11 @@ export default function IngestDrawer({
       await onImportUrl(parsed, setScrapeStage);
       setArticleUrl("");
     } catch (err) {
-      setUrlError(err instanceof Error ? err.message : "Unable to scrape that link. Paste the article copy below.");
+      const message = err instanceof Error ? err.message : "";
+      if (message && !/FUNCTION_INVOCATION|INTERNAL_SERVER|<!DOCTYPE|Vercel/i.test(message)) {
+        setUrlError(message);
+      }
+      setArticleUrl("");
     } finally {
       setScrapeStage("idle");
     }
