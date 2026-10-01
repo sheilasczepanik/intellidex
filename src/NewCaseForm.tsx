@@ -55,21 +55,22 @@ export default function NewCaseForm({
     const query = fileIdentifier.trim() || title.trim();
     if (!extractNamusId(query)) {
       setNamusOk(false);
-      setNamusErr("Enter a NamUs ID such as MP54 in the case identifier field.");
+      setNamusErr("Enter a NamUs ID such as MP1028 in the case identifier field.");
       return;
     }
     setNamusBusy(true);
     setNamusOk(false);
     setNamusErr("");
     try {
-      const response = await fetchNamusRecord(query);
+      const cleanNamusId = query.trim().toUpperCase();
+      const response = await fetchNamusRecord(cleanNamusId);
       const data = response.data;
       if (!data?.name) {
         setNamusErr(response.error || "NamUs did not return a usable record.");
         return;
       }
       onTitle(data.name);
-      onFileIdentifier(data.caseId ? String(data.caseId) : fileIdentifier);
+      onFileIdentifier((data.caseId ? String(data.caseId) : cleanNamusId).trim().toUpperCase());
       onJurisdiction(data.location || "");
       if (data.lksDate) onLksAt(String(data.lksDate));
       if (data.circumstances) onSummary(String(data.circumstances));
@@ -113,7 +114,7 @@ export default function NewCaseForm({
           required
           value={title}
           onChange={(e) => onTitle(e.target.value)}
-          placeholder="Maura Murray"
+          placeholder="Subject name"
           className={`${inputCls} mb-4 h-11 text-[15px] font-semibold`}
         />
         <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Case / file identifier</label>
@@ -121,7 +122,7 @@ export default function NewCaseForm({
           <input
             value={fileIdentifier}
             onChange={(e) => { setNamusOk(false); setNamusErr(""); onFileIdentifier(e.target.value); }}
-            placeholder="MP54, NamUs #, or agency case #"
+            placeholder="MP1028, NamUs #, or agency case #"
             className={`${inputCls} h-11 flex-1 text-[14px]`}
           />
           <button
@@ -142,7 +143,7 @@ export default function NewCaseForm({
         ) : namusErr ? (
           <p className="mb-4 text-[12.5px] text-rose-700">{namusErr}</p>
         ) : (
-          <p className="mb-4 text-[12px] text-slate-400">Use a NamUs ID such as MP54 to pull public case details into this form.</p>
+          <p className="mb-4 text-[12px] text-slate-400">Use a NamUs ID such as MP1028 to pull public case details into this form.</p>
         )}
         <div className="mb-4 grid gap-3 sm:grid-cols-2">
           <div>

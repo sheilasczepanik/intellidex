@@ -65,7 +65,7 @@ export function TimelineHoverTip({
 
   return (
     <span
-      className={`relative min-w-0 ${grow ? "flex-1" : ""}`}
+      className={`relative ${grow ? "min-w-0 flex-1" : "shrink-0"}`}
       onMouseEnter={(e) => show(e.currentTarget)}
       onMouseLeave={() => setTip(null)}
       onFocus={(e) => show(e.currentTarget)}

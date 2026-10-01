@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
-  addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent,
+  addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent, ensureLastKnownSighting,
   db, DEFAULT_OPERATOR, deleteEntity, deleteEvidence, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isIntakeCompleteStatus, isLocatedCase, isPendingIntakeEvidence, isVisibleInStagingQueue, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft, togglePinnedPerson,
   OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveManualEvidence, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
@@ -76,7 +76,7 @@ import { clusterMergeableEvents, detectLocationConflicts } from "./lib/timelineD
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
 import { joinLocalDateTime, localDayKey, namesLooselyMatch, splitLocalDateTime } from "./lib/eventTime";
 import {
-  HOUR_MS, LANE_PAD, UNASSIGNED_LANE_ID, busiestDayKey, eventAxisBounds, eventInHourWindow, fillDayStrip, fitPxPerHour,
+  HOUR_MS, LANE_PAD, UNASSIGNED_LANE_ID, busiestDayKey, earliestDayKey, eventAxisBounds, eventInHourWindow, fillDayStrip, fitPxPerHour,
   formatClockRange, midnightsInRange, pxForPreset, spanDayKeys, tickMsFor, uniqueDayKeys,
   windowHours, type DayScope, type TickPreset, type TimeWindow,
 } from "./lib/timelineView";
@@ -380,6 +380,16 @@ Network records show the handset registered to J. Vance ceased reporting to any 
 /* ------------------------------------------------------------------ */
 
 const CARD_W = 260, CARD_H = 52, CARD_GAP = 10, CARD_PAD = 12, RULER_H = 35;
+
+function timelineCardWidth(
+  event: { time: string; title: string; mergeCount: number; flag?: boolean; timeEndMs?: number },
+  axisSpan: number,
+) {
+  const clock = `${event.time}${event.timeEndMs ? "–00:00" : ""}`;
+  const extras = (event.flag ? 76 : 0) + (event.mergeCount > 1 ? 124 : 0);
+  const content = 28 + clock.length * 7.5 + 8 + event.title.length * 7.1 + extras;
+  return Math.max(axisSpan, 220, Math.ceil(content));
+}
 const TRANSIT_CONFLICT_MS = 50 * 60 * 1000;
 
 const TONE_CHIP: Record<Tone, string> = {
@@ -625,6 +635,17 @@ export default function DesktopApp() {
     if (window.location.pathname !== path) window.history.pushState({}, "", path);
   };
 
+  const openPlaceChronology = (placeId: string) => {
+    setSelected(placeId);
+    setShowInactiveLanes(true);
+    setSidebarOpen(true);
+    const first = caseEvents
+      .filter((event) => event.entityId === placeId)
+      .sort((a, b) => a.timestamp - b.timestamp)[0];
+    if (first) setFocusEventId(first.id);
+    goTo("Timeline");
+  };
+
   const openIntakePicker = () => {
     setIngestChooser(true);
   };
@@ -769,8 +790,10 @@ export default function DesktopApp() {
       const key = localDayKey(e.timestamp);
       dayCounts[key] = (dayCounts[key] ?? 0) + 1;
     }
-    const busiest = busiestDayKey(caseEvents.map((e) => e.timestamp));
-    const activeDay = viewDay || busiest;
+    const dayStamps = caseEvents.map((e) => e.timestamp);
+    const busiest = busiestDayKey(dayStamps);
+    const earliest = earliestDayKey(dayStamps);
+    const activeDay = viewDay || earliest || busiest;
     const spanKeys = !viewAllDates && activeDay ? spanDayKeys(activeDay, dayScope) : [];
     const span = new Set(spanKeys);
     const { startH, endH } = windowHours(timeWindow, customStart, customEnd);
@@ -818,18 +841,17 @@ export default function DesktopApp() {
       conflictPairs.push({ aId, bId, label, detail });
     };
 
-    if (caseEvents.some((e) => e.id === "te-a1") && caseEvents.some((e) => e.id === "te-t2")) {
-      addPair("te-a1", "te-t2", "Impossible transit", "The motel alibi cannot coexist with the Gate 4 toll exit.");
-    }
-    for (const pair of detectLocationConflicts(caseEvents, caseEntities, activeCase?.subjectName || activeCase?.title)) {
+    const scopedIds = new Set(scoped.map((event) => event.id));
+    for (const pair of detectLocationConflicts(scoped, caseEntities, activeCase?.subjectName || activeCase?.title)) {
       addPair(pair.aId, pair.bId, pair.label, pair.detail);
     }
     for (const pair of timelineConflicts) {
+      if (!scopedIds.has(pair.aId) || !scopedIds.has(pair.bId)) continue;
       addPair(pair.aId, pair.bId, pair.label, pair.detail);
     }
 
     const byEntity = new Map<string, TimelineEventRecord[]>();
-    caseEvents.forEach((e) => {
+    scoped.forEach((e) => {
       const list = byEntity.get(e.entityId) ?? [];
       list.push(e);
       byEntity.set(e.entityId, list);
@@ -849,6 +871,9 @@ export default function DesktopApp() {
         const mins = Math.round(dt / 60000);
         addPair(a.id, b.id, "Impossible transit", `${mins} min between ${pa[0].name} and ${pb[0].name}.`);
       }
+    }
+    if (scopedIds.has("te-a1") && scopedIds.has("te-t2")) {
+      addPair("te-a1", "te-t2", "Impossible transit", "The motel alibi cannot coexist with the Gate 4 toll exit.");
     }
 
     const evidenceMap = new Map(caseEvidence.map((row) => [row.id, row]));
@@ -938,9 +963,10 @@ export default function DesktopApp() {
       let maxStack = 0;
       const placed = evs.map((e) => {
         const left = xOf(e.timestamp);
-        const span = e.timeEndMs && e.timeEndMs > e.timestamp
-          ? Math.max(CARD_W, xOf(e.timeEndMs) - left)
-          : CARD_W;
+        const axisSpan = e.timeEndMs && e.timeEndMs > e.timestamp
+          ? Math.max(220, xOf(e.timeEndMs) - left)
+          : 220;
+        const span = timelineCardWidth(e, axisSpan);
         let row = 0;
         while (row < rowEnds.length && rowEnds[row] > left) row += 1;
         if (row === rowEnds.length) rowEnds.push(0);
@@ -1005,6 +1031,12 @@ export default function DesktopApp() {
       busiest,
       activeDay,
       conflictPairs,
+      conflicts: conflictPairs.map((pair) => ({
+        id: `${pair.aId}::${pair.bId}`,
+        aId: pair.aId,
+        bId: pair.bId,
+        message: pair.detail,
+      })),
       mergedCount: plotted.filter((row) => row.mergeCount > 1).reduce((sum, row) => sum + row.mergeCount, 0),
       mergedLaneIds: plotted.filter((row) => row.mergeCount > 1).map((row) => row.entityId),
       timeLabel: formatClockRange(start, end),
@@ -1023,8 +1055,14 @@ export default function DesktopApp() {
   }, [resolvedCaseId]);
 
   useEffect(() => {
+    if (!activeCase) return;
+    if (screen !== "Timeline" && screen !== "Overview" && screen !== "Locations") return;
+    void ensureLastKnownSighting(activeCase);
+  }, [screen, activeCase]);
+
+  useEffect(() => {
     if (screen !== "Timeline" || !viewportFit || !caseEvents.length) return;
-    const active = viewDay || busiestDayKey(caseEvents.map((e) => e.timestamp));
+    const active = viewDay || earliestDayKey(caseEvents.map((e) => e.timestamp)) || busiestDayKey(caseEvents.map((e) => e.timestamp));
     const span = new Set(viewAllDates || !active ? [] : spanDayKeys(active, dayScope));
     const pool = span.size
       ? caseEvents.filter((e) => span.has(localDayKey(e.timestamp)))
@@ -1041,7 +1079,7 @@ export default function DesktopApp() {
   const fitToEvents = () => {
     setViewportFit(true);
     setTimeWindow("full");
-    const active = viewDay || busiestDayKey(caseEvents.map((e) => e.timestamp));
+    const active = viewDay || earliestDayKey(caseEvents.map((e) => e.timestamp)) || busiestDayKey(caseEvents.map((e) => e.timestamp));
     const span = new Set(viewAllDates || !active ? [] : spanDayKeys(active, dayScope));
     const pool = span.size
       ? caseEvents.filter((e) => span.has(localDayKey(e.timestamp)))
@@ -1273,10 +1311,45 @@ export default function DesktopApp() {
     setToast(`${title} moved to archive.`);
   };
 
+  const resetWorkspace = () => {
+    setSelected(null);
+    setViewDay("");
+    setViewAllDates(false);
+    setDrawerEventId(null);
+    setFocusEventId(null);
+    setTimelineInspect(null);
+    setConflictInspectorOpen(false);
+    setForm(null);
+    setActiveEvidenceId(null);
+    setWorkspacePersonId(null);
+    setSelectedExtractNames(new Set());
+    setConflictsOnly(false);
+    setFocusMerged(false);
+    setMergedInspectIds([]);
+    setPopover(false);
+  };
+
+  const openChronology = async () => {
+    if (activeCase) await ensureLastKnownSighting(activeCase);
+    const stamps = caseEvents.map((event) => event.timestamp).filter((ts) => Number.isFinite(ts));
+    const lksRaw = activeCase?.lksAt || activeCase?.incidentStart || "";
+    const lks = /^\d{4}-\d{2}-\d{2}$/.test(lksRaw) ? Date.parse(`${lksRaw}T12:00:00`) : Date.parse(lksRaw);
+    if (Number.isFinite(lks)) stamps.push(lks);
+    const day = earliestDayKey(stamps);
+    if (day) {
+      setViewDay(day);
+      setViewAllDates(false);
+      setViewportFit(true);
+    }
+    goTo("Timeline");
+  };
+
   const submitNewCase = async () => {
     if (!draftTitle.trim() || savingCase) return;
     setSavingCase(true);
     try {
+      const cleanNamusId = draftFileId.trim().toUpperCase();
+      resetWorkspace();
       const row = await createCase({
         title: draftTitle,
         summary: draftSummary,
@@ -1285,11 +1358,12 @@ export default function DesktopApp() {
         incidentStart: draftLksAt ? draftLksAt.slice(0, 10) : draftIncidentStart,
         incidentEnd: draftIncidentEnd,
         subjectName: draftTitle,
-        fileIdentifier: draftFileId,
+        fileIdentifier: cleanNamusId,
         lksAt: draftLksAt,
         lksLocation: draftJurisdiction,
         subjectProfile: draftProfile,
       });
+      await ensureLastKnownSighting(row);
       setActiveCaseId(row.id);
       goTo("Overview", row.id);
     } catch (err) {
@@ -2755,6 +2829,7 @@ export default function DesktopApp() {
                   events={caseEvents}
                   evidence={caseEvidence}
                   leaf={PERSON_LEAF_BY_SCREEN[screen] ?? "overview"}
+                  onViewChronology={openPlaceChronology}
                   onUnpin={() => {
                     void togglePinnedPerson(activeCase.id, person.id, false);
                     goTo("Overview", activeCase.id);
@@ -2772,7 +2847,7 @@ export default function DesktopApp() {
                 events={caseEvents}
                 pendingCount={pendingDrafts.length}
                 conflictCount={chrono.tether?.count ?? 0}
-                onOpenTimeline={() => goTo("Timeline")}
+                onOpenTimeline={() => { void openChronology(); }}
                 onOpenLocations={() => goTo("Locations")}
                 onAddEvidence={openIntakePicker}
                 onLogTip={() => { setArchiveFocus(true); goTo("Media"); }}
@@ -2853,6 +2928,7 @@ export default function DesktopApp() {
                   places={caseEntities.filter((e) => e.type === "place" || e.type === "location")}
                   events={caseEvents}
                   onArbitrate={requestDup}
+                  onViewChronology={openPlaceChronology}
                 />
               </div>
             )}
@@ -3099,7 +3175,7 @@ export default function DesktopApp() {
 
                   <div className="flex min-h-14 shrink-0 flex-col items-stretch gap-2 border-t border-slate-200 bg-slate-50 px-3 py-2 sm:h-14 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-0">
                     <span className={`min-w-0 truncate ${mono} text-[11px] text-slate-500`}>CONFIRM WRITES TO TIMELINE</span>
-                    <button onClick={() => setScreen("Timeline")}
+                    <button onClick={() => { void openChronology(); }}
                       className="inline-flex h-[34px] shrink-0 items-center justify-center gap-2 rounded-[10px] border border-slate-300 px-[15px] text-[12.5px] font-medium text-slate-600 transition-colors hover:border-blue-600 hover:text-blue-600">
                       Open chronology<ArrowRight className="h-3.5 w-3.5" />
                     </button>
@@ -3110,7 +3186,25 @@ export default function DesktopApp() {
 
             {/* ---------------- TIMELINE ---------------- */}
             {screen === "Timeline" && activeCase && (
-              <div className="relative flex min-h-0 flex-1 flex-col lg:h-[calc(100dvh-7.5rem)] lg:flex-row">
+              <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden lg:h-[calc(100dvh-7.5rem)]">
+                {chrono.conflicts.length > 0 && (
+                  <div className="z-20 flex w-full shrink-0 items-center justify-between border-b border-amber-200 bg-amber-50 px-4 py-2 dark:border-amber-800/60 dark:bg-amber-950/40">
+                    <div className="flex min-w-0 items-center gap-2 text-xs font-medium text-amber-900 dark:text-amber-200">
+                      <span className="text-amber-600 dark:text-amber-400">⚠️</span>
+                      <span className="min-w-0">
+                        {chrono.conflicts.length} timeline conflict{chrono.conflicts.length > 1 ? "s" : ""} detected — {chrono.conflicts[0].message}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => inspectContradiction(chrono.conflicts[0].id)}
+                      className="shrink-0 rounded border border-amber-300 bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-900 transition-colors hover:bg-amber-200 dark:border-amber-700 dark:bg-amber-900/60 dark:text-amber-100"
+                    >
+                      Inspect
+                    </button>
+                  </div>
+                )}
+                <div className="relative flex min-h-0 flex-1 flex-col lg:flex-row">
                 {sidebarOpen ? (
                   <button
                     type="button"
@@ -3132,20 +3226,7 @@ export default function DesktopApp() {
                 />
 
                 <div className="flex min-w-0 flex-1 flex-col">
-                  {chrono.tether ? (
-                    <div className="flex shrink-0 items-center gap-3 border-b border-amber-200 bg-amber-50 px-5 py-2.5">
-                      <TriangleAlert className="h-[15px] w-[15px] shrink-0 text-amber-700" />
-                      <span className="min-w-0 text-[13px] text-amber-900 text-pretty">
-                        <span className="font-semibold text-amber-700">{chrono.tether.count} timeline conflict{chrono.tether.count === 1 ? "" : "s"} detected</span>
-                        {" — "}{chrono.tether.detail}
-                      </span>
-                      <div className="min-w-[8px] flex-1" />
-                      <button type="button" onClick={() => inspectContradiction()}
-                        className="h-7 shrink-0 whitespace-nowrap rounded-lg border border-amber-300 px-3 text-[12px] text-amber-700 transition-colors hover:bg-amber-100">
-                        Inspect
-                      </button>
-                    </div>
-                  ) : (
+                  {chrono.conflicts.length === 0 && (
                     <div className="flex shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-5 py-2.5">
                       <span className={`min-w-0 truncate ${mono} text-[11px] tracking-[0.12em] text-slate-500`}>
                         {activeCase ? `${activeCase.id} / ${activeCase.title.toUpperCase()}` : "NO CASE SELECTED"}
@@ -3334,9 +3415,10 @@ export default function DesktopApp() {
                                 key={e.id}
                                 id={`timeline-node-${e.id}`}
                                 onClick={() => openEventDrawer(e.id, e.mergedIds)}
-                                className={`absolute z-[2] flex min-w-[248px] items-center gap-2 overflow-visible rounded-lg border px-2 py-1.5 text-left shadow-xs transition-colors hover:border-blue-300 ${laneAccent} ${sightingCard ? "border-amber-300 bg-amber-50" : e.secondary ? "border-dashed border-amber-400 bg-white" : e.flag ? "border-amber-300 bg-white ring-[3px] ring-amber-500/10" : "border-slate-200 bg-white"} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
-                                style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width: Math.max(width, 248), height: CARD_H }}
+                                className={`absolute z-[2] flex w-max min-w-[220px] items-center overflow-hidden rounded-lg border text-left shadow-xs transition-colors hover:border-blue-300 ${laneAccent} ${sightingCard ? "border-amber-300 bg-amber-50" : e.secondary ? "border-dashed border-amber-400 bg-white" : e.flag ? "border-amber-300 bg-white ring-[3px] ring-amber-500/10" : "border-slate-200 bg-white"} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
+                                style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width: Math.max(width, 220), height: CARD_H }}
                               >
+                                <div className="flex w-full min-w-max items-center gap-2 px-2.5 py-1.5">
                                 <span
                                   role="button"
                                   title="Open source citation"
@@ -3347,7 +3429,7 @@ export default function DesktopApp() {
                                     if (!rec) return;
                                     setTimelineInspect({ eventId: rec.id, citation: citationFromEvent(rec, src) });
                                   }}
-                                  className={`shrink-0 whitespace-nowrap rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.04em] ${e.flag || sightingCard ? "border-amber-500/30 bg-amber-500/10 text-amber-700" : "border-slate-200 bg-slate-50 text-slate-700"}`}
+                                  className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs ${e.flag || sightingCard ? "bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300" : "bg-slate-100 text-slate-600 dark:bg-zinc-800 dark:text-zinc-300"}`}
                                 >
                                   {e.time}{e.timeEndMs ? `–${formatClock(e.timeEndMs)}` : ""}
                                 </span>
@@ -3357,9 +3439,8 @@ export default function DesktopApp() {
                                   source={e.sourceName}
                                   verified={e.verified}
                                   mergeCount={e.mergeCount}
-                                  grow
                                 >
-                                  <span className="min-w-0 flex-1 truncate whitespace-nowrap text-[12.5px] font-medium leading-none text-slate-900">{e.title}</span>
+                                  <span className="shrink-0 whitespace-nowrap text-xs font-medium text-slate-800 dark:text-zinc-100">{e.title}</span>
                                 </TimelineHoverTip>
                                 {e.flag ? (
                                   <span
@@ -3381,11 +3462,12 @@ export default function DesktopApp() {
                                       ev.stopPropagation();
                                       openEventDrawer(e.id, e.mergedIds);
                                     }}
-                                    className="ml-auto whitespace-nowrap rounded border border-amber-300 bg-amber-100 px-1.5 py-0.5 font-mono text-[10px] text-amber-800"
+                                    className="ml-auto inline-flex shrink-0 items-center whitespace-nowrap rounded-full border border-amber-300/80 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-700 dark:border-amber-700/60 dark:bg-amber-950/50 dark:text-amber-300"
                                   >
                                     Merged ({e.mergeCount})
                                   </span>
                                 ) : null}
+                                </div>
                               </button>
                               );
                             })}
@@ -3455,6 +3537,7 @@ export default function DesktopApp() {
                     </div>
                     )}
                   </div>
+                </div>
                 </div>
               </div>
             )}

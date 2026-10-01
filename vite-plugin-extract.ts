@@ -8,7 +8,6 @@ import { mauraFallbackApiBody } from "./src/lib/mauraExtractFallback.ts";
 import { getMissingAlerts } from "./server/missingAlerts.ts";
 import { FALLBACK_MISSING_ALERTS } from "./src/lib/liveMissingAlert.ts";
 import { lookupNamus } from "./server/namusLookup.ts";
-import { NAMUS_MP54, namusOk } from "./src/lib/namusRecord.ts";
 
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -207,7 +206,7 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
       send(res, 200, body);
     } catch (err) {
       console.error("[namus] local handler failed", err);
-      send(res, 200, namusOk(NAMUS_MP54, "cached"));
+      send(res, 200, { success: false, error: "NamUs lookup failed." });
     }
   };
 

@@ -2,6 +2,7 @@ import { db, deleteCaseMedia, deleteEntity, deleteEvidence, deleteTimelineEvent,
 import { calculateSHA256FromText } from "./cryptoUtils";
 import { namesLooselyMatch } from "./eventTime";
 import { metersBetween, parseCoordinates, type LatLng } from "./geo";
+import { mergeLocations } from "./useLocations";
 
 export type DupKind = "media" | "evidence" | "event" | "location" | "person";
 export type DupDecision = "keep_existing" | "keep_new" | "merge";
@@ -176,27 +177,14 @@ export async function mergeLocationCluster(ids: string[]) {
   if (unique.length < 2) return null;
   const rows = (await Promise.all(unique.map((id) => db.entities.get(id)))).filter(Boolean) as EntityRecord[];
   if (rows.length < 2) return null;
-  const primary = rows.find((row) => row.classification === "VERIFIED" || row.role === "VERIFIED") || rows[0];
-  const rest = rows.filter((row) => row.id !== primary.id);
-  let notes = primary.notes;
-  const metadata = { ...(primary.metadata || {}) };
-  const mergedFrom = [
-    ...(metadata.mergedFrom ? metadata.mergedFrom.split(",").map((s) => s.trim()).filter(Boolean) : []),
-  ];
-  for (const dup of rest) {
-    notes = [notes, dup.notes].filter(Boolean).join("\n");
-    if (!metadata.coordinates && (dup.metadata?.coordinates || dup.metadata?.coords)) {
-      metadata.coordinates = dup.metadata.coordinates || dup.metadata.coords;
-    }
-    if (!metadata.address && dup.metadata?.address) metadata.address = dup.metadata.address;
-    if (!metadata.photoUrl && dup.metadata?.photoUrl) metadata.photoUrl = dup.metadata.photoUrl;
-    mergedFrom.push(dup.id);
-    await db.timelineEvents.where("entityId").equals(dup.id).modify({ entityId: primary.id });
-    await deleteEntity(dup.id);
+  const primary = rows.find((row) => {
+    const blob = `${row.classification || ""} ${row.role || ""}`;
+    return /verified/i.test(blob) && !/unverified/i.test(blob);
+  }) || rows[0];
+  for (const duplicate of rows) {
+    if (duplicate.id === primary.id) continue;
+    await mergeLocations(primary.id, duplicate.id);
   }
-  metadata.mergedFrom = [...new Set(mergedFrom)].join(",");
-  await updateEntity(primary.id, { notes });
-  await db.entities.update(primary.id, { metadata });
   return primary.id;
 }
 

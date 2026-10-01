@@ -86,12 +86,14 @@ export async function listHubCases(): Promise<HubCase[]> {
 }
 
 async function nextCaseId() {
-  const ids = await db.cases.toCollection().primaryKeys();
-  const nums = ids
-    .map((id) => Number.parseInt(String(id).replace(/\D/g, ""), 10))
-    .filter((n) => Number.isFinite(n));
-  const next = (nums.length ? Math.max(...nums) : 0) + 1;
-  return `CASE-${String(next).padStart(4, "0")}`;
+  const ids = new Set((await db.cases.toCollection().primaryKeys()).map((id) => String(id)));
+  let stamp = Date.now();
+  let id = `CASE-${stamp.toString().slice(-4)}`;
+  while (ids.has(id)) {
+    stamp += 1;
+    id = `CASE-${stamp.toString().slice(-4)}`;
+  }
+  return id;
 }
 
 export async function createCase(input: {
@@ -135,6 +137,100 @@ export async function createCase(input: {
   };
   await db.cases.add(row);
   return row;
+}
+
+function lksMillis(value: string) {
+  const raw = value.trim();
+  if (!raw) return Number.NaN;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return new Date(`${raw}T12:00:00`).getTime();
+  return Date.parse(raw);
+}
+
+/** Seed the chronology and map from a case's last known sighting, once per case. */
+export async function ensureLastKnownSighting(caseRec: CaseRecord) {
+  const where = (caseRec.lksLocation || "").trim();
+  const whenRaw = (caseRec.lksAt || "").trim();
+  const stamp = lksMillis(whenRaw);
+  if (!Number.isFinite(stamp)) return null;
+  const eventId = `lks-${caseRec.id}`;
+
+  return db.transaction("rw", db.entities, db.timelineEvents, db.cases, async () => {
+    const already = await db.timelineEvents.get(eventId);
+    if (already) return already;
+    const titled = await db.timelineEvents
+      .where("caseId")
+      .equals(caseRec.id)
+      .filter((row) => /last known sighting/i.test(row.title))
+      .first();
+    if (titled) return titled;
+
+    const entities = await db.entities.where("caseId").equals(caseRec.id).toArray();
+    const subjectName = (caseRec.subjectName || caseRec.title || "").trim();
+    let subject = entities.find((row) => row.type === "person" && subjectName && namesLooselyMatch(row.name, subjectName));
+    if (!subject && subjectName) {
+      subject = {
+        id: crypto.randomUUID(),
+        caseId: caseRec.id,
+        name: subjectName,
+        type: "person",
+        role: "MISSING_PERSON",
+        notes: "Case subject.",
+        classification: "VERIFIED",
+        identifiers: [],
+        metadata: {},
+        createdAt: new Date().toISOString(),
+        provenanceTier: "primary",
+        uncorroborated: false,
+      };
+      await db.entities.add(subject);
+    }
+
+    let place = where
+      ? entities.find((row) => (row.type === "place" || row.type === "location") && namesLooselyMatch(row.name, where))
+      : undefined;
+    if (!place && where) {
+      place = {
+        id: crypto.randomUUID(),
+        caseId: caseRec.id,
+        name: where,
+        type: "place",
+        role: "last_seen",
+        notes: "Last known sighting location.",
+        classification: "VERIFIED",
+        identifiers: [],
+        metadata: { address: where, locationKind: "last_seen", searchStatus: "Cleared" },
+        createdAt: new Date().toISOString(),
+        provenanceTier: "primary",
+        uncorroborated: false,
+      };
+      await db.entities.add(place);
+    }
+
+    const row: TimelineEventRecord = {
+      id: eventId,
+      caseId: caseRec.id,
+      entityId: subject?.id || place?.id || "",
+      timestamp: stamp,
+      title: "Last Known Sighting (LKS)",
+      description: where
+        ? `Subject last seen in ${where}. Case record initial anchor.`
+        : "Case record initial anchor.",
+      sourceDocId: "",
+      isVerified: true,
+      confidenceTier: "TIER_1_VERIFIED",
+      tier: "primary",
+      origin: "manual",
+      sourceCitation: {
+        sourceId: "case-record",
+        sourceName: "Case record (NamUs / Live alert)",
+        sourceType: "text",
+        exactQuote: caseRec.lksCircumstances || caseRec.summary || where,
+      },
+    };
+    await db.timelineEvents.add(row);
+    await db.cases.update(caseRec.id, { updatedAt: Date.now() });
+    return row;
+  });
 }
 
 export async function updateCase(

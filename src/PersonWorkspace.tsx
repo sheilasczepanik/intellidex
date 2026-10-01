@@ -18,6 +18,7 @@ export default function PersonWorkspace({
   evidence,
   leaf,
   onUnpin,
+  onViewChronology,
 }: {
   activeCase: CaseRecord;
   person: EntityRecord;
@@ -26,6 +27,7 @@ export default function PersonWorkspace({
   evidence: EvidenceRecord[];
   leaf: PersonLeaf;
   onUnpin: () => void;
+  onViewChronology?: (placeId: string) => void;
 }) {
   const relationships = useLiveQuery(
     () => db.relationships.where("caseId").equals(activeCase.id).toArray(),
@@ -140,7 +142,13 @@ export default function PersonWorkspace({
           {places.length === 0 && personEvents.length === 0 ? (
             <Empty>No sightings or addresses tied to {person.name} yet.</Empty>
           ) : (
-            <LocationsMap activeCase={activeCase} places={places} events={personEvents} />
+            <LocationsMap
+              activeCase={activeCase}
+              places={places}
+              events={events}
+              initialSubjectId={person.id}
+              onViewChronology={onViewChronology}
+            />
           )}
         </div>
       )}

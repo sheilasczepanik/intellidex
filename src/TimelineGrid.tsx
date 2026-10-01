@@ -16,7 +16,7 @@ const GROUP_CHROME: Record<SwimlaneGroupId, {
   Icon: typeof User;
 }> = {
   subject: {
-    title: (subjectName) => `Subject Movements (${subjectName?.trim() || "Maura Murray"})`,
+    title: (subjectName) => `Subject Movements${subjectName?.trim() ? ` (${subjectName.trim()})` : ""}`,
     iconWrap: "bg-blue-600 text-white",
     Icon: User,
   },

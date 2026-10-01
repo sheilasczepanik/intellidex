@@ -82,6 +82,10 @@ export function uniqueDayKeys(timestamps: number[]) {
   return [...new Set(timestamps.map(localDayKey))].sort();
 }
 
+export function earliestDayKey(timestamps: number[]) {
+  return uniqueDayKeys(timestamps.filter((ts) => Number.isFinite(ts)))[0] ?? "";
+}
+
 export function eventInHourWindow(ts: number, startH: number, endH: number) {
   const d = new Date(ts);
   const h = d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600;

@@ -1,6 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { lookupNamus } from "../server/namusLookup.ts";
-import { NAMUS_MP54, namusOk } from "../src/lib/namusRecord.ts";
 
 export const maxDuration = 30;
 
@@ -24,6 +23,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).json(body);
   } catch (err) {
     console.error("[namus] handler failed", err);
-    return res.status(200).json(namusOk(NAMUS_MP54, "cached"));
+    return res.status(200).json({ success: false, error: "NamUs lookup failed." });
   }
 }

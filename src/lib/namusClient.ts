@@ -1,8 +1,9 @@
-import { NAMUS_MP54, namusOk, type NamusLookupResponse } from "./namusRecord";
+import { namusOk, type NamusLookupResponse } from "./namusRecord";
 
 export async function fetchNamusRecord(id: string): Promise<NamusLookupResponse> {
+  const clean = id.trim().toUpperCase();
   try {
-    const res = await fetch(`/api/namus?id=${encodeURIComponent(id.trim())}`);
+    const res = await fetch(`/api/namus?id=${encodeURIComponent(clean)}`);
     const text = await res.text();
     let json: NamusLookupResponse = {};
     try {
@@ -16,13 +17,9 @@ export async function fetchNamusRecord(id: string): Promise<NamusLookupResponse>
     if (json.record?.fullName) {
       return namusOk(json.record, json.source ?? "cached");
     }
-    if (!res.ok) {
-      return namusOk(NAMUS_MP54, "cached");
-    }
-    return json.success === false
-      ? json
-      : namusOk(NAMUS_MP54, "cached");
+    if (json.success === false) return json;
+    return { success: false, error: clean ? `No NamUs record found for ${clean}.` : "Enter a NamUs ID." };
   } catch {
-    return namusOk(NAMUS_MP54, "cached");
+    return { success: false, error: "NamUs lookup failed." };
   }
 }

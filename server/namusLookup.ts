@@ -136,9 +136,9 @@ async function fetchPage(url: string) {
 export async function lookupNamus(query: string): Promise<NamusLookupResponse> {
   const parsed = extractNamusId(query);
   if (!parsed) {
-    return { success: false, error: "Enter a NamUs ID such as MP54, NamUs #54, or a NamUs case URL." };
+    return { success: false, error: "Enter a NamUs ID such as MP1028, NamUs #, or a NamUs case URL." };
   }
-  const fallback = mockFor(parsed.numeric) ?? NAMUS_MP54;
+  const fixture = mockFor(parsed.numeric);
 
   try {
     let html = "";
@@ -152,12 +152,14 @@ export async function lookupNamus(query: string): Promise<NamusLookupResponse> {
     }
     const live = html ? parseNamusHtml(html, parsed.mp) : {};
     if (isComplete(live)) {
-      const record = mergeRecord(emptyRecord(parsed.mp), live);
-      return namusOk(mockFor(parsed.numeric) ? mergeRecord(fallback, live) : record, "live");
+      const record = mergeRecord(fixture ?? emptyRecord(parsed.mp), live);
+      return namusOk(record, "live");
     }
-    return namusOk(fallback, "cached");
+    if (fixture) return namusOk(fixture, "cached");
+    return { success: false, error: `No NamUs record found for ${parsed.mp}.` };
   } catch (err) {
     console.error("[namus] lookup failed", err);
-    return namusOk(fallback, "cached");
+    if (fixture) return namusOk(fixture, "cached");
+    return { success: false, error: `NamUs lookup failed for ${parsed.mp}.` };
   }
 }
