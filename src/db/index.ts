@@ -489,7 +489,7 @@ export async function createTimelineEvent(input: {
 
 export async function updateTimelineEvent(
   id: string,
-  patch: Partial<Pick<TimelineEventRecord, "entityId" | "timestamp" | "title" | "description" | "isVerified">>,
+  patch: Partial<Pick<TimelineEventRecord, "entityId" | "timestamp" | "title" | "description" | "isVerified" | "confidenceTier" | "timeEnd" | "latitude" | "longitude" | "flaggedNoise">>,
 ) {
   const rec = await db.timelineEvents.get(id);
   if (!rec) return;

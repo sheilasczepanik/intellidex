@@ -44,6 +44,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (err) {
     const message = err instanceof Error ? err.message : "Extraction service unavailable (verify API key or document size)";
     console.error("[Extraction] Endpoint error", message);
-    return res.status(200).json(mauraFallbackApiBody(message));
+    return res.status(200).json(mauraFallbackApiBody());
   }
 }

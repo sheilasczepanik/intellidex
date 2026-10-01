@@ -15,9 +15,9 @@ import {
 } from "./types";
 
 const MARK =
-  "cursor-pointer rounded px-0.5 bg-amber-400/20 border-b-2 border-amber-400 text-inherit box-decoration-clone";
+  "cursor-pointer rounded px-0.5 bg-amber-400/25 border-b-2 border-amber-400 text-inherit box-decoration-clone extract-hit";
 const MARK_ACTIVE =
-  "cursor-pointer rounded px-0.5 bg-amber-400/40 border-b-2 border-amber-500 shadow-sm text-inherit box-decoration-clone";
+  "cursor-pointer rounded px-0.5 bg-amber-400/25 border-b-2 border-amber-400 text-inherit box-decoration-clone extract-hit extract-hit-active shadow-sm";
 
 export function CitationPill({
   citation,
@@ -66,6 +66,7 @@ type Props = {
   showClose?: boolean;
   onImageRegionSelect?: (payload: { box: SourceBoundingBox; previewDataUrl: string; x: number; y: number }) => void;
   onTextSelect?: (payload: { text: string; x: number; y: number; pageNumber?: number }) => void;
+  onVisiblePage?: (page: number) => void;
 };
 
 export default function SourceDocumentViewer({
@@ -78,6 +79,7 @@ export default function SourceDocumentViewer({
   showClose = true,
   onImageRegionSelect,
   onTextSelect,
+  onVisiblePage,
 }: Props) {
   const kind = evidence ? inferSourceType(evidence) : citation?.sourceType ?? "text";
   const title = evidence?.fileName || citation?.sourceName || "Source";
@@ -339,6 +341,7 @@ export default function SourceDocumentViewer({
             anchors={anchors}
             activeId={activeId}
             onSelectAnchor={onSelectAnchor}
+            onVisiblePage={onVisiblePage}
           />
         ) : kind === "pdf" && (evidence.fileBase64 || blobUrl) && busy ? (
           <div className="flex min-h-[50vh] items-center justify-center text-[13px] text-slate-500">Loading pages…</div>

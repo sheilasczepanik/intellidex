@@ -59,42 +59,20 @@ export type ExtractedEvent = {
   tier?: "primary" | "secondary";
 };
 
-export const EXTRACT_SYSTEM = `You are INTELLIDEX, an elite investigative intelligence extraction engine for missing-person and case-file documents.
-Analyze the provided case document and extract ALL verified investigative entities — every named person, place, timestamp, vehicle, and exhibit you can support with a quote. Do not stop after a single card.
-
-Return ONLY a JSON object (no markdown) of this shape:
+export const EXTRACT_SYSTEM = `You are an investigative document analyst. Examine this scanned case document or report image.
+Extract all verified investigative facts and return strictly valid JSON matching this schema:
 {
-  "entities": [
+  entities: [
     {
-      "type": "person" | "location" | "timeline_event" | "vehicle" | "evidence",
-      "title": "concise name or summary (e.g. Butch Atwood (Bus Driver), Route 112 Crash Site, 1996 Saturn SL2)",
-      "category": "display badge (e.g. Primary Witness, Last Known Sighting, Physical Evidence)",
-      "date": "ISO date (YYYY-MM-DD) or source date/time text if applicable, else empty string",
-      "quote": "EXACT contiguous snippet copied from the document (used to highlight the PDF text layer)",
-      "anchorText": "same verbatim snippet, or a slightly shorter unique phrase that appears in the document",
-      "confidence": 80,
-      "details": "1-2 sentence investigative context summary",
-      "role": "optional person role: subject | witness | investigator | family | other"
+      type: 'Person' | 'Location' | 'Timestamp' | 'Vehicle' | 'Evidence',
+      title: string,
+      details: string,
+      exactSnippet: string, // MUST be a verbatim contiguous string from the image for text anchoring
+      confidence: number // between 80 and 99
     }
   ]
 }
-
-Extract ALL of the following whenever they appear (examples from a typical New Hampshire missing-person file):
-1. PERSONS — e.g. Maura Murray, Fred Murray, Butch Atwood, Cecil Smith, Kathleen Murray, Faith Westman. One card per person; include role.
-2. LOCATIONS — e.g. Route 112 Woodsville NH, Kennedy Hall UMass Amherst, Bradley Hill Road, Londonderry tower.
-3. TIMESTAMPS / DATES — e.g. Feb 9 2004 15:40 ATM, 19:27 911 call, 19:30 bus contact, 19:46 Cecil Smith arrival. One card per distinct clock time when possible.
-4. VEHICLES / EVIDENCE — e.g. 1996 Black Saturn SL2, rag in tailpipe, missing backpack & cell phone.
-
-Rules:
-- quote and anchorText MUST be copied character-for-character from the source so the document viewer can highlight them. Prefer 8–160 characters of unique text.
-- Feed facts from the document text (and any attached page images). Do not invent names, plates, or dates that are not in the source.
-- Extract despite OCR errors or redactions: dates, locations, department names, call numbers, officer names.
-- Normalize obvious OCR typos (MASSACHUSEATS → Massachusetts) in title/details; keep quote verbatim.
-- Distinguish report/file dates from incident dates. Prefer incident / last-known-sighting time for timeline_event.date.
-- confidence is an integer 80-99 (typically 85-98) reflecting how clearly the quote supports the card.
-- One card per distinct person, place, timestamped event, vehicle, or exhibit. Do not collapse a crash site and a later search grid into one location.
-- Exhaustive: if the document names six people, return six person cards. Empty arrays are a failure.
-- If almost nothing is recoverable, still return identifiers (call number, agency, report date) rather than an empty array.`;
+If the text has OCR typos or scanning artifacts, understand the true context (e.g. state names, timestamps), but ensure \`exactSnippet\` matches the visible text on the page so it can be highlighted.`;
 
 export function unwrapModelJson(raw: string) {
   let s = raw.trim();
@@ -129,8 +107,11 @@ export function isIntelExtractCard(row: unknown): boolean {
   if (!row || typeof row !== "object") return false;
   const r = row as Record<string, unknown>;
   const t = String(r.type ?? "").toLowerCase().replace(/[\s-]+/g, "_");
-  if (!/^(person|location|timeline_event|timeline|vehicle|evidence|exhibit)$/.test(t)) return false;
-  return Boolean(String(r.title ?? r.name ?? "").trim() || String(r.quote ?? r.details ?? "").trim());
+  if (!/^(person|location|timestamp|timeline_event|timeline|vehicle|evidence|exhibit)$/.test(t)) return false;
+  return Boolean(
+    String(r.title ?? r.name ?? "").trim()
+    || String(r.exactSnippet ?? r.quote ?? r.details ?? "").trim(),
+  );
 }
 
 function normalizeCategory(value: unknown): ExtractCategory {
@@ -171,10 +152,10 @@ function normalizeEvent(row: unknown): ExtractedEvent {
   const composedTs = [date, time].filter(Boolean).join(" ");
   const category = normalizeCategory(typeKey || r.category || r.newEntityType);
   const entityType = normalizeEntityType(r.entityType ?? r.newEntityType ?? typeKey ?? r.category, category);
-  const quote = String(r.quote ?? r.sourceReference ?? r.rawQuote ?? r.exactQuote ?? r.snippet ?? "").trim();
-  const anchorText = String(r.anchorText ?? "").trim();
+  const quote = String(r.exactSnippet ?? r.quote ?? r.sourceReference ?? r.rawQuote ?? r.exactQuote ?? r.snippet ?? "").trim();
+  const anchorText = String(r.anchorText ?? r.exactSnippet ?? "").trim();
   const rawQuote = quote || anchorText;
-  const exactQuote = String(r.exactQuote ?? quote ?? anchorText).trim();
+  const exactQuote = String(r.exactSnippet ?? r.exactQuote ?? quote ?? anchorText).trim();
   const ts = r.timestamp === null || r.timestamp === undefined ? composedTs : String(r.timestamp).trim();
   const timestampLabel = String(r.timestampLabel ?? (composedTs || ts || "Unknown")).trim() || "Unknown";
   const title = String(r.title ?? r.name ?? "Untitled fact").trim() || "Untitled fact";
@@ -203,7 +184,7 @@ function normalizeEvent(row: unknown): ExtractedEvent {
     confidence,
     citation: String(r.sourceReference ?? r.citation ?? (pageNumber ? `p.${pageNumber}` : displayBadge || category)),
     pageNumber,
-    exactQuote: anchorText || exactQuote || rawQuote,
+    exactQuote: exactQuote || anchorText || rawQuote,
     boundingBox,
     tier: String(r.tier ?? "").toLowerCase() === "secondary" ? "secondary" : "primary",
   };
@@ -505,7 +486,7 @@ export const EXTRACT_MODEL_MAX_CHARS = 16_000;
 export const CLAUDE_MAX_CHARS = EXTRACT_MODEL_MAX_CHARS;
 export const EXTRACT_SERVICE_UNAVAILABLE =
   "Extraction service unavailable (verify API key or document size)";
-export const EXTRACT_CORE_PAGES = 5;
+export const EXTRACT_CORE_PAGES = 1;
 export const CLAUDE_MAX_PAGES = EXTRACT_CORE_PAGES;
 export const CLAUDE_RETRY_PAGES = EXTRACT_CORE_PAGES;
 export const EXTRACT_CHUNK_TRIGGER = EXTRACT_MAX_CHARS;
@@ -655,8 +636,8 @@ export function userExtractPrompt(
   const excerpt = prioritizeLegalFacts(text, opts?.maxChars ?? EXTRACT_MODEL_MAX_CHARS);
   return [
     `Source file: ${fileName}`,
-    "Return JSON { \"entities\": [ ... ] } covering person, location, timeline_event, vehicle, and evidence.",
-    "Extract ALL named persons, locations, timestamps/dates, vehicles, and evidence. Each card needs quote (and optional anchorText) copied EXACTLY from the source for highlighting.",
+    "Return JSON { \"entities\": [ ... ] } covering Person, Location, Timestamp, Vehicle, and Evidence.",
+    "Each card needs exactSnippet copied EXACTLY as a contiguous string visible on the page for highlighting.",
     "Extract any recognizable investigative facts (dates, locations, department names, call numbers, officer names) despite OCR errors or redactions.",
     "OCR cleanup: correct obvious scanning typos, expand garbled place names, and keep incident dates separate from report dates.",
     opts?.summary

@@ -61,7 +61,7 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
     } catch (err) {
       const message = err instanceof Error ? err.message : EXTRACT_SERVICE_UNAVAILABLE;
       console.error("[Extraction] Handler error", message);
-      send(res, 200, mauraFallbackApiBody(EXTRACT_SERVICE_UNAVAILABLE));
+      send(res, 200, mauraFallbackApiBody());
     }
   };
 

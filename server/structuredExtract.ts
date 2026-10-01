@@ -23,16 +23,17 @@ export class ExtractHttpError extends Error {
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "sk-unconfigured" });
 
 export const intelExtractCardSchema = z.object({
-  type: z.enum(["person", "location", "timeline_event", "vehicle", "evidence"]),
+  type: z.string(),
   title: z.string(),
-  category: z.string(),
+  category: z.string().optional(),
   date: z.string().optional(),
-  quote: z.string(),
+  exactSnippet: z.string().optional(),
+  quote: z.string().optional(),
   anchorText: z.string().optional(),
   confidence: z.number().optional(),
   details: z.string().optional(),
   role: z.string().optional(),
-});
+}).passthrough();
 
 export const structuredEntitySchema = z.object({
   name: z.string(),
@@ -143,18 +144,22 @@ export async function runStructuredExtraction(input: {
   images?: MediaPart[];
 }): Promise<{ bundle: ExtractBundle; engine: string }> {
   void input.engine;
+  const images = (input.images ?? []).slice(0, 1);
+  const visionFirst = images.length > 0;
   const cap = Math.min(input.maxChars ?? EXTRACT_MODEL_MAX_CHARS, EXTRACT_MODEL_MAX_CHARS);
-  const source = prioritizeLegalFacts(input.text || "Extract facts visible in the attached media.", cap);
-  const prompt = userExtractPrompt(source, input.fileName, input.entities, {
-    summary: input.summary,
-    maxPages: input.maxPages,
-    maxChars: cap,
-  });
+  const prompt = visionFirst
+    ? `Examine this scanned case document or report image (${input.fileName}). Extract all verified investigative facts and return strictly valid JSON matching the system schema. exactSnippet must be a verbatim contiguous string visible on the page.`
+    : userExtractPrompt(
+      prioritizeLegalFacts(input.text || "Extract facts from the source.", cap),
+      input.fileName,
+      input.entities,
+      { summary: input.summary, maxPages: input.maxPages, maxChars: cap },
+    );
   const parsed = await extractWithGpt4o({
     apiKey: input.apiKey,
     model: input.model || "gpt-4o",
     prompt,
-    images: input.images,
+    images,
   });
   return { bundle: structuredToBundle(parsed), engine: "gpt-4o" };
 }
@@ -178,6 +183,7 @@ async function extractWithGpt4o(input: {
       model: "gpt-4o",
       response_format: { type: "json_object" },
       temperature: 0.1,
+      max_tokens: 1500,
       messages: [
         { role: "system", content: EXTRACT_SYSTEM },
         { role: "user", content: userContent },

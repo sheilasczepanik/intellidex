@@ -83,7 +83,7 @@ const ENTITIES: EntityRecord[] = [
   { id: "ent-maura", caseId: "CASE-0041", name: "Maura Murray", type: "person", role: "MISSING_PERSON", notes: "Nursing student. Last seen after a crash on Route 112." },
   { id: "ent-brennan", caseId: "CASE-0041", name: "A. Brennan", type: "person", role: "UNVERIFIED", notes: "Name appears in 14 documents, identity not confirmed." },
   { id: "ent-sund", caseId: "CASE-0041", name: "Halvard Sund", type: "person", role: "ASSOCIATE", notes: "Named on two shell registrations." },
-  { id: "ent-kestrel", caseId: "CASE-0041", name: "Route 112 crash site", type: "place", role: "last_seen", notes: "Last known sighting. Weathered crash, engine still running.", metadata: { locationKind: "last_seen", searchStatus: "Cleared", address: "Haverhill, NH", dateLogged: "2004-02-09" } },
+  { id: "ent-kestrel", caseId: "CASE-0041", name: "Route 112 crash site", type: "place", role: "last_seen", notes: "Last known sighting. Weathered crash, engine still running.", metadata: { locationKind: "last_seen", searchStatus: "Cleared", address: "Haverhill, NH", dateLogged: "2004-02-09", coordinates: "44.1186, -71.9362" } },
   { id: "ent-bayc", caseId: "CASE-0041", name: "Woods east of Weathered Corner", type: "place", role: "search_grid", notes: "Ground search grids and trail canvass.", metadata: { locationKind: "search_grid", searchStatus: "Active Search" } },
 
   { id: "ent-blackwell", caseId: "CASE-0031", name: "Eleanor Blackwell", type: "person", role: "SUSPECT", notes: "Deceased. Estate still in probate." },
@@ -107,7 +107,7 @@ const atClock = (h: number, m: number) => new Date(2024, 1, 14, h, m).getTime();
 const TIMELINE: TimelineEventRecord[] = [
   { id: "te-e1", caseId: "CASE-0038", entityId: "ent-vance", timestamp: atClock(18, 40), title: "Leaves office, Kestrel Row", description: "Door log, west entrance", sourceDocId: "ev-report", isVerified: true },
   { id: "te-e2", caseId: "CASE-0038", entityId: "ent-vance", timestamp: atClock(19, 15), title: "Fuel stop, Route 9", description: "Debit authorisation 41.20", sourceDocId: "ev-report", isVerified: true },
-  { id: "te-a1", caseId: "CASE-0038", entityId: "ent-webb", timestamp: atClock(20, 10), title: "Motel alibi", description: "Claims in Room 214 until 06:00", sourceDocId: "ev-report", isVerified: false },
+  { id: "te-a1", caseId: "CASE-0038", entityId: "ent-webb", timestamp: atClock(20, 10), timeEnd: "06:00", confidenceTier: "TIER_2_UNVERIFIED", title: "Motel alibi", description: "Civilian tip: claims in Room 214 until 06:00", sourceDocId: "ev-report", isVerified: false },
   { id: "te-t2", caseId: "CASE-0038", entityId: "ent-volvo", timestamp: atClock(20, 51), title: "Toll Booth Exit — Gate 4", description: "Northbound plate read", sourceDocId: "ev-cctv", isVerified: true },
   { id: "te-t3", caseId: "CASE-0038", entityId: "ent-volvo", timestamp: atClock(20, 58), title: "Ping 42 mi north", description: "Tower NB-207", sourceDocId: "ev-report", isVerified: true },
 ];

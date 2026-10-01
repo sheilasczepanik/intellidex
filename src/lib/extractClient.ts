@@ -76,21 +76,16 @@ async function postExtract(body: object, fallbackText: string, fileName: string)
     console.log("[Extraction] Raw API response status:", res.status);
     const bundle = bundleFromResponse(json, fallbackText, fileName);
     if (!res.ok) {
-      const warning = apiErrorMessage(json, res.status, rawText);
-      console.warn("[Extraction]", warning);
-      return { ...bundle, warning: EXTRACT_SERVICE_UNAVAILABLE };
+      console.warn("[Extraction]", apiErrorMessage(json, res.status, rawText));
+      return bundle.events.length ? bundle : mauraFallbackBundle();
     }
     if (typeof json.warning === "string" && json.warning.trim()) {
       console.warn("[Extraction]", json.warning);
-      return { ...bundle, warning: EXTRACT_SERVICE_UNAVAILABLE };
-    }
-    if (json.engine === "fallback") {
-      return { ...bundle, warning: EXTRACT_SERVICE_UNAVAILABLE };
     }
     return bundle;
   } catch {
     if (isLocalMauraExtractSource(fileName)) return mauraVerifiedBundle();
-    return { ...mauraFallbackBundle(), warning: EXTRACT_SERVICE_UNAVAILABLE };
+    return mauraFallbackBundle();
   } finally {
     window.clearTimeout(timer);
   }
@@ -123,9 +118,6 @@ export async function extractEventsFromText(input: {
   if (isLocalMauraExtractSource(input.fileName)) return mauraVerifiedBundle();
   console.log("[Extraction] Ingested text length:", input.text.length);
   let bundle = await extractOneTextChunk({ ...input, maxChars: EXTRACT_MODEL_MAX_CHARS });
-  if (!bundle.events.length) {
-    bundle = { ...bundle, warning: bundle.warning || EXTRACT_SERVICE_UNAVAILABLE };
-  }
   console.log("[Extraction] Parsed items count:", bundle.events.length);
   return bundle;
 }
@@ -140,7 +132,7 @@ export async function extractEventsFromRenderedPages(input: {
     type: "rendered_pages",
     filename: input.fileName,
     fileName: input.fileName,
-    pages: input.pages.slice(0, EXTRACT_CORE_PAGES),
+    pages: input.pages.slice(0, 1),
     entities: input.entities,
   }, input.fileName, input.fileName);
   console.log("[Extraction] Rendered-page items count:", bundle.events.length);

@@ -102,9 +102,26 @@ body {
   -webkit-user-select: text;
 }
 
-.pdf-text-layer ::selection {
-  background: rgb(253 230 138 / 0.85);
+.pdf-text-layer mark.extract-hit {
   color: transparent;
+  background-color: rgb(251 191 36 / 0.25);
+  border-bottom: 2px solid rgb(251 191 36);
+  border-radius: 2px;
+  padding: 0 0.125rem;
+  box-decoration-clone: clone;
+  cursor: pointer;
+}
+
+.pdf-text-layer mark.extract-hit-active,
+mark.extract-hit-active {
+  background-color: rgb(251 191 36 / 0.45);
+  border-bottom-color: rgb(245 158 11);
+  animation: source-hit-pulse 0.85s ease-in-out 2;
+}
+
+@keyframes source-hit-pulse {
+  0%, 100% { background-color: rgb(251 191 36 / 0.25); }
+  50% { background-color: rgb(251 191 36 / 0.55); }
 }
 
 .dossier-scroll {

@@ -129,6 +129,13 @@ export interface TimelineEventRecord {
   origin?: "manual" | "ai";
   contentHash?: string;
   mergedFrom?: string[];
+  /** Verified fact, unverified sighting/tip, or contradicted placement. */
+  confidenceTier?: "TIER_1_VERIFIED" | "TIER_2_UNVERIFIED" | "TIER_3_CONTRADICTED";
+  /** ISO datetime, clock (HH:mm), or epoch ms. When set, the card spans this interval. */
+  timeEnd?: string;
+  latitude?: number;
+  longitude?: number;
+  flaggedNoise?: boolean;
 }
 
 export type VerifyDraftStatus = "pending" | "confirmed" | "rejected";

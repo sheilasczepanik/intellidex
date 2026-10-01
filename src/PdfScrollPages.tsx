@@ -1,11 +1,53 @@
 import { useEffect, useRef, useState } from "react";
-import { TextLayer, Util, type PDFDocumentProxy } from "pdfjs-dist";
+import { TextLayer, type PDFDocumentProxy } from "pdfjs-dist";
 import { locateCardHighlight } from "./lib/quoteAnchors";
-import type { SourceBoundingBox, SourceCitation } from "./types";
-
-type OverlayBox = SourceBoundingBox & { id: string; title?: string };
+import type { SourceCitation } from "./types";
 
 type QuoteAnchor = { id: string; quote: string; pageNumber?: number; title?: string };
+
+const MARK_CLS = "extract-hit bg-amber-400/25 border-b-2 border-amber-400 rounded px-0.5";
+const MARK_ACTIVE_CLS = `${MARK_CLS} extract-hit-active`;
+
+function paintMarks(
+  layerEl: HTMLDivElement,
+  quotes: QuoteAnchor[],
+  activeId?: string | null,
+  onSelectAnchor?: (id: string) => void,
+) {
+  const nodeSpans = [...layerEl.querySelectorAll("span")].filter((el) => (el.textContent || "").trim());
+  let hay = "";
+  const spanMap = nodeSpans.map((el) => {
+    const start = hay.length;
+    hay += el.textContent || "";
+    const rec = { start, end: hay.length, el };
+    hay += " ";
+    return rec;
+  });
+  const firstMarked = new Set<string>();
+  for (const a of quotes) {
+    const loc = locateCardHighlight(hay, { quote: a.quote, exactQuote: a.quote, title: a.title });
+    if (!loc) continue;
+    const active = a.id === (activeId || "focus");
+    for (const span of spanMap) {
+      if (span.end <= loc.start || span.start >= loc.end) continue;
+      if (span.el.querySelector("mark[data-verify-quote]")) continue;
+      const mark = document.createElement("mark");
+      mark.className = active ? MARK_ACTIVE_CLS : MARK_CLS;
+      mark.setAttribute("data-verify-quote", a.id);
+      mark.title = a.title || a.quote;
+      if (!firstMarked.has(a.id)) {
+        mark.id = `source-hit-${a.id}`;
+        firstMarked.add(a.id);
+      }
+      while (span.el.firstChild) mark.appendChild(span.el.firstChild);
+      span.el.appendChild(mark);
+      mark.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        onSelectAnchor?.(a.id);
+      });
+    }
+  }
+}
 
 function PdfPage({
   pdf,
@@ -15,6 +57,7 @@ function PdfPage({
   quotes,
   activeId,
   onSelectAnchor,
+  onVisiblePage,
   eager,
 }: {
   pdf: PDFDocumentProxy;
@@ -24,28 +67,32 @@ function PdfPage({
   quotes: QuoteAnchor[];
   activeId?: string | null;
   onSelectAnchor?: (id: string) => void;
+  onVisiblePage?: (page: number) => void;
   eager: boolean;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
+  const visiblePageCb = useRef(onVisiblePage);
+  visiblePageCb.current = onVisiblePage;
   const [visible, setVisible] = useState(eager);
   const [size, setSize] = useState({ w: 0, h: 720 });
-  const [boxes, setBoxes] = useState<OverlayBox[]>([]);
-  const [tip, setTip] = useState<{ x: number; y: number; title: string } | null>(null);
 
   useEffect(() => {
     const el = wrapRef.current;
-    if (!el || visible) return;
+    if (!el) return;
     const io = new IntersectionObserver(
       ([entry]) => {
-        if (entry?.isIntersecting) setVisible(true);
+        if (entry?.isIntersecting) {
+          setVisible(true);
+          if ((entry.intersectionRatio || 0) >= 0.35) visiblePageCb.current?.(pageNumber);
+        }
       },
-      { root: el.closest("[data-pdf-scroll]"), rootMargin: "600px 0px", threshold: 0.01 },
+      { root: el.closest("[data-pdf-scroll]"), rootMargin: "600px 0px", threshold: [0.01, 0.35, 0.6] },
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [visible]);
+  }, [pageNumber]);
 
   const quoteKey = quotes.map((q) => `${q.id}:${q.quote}:${q.pageNumber ?? ""}`).join("|");
 
@@ -78,90 +125,7 @@ function PdfPage({
         layer = new TextLayer({ textContentSource: content, container: layerEl, viewport });
         await layer.render();
         if (cancelled) return;
-        const items = content.items.flatMap((it) => {
-          if (typeof it !== "object" || !it || !("str" in it) || !("transform" in it)) return [];
-          const row = it as { str: string; transform: number[]; width: number; height: number };
-          return row.str ? [row] : [];
-        });
-        let hay = "";
-        const spans: { start: number; end: number; item: (typeof items)[number] }[] = [];
-        for (const item of items) {
-          const start = hay.length;
-          hay += item.str;
-          spans.push({ start, end: hay.length, item });
-          hay += " ";
-        }
-        const next: OverlayBox[] = [];
-        const toBox = (
-          item: (typeof items)[number],
-          span: { start: number; end: number },
-          loc: { start: number; end: number },
-          id: string,
-          title?: string,
-        ): OverlayBox | null => {
-          const overlapStart = Math.max(loc.start, span.start);
-          const overlapEnd = Math.min(loc.end, span.end);
-          const chars = Math.max(item.str.length, 1);
-          const i0 = Math.max(0, overlapStart - span.start);
-          const i1 = Math.min(chars, overlapEnd - span.start);
-          if (i1 - i0 < 1) return null;
-          const tx = Util.transform(viewport.transform, item.transform);
-          const height = Math.hypot(tx[2], tx[3]);
-          const fullWidth = item.width * Math.hypot(tx[0], tx[1]);
-          const clippedWidth = fullWidth * ((i1 - i0) / chars);
-          const clippedX = tx[4] + fullWidth * (i0 / chars);
-          const widthPct = (clippedWidth / viewport.width) * 100;
-          const heightPct = (height / viewport.height) * 100;
-          if (widthPct < 0.12 || heightPct < 0.12) return null;
-          if (widthPct > 72 && (i1 - i0) < 28) return null;
-          return {
-            id,
-            title,
-            x: (clippedX / viewport.width) * 100,
-            y: ((tx[5] - height) / viewport.height) * 100,
-            width: widthPct,
-            height: heightPct,
-          };
-        };
-        const mergeBoxes = (raw: OverlayBox[]) => {
-          const grouped = new Map<string, OverlayBox[]>();
-          for (const box of raw) {
-            const list = grouped.get(box.id) ?? [];
-            list.push(box);
-            grouped.set(box.id, list);
-          }
-          const merged: OverlayBox[] = [];
-          for (const [id, list] of grouped) {
-            const sorted = [...list].sort((a, b) => a.y - b.y || a.x - b.x);
-            let cur: OverlayBox | null = null;
-            for (const box of sorted) {
-              if (
-                cur
-                && Math.abs(cur.y - box.y) < 0.45
-                && Math.abs(cur.height - box.height) < 0.45
-                && box.x <= cur.x + cur.width + 0.7
-              ) {
-                const right = Math.max(cur.x + cur.width, box.x + box.width);
-                cur = { ...cur, x: Math.min(cur.x, box.x), width: right - Math.min(cur.x, box.x), height: Math.max(cur.height, box.height) };
-              } else {
-                if (cur) merged.push(cur);
-                cur = { ...box, id };
-              }
-            }
-            if (cur) merged.push(cur);
-          }
-          return merged;
-        };
-        for (const a of quotes) {
-          const loc = locateCardHighlight(hay, { quote: a.quote, exactQuote: a.quote, title: a.title });
-          if (!loc) continue;
-          for (const span of spans) {
-            if (span.end <= loc.start || span.start >= loc.end) continue;
-            const box = toBox(span.item, span, loc, a.id, a.title || a.quote);
-            if (box) next.push(box);
-          }
-        }
-        if (!cancelled) setBoxes(mergeBoxes(next));
+        paintMarks(layerEl, quotes, activeId, onSelectAnchor);
       } catch {
         /* keep placeholder */
       }
@@ -170,7 +134,18 @@ function PdfPage({
       cancelled = true;
       layer?.cancel();
     };
-  }, [visible, pdf, pageNumber, zoom, hostWidth, quoteKey, activeId]);
+  }, [visible, pdf, pageNumber, zoom, hostWidth, quoteKey, onSelectAnchor]);
+
+  useEffect(() => {
+    const layerEl = textLayerRef.current;
+    if (!layerEl) return;
+    layerEl.querySelectorAll("mark[data-verify-quote]").forEach((node) => {
+      const mark = node as HTMLElement;
+      const id = mark.getAttribute("data-verify-quote");
+      const active = id === (activeId || "focus");
+      mark.className = active ? MARK_ACTIVE_CLS : MARK_CLS;
+    });
+  }, [activeId, visible, quoteKey]);
 
   return (
     <div
@@ -179,65 +154,14 @@ function PdfPage({
       data-pdf-page={pageNumber}
       className="relative w-full max-w-[920px] overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm"
       style={{ minHeight: size.h || 720 }}
-      onMouseMove={(e) => {
-        const wrap = wrapRef.current;
-        if (!wrap || !boxes.length) return;
-        const r = wrap.getBoundingClientRect();
-        const x = ((e.clientX - r.left) / r.width) * 100;
-        const y = ((e.clientY - r.top) / r.height) * 100;
-        const hit = [...boxes].reverse().find((b) => x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + Math.max(b.height, 1.2));
-        setTip(hit?.title ? { x: e.clientX, y: e.clientY, title: hit.title } : null);
-      }}
-      onClick={(e) => {
-        if (!onSelectAnchor || !boxes.length) return;
-        const sel = window.getSelection();
-        if (sel && !sel.isCollapsed && sel.toString().trim()) return;
-        const wrap = wrapRef.current;
-        if (!wrap) return;
-        const r = wrap.getBoundingClientRect();
-        const x = ((e.clientX - r.left) / r.width) * 100;
-        const y = ((e.clientY - r.top) / r.height) * 100;
-        const hit = [...boxes].reverse().find((b) => x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height);
-        if (hit) onSelectAnchor(hit.id);
-      }}
     >
       {visible ? (
         <>
           <canvas ref={canvasRef} className="pointer-events-none block h-auto w-full bg-white" />
-          <div className="pointer-events-none absolute inset-0 z-[1]">
-            {boxes.map((box, i) => {
-              const active = box.id === (activeId || "focus");
-              const firstOfId = boxes.findIndex((b) => b.id === box.id) === i;
-              return (
-                <span
-                  key={`${box.id}-${i}`}
-                  id={firstOfId ? `source-hit-${box.id}` : undefined}
-                  data-verify-quote={box.id}
-                  title={box.title}
-                  className={`absolute rounded-sm border-b-2 ${active ? "border-amber-500 bg-amber-400/40 shadow-sm" : "border-amber-400 bg-amber-400/20"}`}
-                  style={{
-                    left: `${box.x}%`,
-                    top: `${box.y}%`,
-                    width: `${box.width}%`,
-                    height: `${box.height}%`,
-                    mixBlendMode: "multiply",
-                  }}
-                />
-              );
-            })}
-          </div>
           <div ref={textLayerRef} className="pdf-text-layer" />
         </>
       ) : (
         <div className="flex h-[720px] items-center justify-center text-[12px] text-slate-400">Page {pageNumber}</div>
-      )}
-      {tip && (
-        <div
-          className="pointer-events-none fixed z-[70] max-w-xs rounded-md border border-amber-200 bg-white px-2 py-1.5 text-[11.5px] text-amber-950 shadow-lg"
-          style={{ left: tip.x + 12, top: tip.y + 12 }}
-        >
-          {tip.title}
-        </div>
       )}
     </div>
   );
@@ -251,6 +175,7 @@ export default function PdfScrollPages({
   anchors,
   activeId,
   onSelectAnchor,
+  onVisiblePage,
 }: {
   pdf: PDFDocumentProxy;
   pageCount: number;
@@ -259,6 +184,7 @@ export default function PdfScrollPages({
   anchors: { id: string; citation: SourceCitation; label?: string }[];
   activeId?: string | null;
   onSelectAnchor?: (id: string) => void;
+  onVisiblePage?: (page: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [hostWidth, setHostWidth] = useState(720);
@@ -291,7 +217,9 @@ export default function PdfScrollPages({
     const page = citation?.pageNumber;
     if (!page) return;
     const t = window.setTimeout(() => {
-      document.getElementById(`pdf-page-${page}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      const hit = document.getElementById(`source-hit-${activeId || "focus"}`);
+      if (hit) hit.scrollIntoView({ behavior: "smooth", block: "center" });
+      else document.getElementById(`pdf-page-${page}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 80);
     return () => window.clearTimeout(t);
   }, [citation?.pageNumber, citation?.exactQuote, activeId]);
@@ -308,6 +236,7 @@ export default function PdfScrollPages({
           quotes={quotes}
           activeId={activeId}
           onSelectAnchor={onSelectAnchor}
+          onVisiblePage={onVisiblePage}
           eager={n <= 2 || n === (citation?.pageNumber || 1)}
         />
       ))}

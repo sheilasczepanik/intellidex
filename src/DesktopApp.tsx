@@ -7,7 +7,7 @@ import {
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
 import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
-import { extractPdfText, renderPdfPagesToJpeg, ocrImageSource, documentText } from "./lib/pdfHelpers";
+import { extractPdfText, renderPdfPagesToJpeg, documentText } from "./lib/pdfHelpers";
 import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource, MAURA_FALLBACK_ENTITIES } from "./lib/mauraExtractFallback";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
@@ -45,7 +45,7 @@ import { ExtractSelectionTip, LogEvidenceModal, VERIFY_CATEGORIES, type ManualLo
 import {
   ingestElapsedSec, type IngestJob,
 } from "./lib/ingestProgress";
-import { LOW_CLARITY_BADGE, assessTextClarity, isUnreadableScan, logExtractedText } from "./lib/textClarity";
+import { assessTextClarity, logExtractedText } from "./lib/textClarity";
 import { isPdfFile, isTextFile, EVIDENCE_ACCEPT } from "./lib/pdfText";
 import { isImageFile } from "./lib/imageEvidence";
 import { inferSourceType, type SourceBoundingBox, type SourceCitation } from "./types";
@@ -55,12 +55,22 @@ import {
   CLAUDE_MAX_CHARS,
   CLAUDE_MAX_PAGES,
   CLAUDE_RETRY_PAGES,
-  EXTRACT_SERVICE_UNAVAILABLE,
   windowSourceText,
   type ExtractBundle,
   type ExtractedEvent,
 } from "./lib/extractSchema";
+import TimelineGrid from "./TimelineGrid";
+import { useTimelineConflicts } from "./lib/useTimelineConflicts";
 import { collectQuoteSpans, locateAnySnippet, narrativeSortKey, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
+import {
+  confidenceTierOf,
+  coordinatesForEvent,
+  isSightingEvent,
+  milesBetween,
+  parseTimeEnd,
+  primaryIncidentGeo,
+  type SwimlaneGroupId,
+} from "./types/timeline";
 import { applyDupDecision, evidenceToSide, eventToSide, findDuplicateEvidence, findDuplicateEvent, hashNormalizedText, type DupDecision, type DupMatch } from "./lib/duplicates";
 import { clusterMergeableEvents, detectLocationConflicts } from "./lib/timelineDedupe";
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
@@ -84,7 +94,7 @@ import {
   ArrowLeft, ArrowRight, Archive, ArchiveRestore, Check, CheckCheck, Clock, FileDown,
   FileText, FolderPlus, GitCommitHorizontal, HeartHandshake, Inbox, KeyRound, LayoutDashboard,
   LayoutGrid, Lock, MapPin, Menu, MoreHorizontal, PanelLeftClose,
-  PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, Sparkles, StickyNote, Trash2, Truck,
+  PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, StickyNote, Trash2, Truck,
   TriangleAlert, User, Users, UserRound, X, Box, Image as ImageIcon,
 } from "lucide-react";
 
@@ -383,8 +393,6 @@ const TONE_BAR: Record<Tone, string> = {
   active: "bg-blue-600", review: "bg-amber-600", cold: "bg-slate-300", ok: "bg-emerald-600", fail: "bg-red-600",
 };
 
-const SCAN_NOTE = LOW_CLARITY_BADGE;
-
 const mono = "font-mono";
 const Chip = ({ tone, children, className = "" }: { tone: Tone; children: React.ReactNode; className?: string }) => (
   <span className={`inline-flex min-w-0 max-w-full shrink-0 items-center rounded-md border px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] whitespace-nowrap ${TONE_CHIP[tone]} ${className}`}>
@@ -497,6 +505,7 @@ export default function DesktopApp() {
   const sourcePaneRef = useRef<HTMLDivElement>(null);
   const queuePaneRef = useRef<HTMLDivElement>(null);
   const queueSyncLock = useRef(false);
+  const verifyPdfPageRef = useRef(1);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => typeof window !== "undefined" && window.matchMedia("(min-width: 1024px)").matches,
   );
@@ -558,6 +567,12 @@ export default function DesktopApp() {
   const [timeMenu, setTimeMenu] = useState(false);
   const [conflictInspectorOpen, setConflictInspectorOpen] = useState(false);
   const [focusMerged, setFocusMerged] = useState(false);
+  const [conflictsOnly, setConflictsOnly] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<SwimlaneGroupId, boolean>>({
+    subject: false,
+    official: false,
+    sightings: false,
+  });
   const [mergedInspectIds, setMergedInspectIds] = useState<string[]>([]);
   const [operatorMenu, setOperatorMenu] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
@@ -742,6 +757,8 @@ export default function DesktopApp() {
     setForm(null);
   };
 
+  const timelineConflicts = useTimelineConflicts(caseEvents, caseEntities);
+
   const chrono = useMemo(() => {
     const entityMap = new Map(caseEntities.map((e) => [e.id, e]));
     const places = caseEntities.filter((e) => e.type === "place" || e.type === "location");
@@ -809,6 +826,9 @@ export default function DesktopApp() {
     for (const pair of detectLocationConflicts(caseEvents, caseEntities, activeCase?.subjectName || activeCase?.title)) {
       addPair(pair.aId, pair.bId, pair.label, pair.detail);
     }
+    for (const pair of timelineConflicts) {
+      addPair(pair.aId, pair.bId, pair.label, pair.detail);
+    }
 
     const byEntity = new Map<string, TimelineEventRecord[]>();
     caseEvents.forEach((e) => {
@@ -834,7 +854,8 @@ export default function DesktopApp() {
     }
 
     const evidenceMap = new Map(caseEvidence.map((row) => [row.id, row]));
-    const plotted = clusterMergeableEvents(scoped).map((group) => {
+    const plotEvents = conflictsOnly ? scoped.filter((event) => conflictIds.has(event.id)) : scoped;
+    const plotted = clusterMergeableEvents(plotEvents).map((group) => {
       const e = group[0];
       const laneId = entityMap.has(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID;
       const ent = entityMap.get(e.entityId);
@@ -849,6 +870,10 @@ export default function DesktopApp() {
       });
       const mergeCount = Math.max(group.length, 1 + (e.mergedFrom?.length ?? 0));
       const mergedIds = [...new Set([e.id, ...group.map((row) => row.id), ...(e.mergedFrom || [])])];
+      const contradicted = group.some((row) => conflictIds.has(row.id));
+      const confidenceTier = confidenceTierOf(e, contradicted || e.confidenceTier === "TIER_3_CONTRADICTED");
+      const sighting = isSightingEvent({ ...e, confidenceTier: e.confidenceTier === "TIER_2_UNVERIFIED" ? "TIER_2_UNVERIFIED" : undefined }, ent);
+      const timeEndMs = parseTimeEnd(e.timeEnd, e.timestamp);
       const sourceNames = [...new Set(group.map((row) => {
         const rowSrc = evidenceMap.get(row.sourceDocId);
         return row.sourceCitation?.sourceName || rowSrc?.originalFileName || rowSrc?.fileName || row.title;
@@ -862,8 +887,11 @@ export default function DesktopApp() {
         title: e.title,
         sub: e.description,
         tag: e.isVerified ? "EVENT" : "UNVERIFIED",
-        flag: group.some((row) => conflictIds.has(row.id)),
+        flag: contradicted,
         verified: e.isVerified,
+        confidenceTier,
+        sighting: sighting && confidenceTier !== "TIER_1_VERIFIED",
+        timeEndMs,
         secondary,
         citeUrl,
         sourceName: sourceNames.join(" · ") || e.sourceCitation?.sourceName || src?.originalFileName || src?.fileName || "",
@@ -874,10 +902,12 @@ export default function DesktopApp() {
       };
     });
 
-    const laneIds = [...new Set([
-      ...caseEvents.map((e) => (entityMap.has(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID)),
-      ...plotted.map((e) => e.entityId),
-    ])];
+    const laneIds = [...new Set(conflictsOnly
+      ? plotted.map((e) => e.entityId)
+      : [
+        ...caseEvents.map((e) => (entityMap.has(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID)),
+        ...plotted.map((e) => e.entityId),
+      ])];
     laneIds.sort((a, b) => {
       if (a === UNASSIGNED_LANE_ID) return 1;
       if (b === UNASSIGNED_LANE_ID) return -1;
@@ -909,29 +939,31 @@ export default function DesktopApp() {
         entityId: ent?.id,
       };
       const evs = plotted.filter((e) => e.entityId === id).sort((a, b) => a.timestamp - b.timestamp);
-      const totalCount = caseEvents.filter((e) => (entityMap.has(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID) === id).length;
       const rowEnds: number[] = [];
       let maxStack = 0;
       const placed = evs.map((e) => {
         const left = xOf(e.timestamp);
+        const span = e.timeEndMs && e.timeEndMs > e.timestamp
+          ? Math.max(CARD_W, xOf(e.timeEndMs) - left)
+          : CARD_W;
         let row = 0;
         while (row < rowEnds.length && rowEnds[row] > left) row += 1;
         if (row === rowEnds.length) rowEnds.push(0);
-        rowEnds[row] = left + CARD_W + CARD_PAD;
+        rowEnds[row] = left + span + CARD_PAD;
         maxStack = Math.max(maxStack, row);
-        return { e, row, left };
+        return { e, row, left, width: span };
       });
       const tracks = maxStack + 1;
       const height = 12 + tracks * (CARD_H + CARD_GAP) - CARD_GAP + 12;
       const laneTop = top;
-      placed.forEach(({ e, row, left }) => {
+      placed.forEach(({ e, row, left, width }) => {
         const cardTop = 10 + row * (CARD_H + CARD_GAP);
         if (e.flag) {
-          anchors[e.id] = { x: left + CARD_W / 2, top: laneTop + cardTop, bottom: laneTop + cardTop + CARD_H };
+          anchors[e.id] = { x: left + width / 2, top: laneTop + cardTop, bottom: laneTop + cardTop + CARD_H };
         }
       });
       top += height + 1;
-      return { def, height, placed, count: totalCount, tracks };
+      return { def, height, placed, count: placed.length, tracks };
     });
 
     const firstPair = conflictPairs[0];
@@ -980,7 +1012,7 @@ export default function DesktopApp() {
       dayLabel: viewAllDates ? "All dates" : (activeDay ? formatDaySelector(activeDay) : "No date"),
       timeLabel: formatClockRange(start, end),
     };
-  }, [activeCase?.subjectName, activeCase?.title, caseEvents, caseEntities, caseEvidence, viewDay, viewAllDates, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit]);
+  }, [activeCase?.subjectName, activeCase?.title, caseEvents, caseEntities, caseEvidence, viewDay, viewAllDates, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit, conflictsOnly, timelineConflicts]);
 
   useEffect(() => {
     setViewDay("");
@@ -1664,52 +1696,10 @@ export default function DesktopApp() {
     let sourceText = documentText(ev) || ev.rawText || "";
     try {
       const hints = caseEntities.map((e) => ({ id: e.id, name: e.name, type: e.type, role: e.role }));
-      const pageCap = opts?.maxPages ?? CLAUDE_RETRY_PAGES;
-      const stubText = /^\s*\[[A-Za-z]+ (document|evidence):/i.test(sourceText);
-      if (isPdf && ev.fileBase64 && (stubText || !ev.fullText || isUnreadableScan(sourceText))) {
-        try {
-          const extracted = await extractPdfText(ev.fileBase64, {
-            onProgress: (current, total) => {
-              setIngestJob((job) => (job && job.evidenceId === ev.id
-                ? { ...job, stage: "pdf", currentPage: current, totalPages: total }
-                : job));
-            },
-          });
-          if (extracted.pageCount || extracted.text.trim()) {
-            const fullText = extracted.text.trim() || sourceText;
-            await db.evidence.update(ev.id, {
-              pageCount: extracted.pageCount,
-              rawText: fullText,
-              fullText,
-              wordCount: fullText.split(/\s+/).filter(Boolean).length,
-              textClarity: assessTextClarity(fullText, extracted.pageCount || 1),
-            });
-            if (extracted.text.trim()) sourceText = extracted.text;
-          }
-        } catch (err) {
-          console.error("[Extraction] PDF text extract failed:", err);
-        }
-      } else if (!isPdf && (ev.imageBase64 || ev.fileBase64) && (stubText || isUnreadableScan(sourceText))) {
-        try {
-          const ocr = await ocrImageSource(ev.imageBase64 || ev.fileBase64 || "");
-          if (ocr.trim()) {
-            sourceText = ocr;
-            await db.evidence.update(ev.id, { rawText: ocr, fullText: ocr, textClarity: assessTextClarity(ocr, 1) });
-          }
-        } catch (err) {
-          console.error("[OCR] image extract failed", err);
-        }
-      } else if (ev.fullText?.trim()) {
-        sourceText = ev.fullText;
-      }
-
-      const textUsable = Boolean(sourceText.trim());
-      let bundle: ExtractBundle;
-      let usedFallback = false;
       const localMaura = isLocalMauraExtractSource(ev.fileName);
 
       if (localMaura) {
-        const quotes = MAURA_FALLBACK_ENTITIES.map((row) => row.quote);
+        const quotes = MAURA_FALLBACK_ENTITIES.map((row) => row.exactSnippet);
         const missing = quotes.filter((q) => !locateAnySnippet(sourceText, [q]));
         if (missing.length) {
           sourceText = [sourceText.trim(), missing.join("\n")].filter(Boolean).join("\n\n");
@@ -1718,14 +1708,20 @@ export default function DesktopApp() {
         setIngestJob((job) => (job && job.evidenceId === ev.id
           ? { ...job, stage: "events", llmStartedAt: Date.now() }
           : job));
+      }
+
+      let bundle: ExtractBundle;
+
+      if (localMaura) {
         bundle = mauraVerifiedBundle();
-        usedFallback = false;
         setExtractError(null);
-      } else if (isPdf && ev.fileBase64 && !textUsable) {
+      } else if (isPdf && ev.fileBase64) {
+        const pageNumber = Math.max(1, verifyPdfPageRef.current || 1);
         const rendered = await renderPdfPagesToJpeg(ev.fileBase64, {
-          maxPages: pageCap,
+          maxPages: 1,
+          pageNumbers: [pageNumber],
           scale: 1.5,
-          quality: 0.8,
+          quality: 0.82,
           onProgress: (current, total) => {
             setIngestJob((job) => (job && job.evidenceId === ev.id
               ? { ...job, stage: "render", currentPage: current, totalPages: total }
@@ -1736,13 +1732,17 @@ export default function DesktopApp() {
           await db.evidence.update(ev.id, { pageCount: rendered.pageCount });
         }
         setIngestJob((job) => (job && job.evidenceId === ev.id
-          ? { ...job, stage: "claude", llmStartedAt: Date.now(), currentPage: rendered.pages.length, totalPages: rendered.pages.length }
+          ? { ...job, stage: "claude", llmStartedAt: Date.now(), currentPage: 1, totalPages: 1 }
           : job));
         bundle = await extractEventsFromRenderedPages({
           fileName: ev.fileName,
           pages: rendered.pages,
           entities: hints,
         });
+        bundle = {
+          ...bundle,
+          events: bundle.events.map((event) => ({ ...event, pageNumber: event.pageNumber || pageNumber })),
+        };
       } else if (ev.imageBase64 || (ev.fileBase64 && (ev.mediaType || "").startsWith("image/"))) {
         setIngestJob((job) => (job && job.evidenceId === ev.id
           ? { ...job, stage: "claude", llmStartedAt: Date.now() }
@@ -1774,12 +1774,7 @@ export default function DesktopApp() {
       if (!bundle.events.length && localMaura) {
         bundle = mauraVerifiedBundle();
       }
-      if (bundle.warning && !localMaura) {
-        usedFallback = true;
-        setExtractError(EXTRACT_SERVICE_UNAVAILABLE);
-      } else {
-        setExtractError(null);
-      }
+      setExtractError(null);
 
       const events = bundle.events;
       const clarity = ev.textClarity ?? assessTextClarity(sourceText || ev.rawText, ev.pageCount ?? 1);
@@ -1828,7 +1823,7 @@ export default function DesktopApp() {
                 sourceName: ev.fileName,
                 sourceType: inferSourceType(ev),
                 pageNumber: event.pageNumber,
-                exactQuote: event.rawQuote || event.exactQuote || event.snippet,
+                exactQuote: event.exactQuote || event.rawQuote || event.snippet,
                 boundingBox: event.boundingBox,
                 sourceUrl: ev.sourceUrl,
               },
@@ -1847,7 +1842,7 @@ export default function DesktopApp() {
           entities: bundle.entities,
           events,
           relationships: bundle.relationships,
-          usedFallback,
+          usedFallback: false,
           autoApplied: true,
           bundle,
         });
@@ -1925,7 +1920,7 @@ export default function DesktopApp() {
             sourceName: ev.fileName,
             sourceType: inferSourceType(ev),
             pageNumber: event.pageNumber,
-            exactQuote: event.rawQuote || event.exactQuote || event.snippet,
+            exactQuote: event.exactQuote || event.rawQuote || event.snippet,
             boundingBox: event.boundingBox,
             sourceUrl: ev.sourceUrl,
           },
@@ -1938,9 +1933,7 @@ export default function DesktopApp() {
       setIngestJob(null);
     } catch (err) {
       setIngestJob(null);
-      const localMaura = isLocalMauraExtractSource(ev.fileName);
-      const banner = EXTRACT_SERVICE_UNAVAILABLE;
-      const fallback = localMaura ? mauraVerifiedBundle() : mauraFallbackBundle();
+      const fallback = mauraFallbackBundle();
       try {
         await applyExtractedGraph({
           caseId,
@@ -1984,7 +1977,7 @@ export default function DesktopApp() {
                 sourceName: ev.fileName,
                 sourceType: inferSourceType(ev),
                 pageNumber: event.pageNumber,
-                exactQuote: event.rawQuote || event.exactQuote || event.snippet,
+                exactQuote: event.exactQuote || event.rawQuote || event.snippet,
                 boundingBox: event.boundingBox,
                 sourceUrl: ev.sourceUrl,
               },
@@ -1992,18 +1985,19 @@ export default function DesktopApp() {
           }), { replacePendingForEvidence: ev.id });
         }
         await db.evidence.update(ev.id, {
-          status: localMaura ? "indexed" : "flagged",
-          lastError: localMaura ? "" : banner,
+          status: "indexed",
+          lastError: "",
         });
-        setExtractError(localMaura ? null : banner);
+        setExtractError(null);
         if (!stayOnWorkspace) goTo("Verify", caseId);
       } catch {
-        const message = err instanceof Error ? err.message : banner;
+        const message = err instanceof Error ? err.message : "Extraction failed";
         await db.evidence.update(ev.id, {
-          status: localMaura ? "indexed" : "failed",
-          lastError: localMaura ? "" : message,
+          status: "indexed",
+          lastError: "",
         });
-        setExtractError(localMaura ? null : banner);
+        setExtractError(null);
+        void message;
       }
     } finally {
       setExtracting(false);
@@ -2070,7 +2064,7 @@ export default function DesktopApp() {
             sourceName: ev.fileName,
             sourceType: inferSourceType(ev),
             pageNumber: event.pageNumber,
-            exactQuote: event.rawQuote || event.exactQuote || event.snippet,
+            exactQuote: event.exactQuote || event.rawQuote || event.snippet,
             boundingBox: event.boundingBox,
             sourceUrl: ev.sourceUrl,
           },
@@ -2137,73 +2131,7 @@ export default function DesktopApp() {
   };
 
   const sourceEvidence = caseEvidence.find((e) => e.id === activeEvidenceId) ?? caseEvidence[0] ?? null;
-  const extractUnavailable = Boolean(
-    extractError
-    && (extractError === EXTRACT_SERVICE_UNAVAILABLE
-      || /extract failed|api key|unavailable|timed out after|openai/i.test(extractError)),
-  );
 
-  const generateSampleExtractedCards = async () => {
-    const caseId = resolvedCaseId;
-    const ev = sourceEvidence;
-    if (!caseId || !ev) {
-      setExtractError("Add a source document first.");
-      return;
-    }
-    setIngestJob(null);
-    setExtracting(false);
-    setExtractError(null);
-    const bundle = mauraVerifiedBundle();
-    await applyExtractedGraph({
-      caseId,
-      evidenceId: ev.id,
-      entities: bundle.entities,
-      relationships: bundle.relationships,
-      bundle,
-    });
-    await ensureContactsForPeople(caseId);
-    const roster = await db.entities.where("caseId").equals(caseId).toArray();
-    const matchEntity = (id: string | null, name: string) => {
-      if (id && roster.some((e) => e.id === id)) return id;
-      const needle = name.trim().toLowerCase();
-      if (!needle) return "";
-      return roster.find((row) => row.name.trim().toLowerCase() === needle)?.id
-        ?? roster.find((row) => namesLooselyMatch(row.name, name))?.id
-        ?? "";
-    };
-    await addVerifyDrafts(bundle.events.map((event) => {
-      const entityId = matchEntity(event.entityId, event.entityName);
-      return {
-        caseId,
-        evidenceId: ev.id,
-        timestamp: parseEventTime(event.timestamp, event.timestampLabel, {
-          extraText: `${event.details} ${event.rawQuote} ${event.citation}`,
-        }),
-        timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
-        entityId,
-        entityName: event.entityName,
-        suggestNewEntity: !entityId,
-        newEntityType: event.newEntityType ?? event.entityType ?? "",
-        category: event.category,
-        title: event.title,
-        snippet: event.rawQuote || event.snippet,
-        details: event.details,
-        confidence: event.confidence,
-        citation: event.citation,
-        sourceCitation: {
-          sourceId: ev.id,
-          sourceName: ev.fileName,
-          sourceType: inferSourceType(ev),
-          pageNumber: event.pageNumber,
-          exactQuote: event.rawQuote || event.exactQuote || event.snippet,
-          boundingBox: event.boundingBox,
-          sourceUrl: ev.sourceUrl,
-        },
-      };
-    }), { replacePendingForEvidence: ev.id });
-    await db.evidence.update(ev.id, { status: "indexed", lastError: "" });
-    setExtractError(null);
-  };
   const intakeIndexedFiles = useMemo(
     () => {
       const visible = caseEvidence.filter((row) => isIntakeCompleteStatus(row.status) && isVisibleInStagingQueue(row));
@@ -2347,6 +2275,10 @@ export default function DesktopApp() {
     card.scrollIntoView({ behavior: "smooth", block: "start" });
     window.setTimeout(() => { queueSyncLock.current = false; }, 280);
   };
+
+  useEffect(() => {
+    verifyPdfPageRef.current = 1;
+  }, [sourceEvidence?.id]);
 
   useEffect(() => {
     if (screen !== "Verify" || !activeHoveredCardId) return;
@@ -3023,34 +2955,10 @@ export default function DesktopApp() {
                     </div>
                   </div>
                   <div ref={sourcePaneRef} onScroll={syncQueueToSourceScroll} onMouseUp={captureSourceSelection} onTouchEnd={captureSourceSelection} className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                    {extractError && !(extractUnavailable && pendingDrafts.length > 0) && !(sourceEvidence && inferSourceType(sourceEvidence) !== "pdf" && /pdf/i.test(extractError) && !extractUnavailable) && (
-                      <div className="mx-3 mt-3 flex flex-col gap-2.5 rounded-[10px] border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-950">
-                        <div className="flex items-start gap-2.5">
-                          <TriangleAlert className="mt-0.5 h-[15px] w-[15px] shrink-0" />
-                          <span>{extractUnavailable ? EXTRACT_SERVICE_UNAVAILABLE : extractError}</span>
-                        </div>
-                        {extractUnavailable && (
-                          <div className="flex flex-wrap gap-2 pl-[22px]">
-                            <button
-                              type="button"
-                              disabled={busy || !sourceEvidence}
-                              onClick={() => sourceEvidence && void runExtract(sourceEvidence.id, { stayOnWorkspace: true })}
-                              className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-700 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
-                            >
-                              <RefreshCw className={`h-3 w-3 ${extracting ? "animate-spin" : ""}`} />
-                              Retry Extraction
-                            </button>
-                            <button
-                              type="button"
-                              disabled={!sourceEvidence}
-                              onClick={() => { void generateSampleExtractedCards(); }}
-                              className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-700 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
-                            >
-                              <Sparkles className="h-3 w-3" />
-                              Generate Sample Extracted Cards
-                            </button>
-                          </div>
-                        )}
+                    {extractError && (
+                      <div className="mx-3 mt-3 flex items-start gap-2.5 rounded-[10px] border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-950">
+                        <TriangleAlert className="mt-0.5 h-[15px] w-[15px] shrink-0" />
+                        <span>{extractError}</span>
                       </div>
                     )}
                     <div className="min-h-0 flex-1">
@@ -3074,6 +2982,7 @@ export default function DesktopApp() {
                           setHoveredCard(id, "doc");
                           document.getElementById(`verify-card-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
                         }}
+                        onVisiblePage={(page) => { verifyPdfPageRef.current = page; }}
                         onImageRegionSelect={({ box, previewDataUrl }) => {
                           setExtractTip(null);
                           setLogModal({ quote: "Selected image region", previewDataUrl, box });
@@ -3154,38 +3063,10 @@ export default function DesktopApp() {
                           {caseEvidence.length ? "Queue cleared" : "Nothing to verify"}
                         </div>
                         <p className="max-w-[34ch] text-[12.5px] text-slate-500 text-pretty">
-                          {extractUnavailable
-                            ? EXTRACT_SERVICE_UNAVAILABLE
-                            : extractError && extractError !== EXTRACT_SERVICE_UNAVAILABLE
-                            ? extractError
-                            : sourceEvidence?.textClarity === "low"
-                            ? `${SCAN_NOTE} Highlight text in the viewer to add cards.`
-                            : caseEvidence.length
+                          {caseEvidence.length
                             ? "Confirmed events are on the chronology. Rejected cards stay dismissed. Drop a new source below to extract, or highlight text in the viewer."
                             : "Drop a document here to extract entities, or pull an indexed file from Intake."}
                         </p>
-                        {extractUnavailable && (
-                          <div className="flex flex-wrap justify-center gap-2">
-                            <button
-                              type="button"
-                              disabled={busy || !sourceEvidence}
-                              onClick={() => sourceEvidence && void runExtract(sourceEvidence.id, { stayOnWorkspace: true })}
-                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 text-[12px] font-medium text-slate-700 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
-                            >
-                              <RefreshCw className={`h-3 w-3 ${extracting ? "animate-spin" : ""}`} />
-                              Retry Extraction
-                            </button>
-                            <button
-                              type="button"
-                              disabled={!sourceEvidence}
-                              onClick={() => { void generateSampleExtractedCards(); }}
-                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 text-[12px] font-medium text-slate-700 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
-                            >
-                              <Sparkles className="h-3 w-3" />
-                              Generate Sample Extracted Cards
-                            </button>
-                          </div>
-                        )}
                         <VerifyIngestDropzone
                           busy={busy || extracting}
                           indexedFiles={intakeIndexedFiles}
@@ -3345,14 +3226,13 @@ export default function DesktopApp() {
                       }}
                     />
                     <span className="h-4 w-px shrink-0 bg-slate-200" />
-                    {chrono.tether ? (
+                    {chrono.conflictPairs.length > 0 ? (
                       <button
                         type="button"
-                        onClick={() => inspectContradiction()}
-                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-amber-400 bg-amber-50 px-2.5 text-[11.5px] font-semibold text-amber-800 hover:bg-amber-100"
+                        onClick={() => setConflictsOnly((on) => !on)}
+                        className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11.5px] font-semibold ${conflictsOnly ? "border-amber-600 bg-amber-200 text-amber-950" : "border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100"}`}
                       >
-                        <TriangleAlert className="h-3.5 w-3.5" />
-                        {chrono.tether.count} Timeline Conflict{chrono.tether.count === 1 ? "" : "s"} Detected
+                        [ ⚠ {chrono.conflictPairs.length} Timeline Conflict{chrono.conflictPairs.length === 1 ? "" : "s"} ]
                       </button>
                     ) : (
                       <span className={`shrink-0 whitespace-nowrap ${mono} text-[11px] text-slate-500`}>
@@ -3410,7 +3290,12 @@ export default function DesktopApp() {
                         })}
                       </div>
 
-                      {chrono.lanes.map(({ def, height, placed, tracks, count }) => {
+                      <TimelineGrid
+                        lanes={chrono.lanes}
+                        subjectName={activeCase?.subjectName || activeCase?.title}
+                        collapsed={collapsedGroups}
+                        onToggle={(id) => setCollapsedGroups((curr) => ({ ...curr, [id]: !curr[id] }))}
+                        renderLane={({ def, height, placed, tracks, count }) => {
                         const dim = (selected != null && selected !== def.id)
                           || (focusMerged && !chrono.mergedLaneIds.includes(def.id));
                         const KindIcon = ENTITY_ICON[TYPE_KIND[def.type]] ?? Clock;
@@ -3436,19 +3321,20 @@ export default function DesktopApp() {
                                 </span>
                               )}
                             </div>
-                            {placed.map(({ e, row, left }) => {
+                            {placed.map(({ e, row, left, width }) => {
                               const focused = (conflictPulse > 0 && chrono.tether && (e.id === chrono.tether.aId || e.id === chrono.tether.bId))
                                 || (focusMerged && e.mergeCount > 1);
+                              const sightingCard = e.sighting;
                               return (
                               <button
                                 type="button"
                                 key={e.id}
                                 id={`timeline-node-${e.id}`}
                                 onClick={() => openEventDrawer(e.id, e.mergedIds)}
-                                className={`absolute z-[2] flex min-w-[228px] items-start gap-2 overflow-visible rounded-[10px] border border-l-2 bg-white px-2.5 py-1.5 text-left shadow-sm transition-colors hover:border-blue-300 ${e.secondary ? "border-dashed border-amber-400 border-l-amber-500" : e.flag ? "border-amber-300 border-l-amber-600 ring-[3px] ring-amber-500/10" : `border-slate-200 ${getCategoryColor(e.semantic, "border")}`} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
-                                style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width: CARD_W, height: CARD_H }}
+                                className={`absolute z-[2] flex min-w-[228px] items-start gap-2 overflow-visible rounded-[10px] border border-l-2 px-2.5 py-1.5 text-left shadow-sm transition-colors hover:border-blue-300 ${sightingCard ? "border-amber-300 border-l-amber-500 bg-amber-50" : e.secondary ? "border-dashed border-amber-400 border-l-amber-500 bg-white" : e.flag ? "border-amber-300 border-l-amber-600 bg-white ring-[3px] ring-amber-500/10" : `border-slate-200 bg-white ${getCategoryColor(e.semantic, "border")}`} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
+                                style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width, height: CARD_H }}
                               >
-                                <KindIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${e.flag ? "text-amber-700" : getCategoryColor(e.semantic, "text")}`} />
+                                <KindIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${e.flag || sightingCard ? "text-amber-700" : getCategoryColor(e.semantic, "text")}`} />
                                 <span
                                   role="button"
                                   title="Open source citation"
@@ -3463,9 +3349,14 @@ export default function DesktopApp() {
                                 >
                                   <FileText className="h-3 w-3" />
                                 </span>
-                                <span className={`shrink-0 rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] ${e.flag ? "bg-amber-500/10 text-amber-700 border-amber-500/30" : getCategoryColor(e.semantic, "badge")}`}>
-                                  {e.time}
+                                <span className={`shrink-0 rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] ${e.flag || sightingCard ? "bg-amber-500/10 text-amber-700 border-amber-500/30" : getCategoryColor(e.semantic, "badge")}`}>
+                                  {e.time}{e.timeEndMs ? `–${formatClock(e.timeEndMs)}` : ""}
                                 </span>
+                                {sightingCard ? (
+                                  <span className="shrink-0 rounded-full border border-amber-400 bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.04em] text-amber-900">
+                                    Sighting / Tip
+                                  </span>
+                                ) : null}
                                 <TimelineHoverTip
                                   entityName={e.entityName}
                                   timestamp={e.timestamp}
@@ -3476,6 +3367,18 @@ export default function DesktopApp() {
                                 >
                                   <span className="min-w-0 flex-1 whitespace-normal text-[12.5px] font-medium leading-snug text-slate-900 line-clamp-2">{e.title}</span>
                                 </TimelineHoverTip>
+                                {e.flag ? (
+                                  <span
+                                    role="button"
+                                    onClick={(ev) => {
+                                      ev.stopPropagation();
+                                      inspectContradiction(`${e.id}`);
+                                    }}
+                                    className="shrink-0 text-[10px] font-semibold text-amber-800 underline"
+                                  >
+                                    Review Conflict
+                                  </span>
+                                ) : null}
                                 {e.mergeCount > 1 ? (
                                   <span
                                     role="button"
@@ -3506,7 +3409,8 @@ export default function DesktopApp() {
                             })}
                           </div>
                         );
-                      })}
+                        }}
+                      />
 
                       {chrono.tether && (
                         <div className={`pointer-events-none absolute inset-y-0 left-0 z-[5] ${conflictPulse > 0 ? "contradiction-bridge-pulse" : ""}`} style={{ width: chrono.width }}>
@@ -3695,6 +3599,19 @@ export default function DesktopApp() {
                           citation: citationFromEvent(drawerEvent, drawerSource),
                         })}
                       />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const citation = citationFromEvent(drawerEvent, drawerSource);
+                          if (drawerEvent.sourceDocId) setActiveEvidenceId(drawerEvent.sourceDocId);
+                          setTimelineInspect({ eventId: drawerEvent.id, citation });
+                          setDrawerEventId(null);
+                          goTo("Verify", drawerEvent.caseId);
+                        }}
+                        className="mt-2 block text-[12.5px] font-semibold text-blue-700 underline"
+                      >
+                        View Source in Verify
+                      </button>
                       {(drawerEvent.sourceCitation?.sourceUrl || drawerSource?.sourceUrl) ? (
                         <a
                           href={drawerEvent.sourceCitation?.sourceUrl || drawerSource?.sourceUrl}
@@ -3706,6 +3623,27 @@ export default function DesktopApp() {
                         </a>
                       ) : null}
                     </div>
+                  </div>
+                  <div>
+                    <div className={`mb-1 ${mono} text-[10.5px] tracking-[0.12em] text-slate-500`}>LOCATION</div>
+                    {(() => {
+                      const here = coordinatesForEvent(drawerEvent, caseEntities);
+                      const incident = primaryIncidentGeo(caseEntities, activeCase?.lksLocation);
+                      const miles = here && incident ? milesBetween(here, incident) : null;
+                      return (
+                        <div className="text-[13px] leading-relaxed text-slate-700">
+                          <div>{here ? `${here.lat.toFixed(4)}, ${here.lng.toFixed(4)}` : "Coordinates not recorded"}</div>
+                          <div className="mt-1 text-[12px] text-slate-500">
+                            {miles != null
+                              ? `${miles} mi from ${incident?.label || "primary incident"}`
+                              : `Distance from ${incident?.label || activeCase?.lksLocation || "primary incident"} unavailable`}
+                          </div>
+                          {drawerEvent.timeEnd ? (
+                            <div className="mt-1 text-[12px] text-slate-500">Interval through {drawerEvent.timeEnd}</div>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
                   </div>
                   {mergedInspectIds.length > 1 ? (
                     <div>
@@ -3746,6 +3684,29 @@ export default function DesktopApp() {
                 </div>
               ) : (
                 <>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void updateTimelineEvent(drawerEvent.id, { isVerified: true, confidenceTier: "TIER_1_VERIFIED", flaggedNoise: false })}
+                      className="h-10 flex-1 rounded-[10px] bg-emerald-600 text-[12.5px] font-semibold text-white hover:bg-emerald-700"
+                    >
+                      Verify
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void updateTimelineEvent(drawerEvent.id, { isVerified: false, confidenceTier: "TIER_3_CONTRADICTED", flaggedNoise: false })}
+                      className="h-10 flex-1 rounded-[10px] border border-amber-300 bg-amber-50 text-[12.5px] font-semibold text-amber-900"
+                    >
+                      Reject
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void updateTimelineEvent(drawerEvent.id, { isVerified: false, confidenceTier: "TIER_2_UNVERIFIED", flaggedNoise: true })}
+                      className="h-10 flex-1 rounded-[10px] border border-slate-300 text-[12.5px] font-medium text-slate-700"
+                    >
+                      Flag as Noise
+                    </button>
+                  </div>
                   <button onClick={() => setDrawerEdit(true)}
                     className="inline-flex h-10 items-center justify-center gap-2 rounded-[10px] border border-slate-300 text-[13px] font-medium text-slate-700 hover:border-slate-400">
                     <Pencil className="h-3.5 w-3.5" />Edit Event

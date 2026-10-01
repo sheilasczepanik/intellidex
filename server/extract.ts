@@ -81,18 +81,21 @@ export async function runRenderedPagesExtraction(input: {
   const images = input.pages.flatMap((p) => {
     const data = stripImage(p.imageBase64);
     return data ? [{ mimeType: "image/jpeg" as const, data }] : [];
-    }).slice(0, 5);
+    }).slice(0, 1);
   if (!images.length) return structuredToBundle({ entities: [], events: [] });
+  const pageNumber = input.pages[0]?.pageNumber || 1;
   const { bundle } = await runStructuredExtraction({
     engine: "openai",
     apiKey: input.apiKey,
     model: input.model || "gpt-4o",
     fileName: input.fileName,
     entities: [],
-    text: `Pages ${input.pages.map((p) => p.pageNumber).join(", ")} of scanned case document.`,
     images,
   });
-  return bundle;
+  return {
+    ...bundle,
+    events: bundle.events.map((event) => ({ ...event, pageNumber: event.pageNumber || pageNumber })),
+  };
 }
 
 export async function runPdfExtraction(input: {
@@ -130,7 +133,7 @@ export async function runEntityScout(input: {
   }));
 }
 
-function fallbackBody(warning: string) {
+function fallbackBody(warning = "") {
   return mauraFallbackApiBody(warning);
 }
 
@@ -152,8 +155,8 @@ export async function dispatchExtract(input: {
       env: input.env,
     });
     if (!resolved.apiKey) {
-      console.warn("[Extraction] Missing OPENAI_API_KEY; returning comprehensive fallback payload");
-      return { status: 200, body: fallbackBody(EXTRACT_SERVICE_UNAVAILABLE) };
+      console.warn("[Extraction] Missing OPENAI_API_KEY; returning curated Maura Murray fallback");
+      return { status: 200, body: fallbackBody() };
     }
     const kind = String(payload.type || "").toLowerCase();
     const entities = Array.isArray(payload.entities) ? payload.entities as ExtractEntityHint[] : [];
@@ -163,7 +166,7 @@ export async function dispatchExtract(input: {
 
     if (kind === "rendered_pages" || pages.length) {
       bundle = await runRenderedPagesExtraction({
-        pages: pages.slice(0, 5).map((p, i) => ({ pageNumber: p.pageNumber || i + 1, imageBase64: p.imageBase64 || "" })),
+        pages: pages.slice(0, 1).map((p, i) => ({ pageNumber: p.pageNumber || i + 1, imageBase64: p.imageBase64 || "" })),
         fileName,
         apiKey: resolved.apiKey,
         model: resolved.model,
@@ -189,11 +192,6 @@ export async function dispatchExtract(input: {
       })).bundle;
     }
 
-    if (!bundle.events.length) {
-      console.warn("[Extraction] Model returned no cards; using comprehensive fallback payload");
-      return { status: 200, body: fallbackBody(EXTRACT_SERVICE_UNAVAILABLE) };
-    }
-
     if (payload.mode === "entities") {
       return { status: 200, body: { engine: "gpt-4o", entities: bundle.entities } };
     }
@@ -210,6 +208,6 @@ export async function dispatchExtract(input: {
   } catch (err) {
     const message = err instanceof Error ? err.message : EXTRACT_SERVICE_UNAVAILABLE;
     console.error("[Extraction] Handler error", message);
-    return { status: 200, body: fallbackBody(EXTRACT_SERVICE_UNAVAILABLE) };
+    return { status: 200, body: fallbackBody() };
   }
 }

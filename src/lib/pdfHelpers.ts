@@ -16,26 +16,31 @@ export async function renderPdfPagesToJpeg(
     maxPages?: number;
     scale?: number;
     quality?: number;
+    pageNumbers?: number[];
     onProgress?: (current: number, total: number) => void;
   },
 ): Promise<{ pages: RenderedPdfPage[]; pageCount: number }> {
   if (typeof document === "undefined") {
     throw new Error("PDF page rendering must run in the browser.");
   }
-  const maxPages = Math.max(1, Math.min(opts?.maxPages ?? 3, 5));
+  const maxPages = Math.max(1, Math.min(opts?.maxPages ?? 1, 5));
   const quality = opts?.quality ?? 0.8;
   const baseScale = opts?.scale ?? 1.5;
   let pdf: PDFDocumentProxy | null = null;
   try {
     pdf = await getDocument({ data: pdfBytesFromBase64(fileBase64) }).promise;
-    const total = Math.min(pdf.numPages, maxPages);
+    const requested = (opts?.pageNumbers ?? [])
+      .map((n) => Math.floor(n))
+      .filter((n) => n >= 1 && n <= pdf!.numPages);
+    const pageList = (requested.length ? requested : [1]).slice(0, maxPages);
     const pages: RenderedPdfPage[] = [];
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) throw new Error("Could not create a canvas context to render PDF pages.");
 
-    for (let pageNumber = 1; pageNumber <= total; pageNumber += 1) {
-      opts?.onProgress?.(pageNumber, total);
+    for (let i = 0; i < pageList.length; i += 1) {
+      const pageNumber = pageList[i]!;
+      opts?.onProgress?.(i + 1, pageList.length);
       const page = await pdf.getPage(pageNumber);
       let viewport = page.getViewport({ scale: baseScale });
       const maxEdge = 1600;
