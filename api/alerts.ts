@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { getMissingAlerts } from "../../server/missingAlerts.ts";
-import { FALLBACK_MISSING_ALERTS } from "../../src/lib/liveMissingAlert.ts";
+import { getMissingAlerts } from "../server/missingAlerts.ts";
+import { FALLBACK_MISSING_ALERTS } from "../src/lib/liveMissingAlert.ts";
 
 export const maxDuration = 30;
 
@@ -8,23 +8,24 @@ export const config = {
   maxDuration: 30,
 };
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+function ok(res: VercelResponse, body: unknown) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Content-Type", "application/json");
   res.setHeader("Cache-Control", "public, max-age=60");
+  return res.status(200).json(body);
+}
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+async function handleGet(req: VercelRequest, res: VercelResponse) {
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    return res.status(200).end();
+  }
   if (req.method !== "GET") {
-    return res.status(200).json({
-      alerts: FALLBACK_MISSING_ALERTS,
-      fetchedAt: new Date().toISOString(),
-      cached: true,
-      offline: true,
-      sources: [],
-      warning: "GET only",
-    });
+    return ok(res, { error: "GET only", alerts: [], fetchedAt: new Date().toISOString(), cached: true, offline: true, sources: [] });
   }
 
   try {
@@ -37,10 +38,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       env: process.env,
       bypassCache: refresh === "1" || refresh === "true",
     });
-    return res.status(200).json(body);
+    return ok(res, body);
   } catch (err: unknown) {
-    console.error("[alerts] /api/alerts/missing failed", err);
-    return res.status(200).json({
+    console.error("[alerts] handler failed", err);
+    return ok(res, {
       alerts: FALLBACK_MISSING_ALERTS,
       fetchedAt: new Date().toISOString(),
       cached: true,
@@ -49,4 +50,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       warning: "NCMEC feed temporarily unreachable",
     });
   }
+}
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  return handleGet(req, res);
 }

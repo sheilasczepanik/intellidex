@@ -5,6 +5,8 @@ import { scrapePublicArticle, parsePageMetadata, ScrapeHttpError } from "./serve
 import { parseIntelWithAnthropic, IntelParseError } from "./server/parseIntel.ts";
 import { EXTRACT_MAX_CHARS, prioritizeLegalFacts } from "./src/lib/extractSchema.ts";
 import { getMissingAlerts } from "./server/missingAlerts.ts";
+import { FALLBACK_MISSING_ALERTS } from "./src/lib/liveMissingAlert.ts";
+import { lookupNamus } from "./server/namusLookup.ts";
 
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -166,11 +168,18 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
       res.end();
       return;
     }
-    if (req.method !== "GET") {
-      send(res, 405, { error: "GET only" });
-      return;
-    }
     try {
+      if (req.method !== "GET") {
+        send(res, 200, {
+          alerts: FALLBACK_MISSING_ALERTS,
+          fetchedAt: new Date().toISOString(),
+          cached: true,
+          offline: true,
+          sources: [],
+          warning: "GET only",
+        });
+        return;
+      }
       const url = new URL(req.url || "/", "http://127.0.0.1");
       const body = await getMissingAlerts({
         state: url.searchParams.get("state") || "",
@@ -179,14 +188,32 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
       });
       send(res, 200, body);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Alert feed failed.";
+      console.error("[alerts] local handler failed", err);
       send(res, 200, {
-        alerts: [],
+        alerts: FALLBACK_MISSING_ALERTS,
         fetchedAt: new Date().toISOString(),
-        cached: false,
+        cached: true,
+        offline: true,
         sources: [],
-        warning: message,
+        warning: "NCMEC feed temporarily unreachable",
       });
+    }
+  };
+
+  const namusHandler = async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    try {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      const query = url.searchParams.get("id") || url.searchParams.get("url") || url.searchParams.get("q") || "";
+      const body = await lookupNamus(query);
+      send(res, 200, body);
+    } catch (err) {
+      console.error("[namus] local handler failed", err);
+      send(res, 200, { error: "NamUs lookup failed." });
     }
   };
 
@@ -197,6 +224,7 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
     server.middlewares.use("/api/parse-metadata", (req, res) => { void metadataHandler(req, res); });
     server.middlewares.use("/api/parse-intel", (req, res) => { void intelHandler(req, res); });
     server.middlewares.use("/api/alerts/missing", (req, res) => { void alertsHandler(req, res); });
+    server.middlewares.use("/api/namus", (req, res) => { void namusHandler(req, res); });
   };
 
   return {

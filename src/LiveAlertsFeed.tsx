@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, ExternalLink, FolderPlus, RefreshCw } from "lucide-react";
 import { fetchMissingAlerts } from "./lib/alertsClient";
-import type { LiveMissingAlert } from "./lib/liveMissingAlert";
+import { FALLBACK_MISSING_ALERTS, type LiveMissingAlert } from "./lib/liveMissingAlert";
 
 const POLL_MS = 5 * 60 * 1000;
 const mono = "font-mono";
@@ -38,19 +38,22 @@ export default function LiveAlertsFeed({
   const [alerts, setAlerts] = useState<LiveMissingAlert[]>([]);
   const [fetchedAt, setFetchedAt] = useState("");
   const [warning, setWarning] = useState("");
+  const [offline, setOffline] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
 
   const load = useCallback(async (refresh = false) => {
     setLoading(true);
-    setError("");
     try {
       const data = await fetchMissingAlerts({ refresh });
       setAlerts(data.alerts);
       setFetchedAt(data.fetchedAt);
-      setWarning(data.warning || "");
+      setOffline(Boolean(data.offline));
+      setWarning(data.offline ? "" : (data.warning || ""));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load the dispatch feed.");
+      console.error("[alerts] UI load failed", err);
+      setAlerts(FALLBACK_MISSING_ALERTS);
+      setOffline(true);
+      setWarning("");
     } finally {
       setLoading(false);
     }
@@ -78,12 +81,17 @@ export default function LiveAlertsFeed({
       <div className="mb-3.5 flex flex-wrap items-start justify-between gap-3">
         <h1 className="flex items-center gap-3 text-[28px] font-semibold leading-tight tracking-tight sm:text-[40px]">
           <span className="relative mt-2 flex h-2.5 w-2.5 shrink-0">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-60" />
-            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+            <span className={`absolute inline-flex h-full w-full rounded-full ${offline ? "bg-slate-400" : "animate-ping bg-red-400 opacity-60"}`} />
+            <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${offline ? "bg-slate-500" : "bg-red-500"}`} />
           </span>
           Live missing alerts
         </h1>
-        <div className="flex items-center gap-2 sm:mt-2">
+        <div className="flex flex-wrap items-center gap-2 sm:mt-2">
+          {offline && (
+            <span className="rounded-full border border-slate-300 bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-slate-700">
+              Offline / Cached Feed
+            </span>
+          )}
           {fetchedAt && (
             <span className={`${mono} text-[10.5px] text-slate-400`}>
               {loading ? "Updating…" : `Updated ${relativeTime(fetchedAt)}`}
@@ -104,9 +112,9 @@ export default function LiveAlertsFeed({
         Public NCMEC missing-person RSS (not a substitute for agency AMBER channels). Open a poster on missingkids.org, or start a local workspace from an item.
       </p>
 
-      {(error || warning) && (
-        <div className="mb-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-2.5 text-[12.5px] text-amber-950">
-          {error || warning}
+      {warning && !offline && (
+        <div className="mb-4 rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-2.5 text-[12.5px] text-slate-700">
+          {warning}
         </div>
       )}
 

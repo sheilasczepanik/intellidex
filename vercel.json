@@ -9,7 +9,13 @@
     "api/parseMetadata.ts": {
       "maxDuration": 30
     },
+    "api/alerts.ts": {
+      "maxDuration": 30
+    },
     "api/alerts/missing.ts": {
+      "maxDuration": 30
+    },
+    "api/namus.ts": {
       "maxDuration": 30
     }
   },

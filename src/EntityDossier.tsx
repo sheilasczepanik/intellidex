@@ -1,3 +1,4 @@
+import { Pin } from "lucide-react";
 import type { ComponentType } from "react";
 import { getCategoryColor, resolveSemanticCategory, type CategoryColorInput } from "./utils/categoryColors";
 import { formatRoleLabel, roleDisplayClass, entityAvatarClass, entityInitials } from "./utils/roleBadge";
@@ -27,9 +28,11 @@ type Props = {
   onSelect: (id: string | null) => void;
   onPromoteEntity?: (id: string) => void;
   ToggleIcon: ComponentType<{ className?: string }>;
+  pinnedIds?: string[];
+  onTogglePin?: (id: string) => void;
 };
 
-export default function EntityDossier({ open, selected, lanes, onToggle, onSelect, onPromoteEntity, ToggleIcon }: Props) {
+export default function EntityDossier({ open, selected, lanes, onToggle, onSelect, onPromoteEntity, ToggleIcon, pinnedIds, onTogglePin }: Props) {
   return (
     <aside className={`flex shrink-0 flex-col overflow-hidden border-slate-200 bg-slate-50/60 transition-[width] duration-200 max-lg:absolute max-lg:z-20 max-lg:h-full ${open ? "w-[min(268px,86vw)] border-r" : "w-0 border-0 max-lg:pointer-events-none lg:w-[58px] lg:border-r"}`}>
       <div className="flex h-12 shrink-0 items-center justify-between gap-2.5 border-b border-slate-200 pl-[18px] pr-3.5">
@@ -54,6 +57,16 @@ export default function EntityDossier({ open, selected, lanes, onToggle, onSelec
                     {entityInitials(def.name)}
                   </span>
                   <span className="min-w-0 truncate text-[13.5px] font-medium">{def.name}</span>
+                  {def.entityId && onTogglePin ? (
+                    <button
+                      type="button"
+                      aria-label={(pinnedIds ?? []).includes(def.entityId) ? "Unpin person" : "Pin person"}
+                      onClick={(e) => { e.stopPropagation(); onTogglePin(def.entityId!); }}
+                      className={`ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${(pinnedIds ?? []).includes(def.entityId) ? "text-blue-700" : "text-slate-400 hover:bg-slate-100"}`}
+                    >
+                      <Pin className={`h-3.5 w-3.5 ${(pinnedIds ?? []).includes(def.entityId) ? "fill-blue-600" : ""}`} />
+                    </button>
+                  ) : null}
                 </div>
                 <div className={`mb-1.5 truncate whitespace-nowrap ${mono} text-[10.5px] tracking-[0.06em] text-slate-500`}>{def.role ? formatRoleLabel(def.role) : "ENTITY"}</div>
                 <div className="text-[12px] leading-relaxed text-slate-500 text-pretty">{def.note || "No notes recorded."}</div>

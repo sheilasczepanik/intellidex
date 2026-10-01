@@ -22,6 +22,7 @@ export type EvidenceStatus = "indexed" | "ingesting" | "flagged" | "queued" | "f
 export interface SubjectProfile {
   ageAtDisappearance?: string;
   currentEstimatedAge?: string;
+  dateOfBirth?: string;
   height?: string;
   weight?: string;
   hair?: string;
@@ -58,6 +59,8 @@ export interface CaseRecord {
   lksLocation?: string;
   lksCircumstances?: string;
   subjectProfile?: SubjectProfile;
+  /** Person entity IDs pinned in the left rail for this case. */
+  pinnedPersonIds?: string[];
 }
 
 export interface EntityRecord {
@@ -106,6 +109,8 @@ export interface EvidenceRecord {
   sourceUrl?: string;
   publishedDate?: string;
   wordCount?: number;
+  /** When true, the file stays in the case vault but is hidden from the Intake staging list. */
+  stagingHidden?: boolean;
 }
 
 export interface TimelineEventRecord {
@@ -521,6 +526,13 @@ export class DossierDB extends Dexie {
           else row.type = "image";
         }
         if (!row.thumbnailUrl && row.type === "image") row.thumbnailUrl = row.dataUrl;
+      });
+    });
+    this.version(21).stores({
+      cases: "id, status, updatedAt, isArchived",
+    }).upgrade(async (tx) => {
+      await tx.table("cases").toCollection().modify((row: { pinnedPersonIds?: string[] }) => {
+        if (!Array.isArray(row.pinnedPersonIds)) row.pinnedPersonIds = [];
       });
     });
   }

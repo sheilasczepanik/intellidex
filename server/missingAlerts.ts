@@ -1,13 +1,14 @@
 import { assertPublicHttpUrl, ScrapeHttpError } from "./scrapeUrl.ts";
 import {
   classifyLiveAlertType,
+  FALLBACK_MISSING_ALERTS,
   type LiveMissingAlert,
   type MissingAlertSourceStatus,
   type MissingAlertsResponse,
 } from "../src/lib/liveMissingAlert.ts";
 
 const BROWSER_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 const NCMEC_INDEX = "https://www.missingkids.org/gethelpnow/search/rss";
 const NCMEC_NATIONAL =
@@ -16,13 +17,14 @@ const NCMEC_STATE =
   "https://api.missingkids.org/missingkids/servlet/XmlServlet?act=rss&LanguageCountry=en_US&orgPrefix=NCMC&state=";
 
 const CACHE_MS = 10 * 60 * 1000;
-const FETCH_TIMEOUT_MS = 12_000;
+const FETCH_TIMEOUT_MS = 8_000;
 const MAX_ALERTS = 48;
 const STATE_RE = /^[A-Z]{2}$/;
 
 type CacheEntry = { expires: number; body: MissingAlertsResponse };
 
 const cache = new Map<string, CacheEntry>();
+const lastGoodLive = new Map<string, MissingAlertsResponse>();
 
 function decodeXml(raw: string) {
   return raw
@@ -206,10 +208,26 @@ function parseFeedXml(xml: string): { title: string; alerts: LiveMissingAlert[] 
     ...tagContents(xml, "alert"),
   ];
   for (const block of blocks) {
-    const alert = toAlert(block, channelTitle);
-    if (alert) alerts.push(alert);
+    try {
+      const alert = toAlert(block, channelTitle);
+      if (alert) alerts.push(alert);
+    } catch (err) {
+      console.error("[alerts] Skipped a malformed feed item", err);
+    }
   }
   return { title: channelTitle, alerts };
+}
+
+function tryParseFeedXml(xml: string): { title: string; alerts: LiveMissingAlert[] } {
+  try {
+    if (!xml || !/<rss[\s>]|<feed[\s>]|<alert[\s>]|<item[\s>]|<entry[\s>]/i.test(xml)) {
+      throw new Error("Response was not RSS/Atom/CAP XML.");
+    }
+    return parseFeedXml(xml);
+  } catch (err) {
+    console.error("[alerts] XML parse failed", err);
+    return { title: "", alerts: [] };
+  }
 }
 
 function discoverNcmecFeeds(html: string) {
@@ -223,30 +241,37 @@ function discoverNcmecFeeds(html: string) {
   return [...new Set(hrefs)];
 }
 
+function fetchSignal() {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  }
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+  return ac.signal;
+}
+
 async function fetchText(url: string) {
   const parsed = assertPublicHttpUrl(url);
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
   try {
     const res = await fetch(parsed.toString(), {
-      signal: ac.signal,
+      signal: fetchSignal(),
       headers: {
-        Accept: "application/rss+xml, application/atom+xml, application/xml, text/xml, text/html;q=0.8, */*;q=0.5",
+        Accept: "application/rss+xml, application/xml, text/xml, */*",
         "User-Agent": BROWSER_UA,
       },
       redirect: "follow",
     });
     const text = await res.text();
     if (!res.ok) {
+      console.error(`[alerts] NCMEC fetch HTTP ${res.status} for ${parsed.toString()}`);
       throw new ScrapeHttpError(res.status, `Feed returned HTTP ${res.status}`);
     }
     return { url: parsed.toString(), text, contentType: res.headers.get("content-type") || "" };
   } catch (err) {
     if (err instanceof ScrapeHttpError) throw err;
     const message = err instanceof Error ? err.message : "Feed fetch failed.";
+    console.error("[alerts] NCMEC fetch failed", message);
     throw new ScrapeHttpError(502, message);
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -273,19 +298,27 @@ async function loadOneFeed(url: string): Promise<{ source: MissingAlertSourceSta
       const discovered = discoverNcmecFeeds(page.text);
       const national = discovered[0] || NCMEC_NATIONAL;
       const nested = await fetchText(national);
-      const parsed = parseFeedXml(nested.text);
+      const parsed = tryParseFeedXml(nested.text);
       return {
-        source: { url: national, title: parsed.title, ok: true, itemCount: parsed.alerts.length },
+        source: { url: national, title: parsed.title, ok: parsed.alerts.length > 0, itemCount: parsed.alerts.length },
         alerts: parsed.alerts,
       };
     }
-    const parsed = parseFeedXml(page.text);
+    const parsed = tryParseFeedXml(page.text);
+    if (!parsed.alerts.length) {
+      console.error("[alerts] Parsed zero items from", page.url);
+      return {
+        source: { url: page.url, ok: false, error: "NCMEC feed temporarily unreachable" },
+        alerts: [],
+      };
+    }
     return {
       source: { url: page.url, title: parsed.title, ok: true, itemCount: parsed.alerts.length },
       alerts: parsed.alerts,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Could not load feed.";
+    console.error("[alerts] Feed load failed", url, message);
     return { source: { url, ok: false, error: message }, alerts: [] };
   }
 }
@@ -305,38 +338,75 @@ function mergeAlerts(lists: LiveMissingAlert[][]) {
   return out.slice(0, MAX_ALERTS);
 }
 
+function offlineBody(
+  cacheKey: string,
+  sources: MissingAlertSourceStatus[],
+): MissingAlertsResponse {
+  const prior = lastGoodLive.get(cacheKey);
+  const warning = "NCMEC feed temporarily unreachable";
+  if (prior?.alerts.length) {
+    return {
+      ...prior,
+      cached: true,
+      offline: true,
+      warning,
+      sources: sources.length ? sources : prior.sources,
+    };
+  }
+  return {
+    alerts: FALLBACK_MISSING_ALERTS,
+    fetchedAt: new Date().toISOString(),
+    cached: true,
+    offline: true,
+    sources,
+    warning,
+  };
+}
+
 export async function getMissingAlerts(opts: {
   state?: string;
   env?: Record<string, string | undefined>;
   bypassCache?: boolean;
 }): Promise<MissingAlertsResponse> {
-  const env = opts.env || process.env;
-  const urls = feedUrlsForRequest({ state: opts.state, env });
-  const cacheKey = urls.join("|");
-  const hit = cache.get(cacheKey);
-  if (!opts.bypassCache && hit && hit.expires > Date.now()) {
-    return { ...hit.body, cached: true };
-  }
+  try {
+    const env = opts.env || process.env;
+    const urls = feedUrlsForRequest({ state: opts.state, env });
+    const cacheKey = urls.join("|");
+    const hit = cache.get(cacheKey);
+    if (!opts.bypassCache && hit && hit.expires > Date.now()) {
+      return { ...hit.body, cached: true };
+    }
 
-  const results = await Promise.all(urls.map((url) => loadOneFeed(url)));
-  const alerts = mergeAlerts(results.map((r) => r.alerts));
-  const sources = results.map((r) => r.source);
-  const failed = sources.filter((s) => !s.ok);
-  const warning = alerts.length
-    ? failed.length
+    const results = await Promise.all(urls.map((url) => loadOneFeed(url)));
+    const alerts = mergeAlerts(results.map((r) => r.alerts));
+    const sources = results.map((r) => r.source);
+    const failed = sources.filter((s) => !s.ok);
+
+    if (!alerts.length) {
+      const body = offlineBody(cacheKey, sources);
+      cache.set(cacheKey, { expires: Date.now() + 60_000, body });
+      return body;
+    }
+
+    const warning = failed.length
       ? `Some feeds were unavailable (${failed.length}). Showing ${alerts.length} live items.`
-      : undefined
-    : failed.length
-      ? failed.map((s) => s.error).filter(Boolean).join(" ") || "Public missing-person feeds were unavailable."
-      : "No current items in the public missing-person feeds.";
+      : undefined;
 
-  const body: MissingAlertsResponse = {
-    alerts,
-    fetchedAt: new Date().toISOString(),
-    cached: false,
-    sources,
-    ...(warning ? { warning } : {}),
-  };
-  cache.set(cacheKey, { expires: Date.now() + CACHE_MS, body });
-  return body;
+    const body: MissingAlertsResponse = {
+      alerts,
+      fetchedAt: new Date().toISOString(),
+      cached: false,
+      offline: false,
+      sources,
+      ...(warning ? { warning } : {}),
+    };
+    cache.set(cacheKey, { expires: Date.now() + CACHE_MS, body });
+    lastGoodLive.set(cacheKey, body);
+    return body;
+  } catch (err) {
+    console.error("[alerts] getMissingAlerts failed", err);
+    const env = opts.env || process.env;
+    const urls = feedUrlsForRequest({ state: opts.state, env });
+    return offlineBody(urls.join("|"), []);
+  }
 }

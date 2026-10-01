@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Check, Pencil, X } from "lucide-react";
+import { Check, Pencil, Pin, X } from "lucide-react";
 import EvidenceThumb from "./EvidenceThumb";
 import { VerifyCategoryBadge, VerifyConfidenceChip, ManualObservationBadge, AiExtractedBadge } from "./Verify";
 import { CitationPill } from "./SourceDocumentViewer";
@@ -77,6 +77,8 @@ type Props = {
   onDoneEdit: () => void;
   onPatch: (patch: Partial<VerifyDraftRecord>) => void;
   parseEventTime: (a: null, label: string, opts: { extraText: string }) => number;
+  pinned?: boolean;
+  onTogglePin?: () => void;
 };
 
 export default function VerifyQueueCard({
@@ -97,6 +99,8 @@ export default function VerifyQueueCard({
   onDoneEdit,
   onPatch,
   parseEventTime,
+  pinned,
+  onTogglePin,
 }: Props) {
   const thumb = evidenceImageSrc(evidence);
   const citation = citationFromDraft(d, evidence);
@@ -136,6 +140,16 @@ export default function VerifyQueueCard({
             {d.category ? <VerifyCategoryBadge category={d.category} /> : null}
             <span className={`${mono} text-[12.5px] tracking-wide text-slate-900`}>{d.timestampLabel}</span>
             <Chip ok={Boolean(entity)}>{entity ? entity.name : d.entityName}</Chip>
+            {onTogglePin && (entity?.type === "person" || d.entityId) ? (
+              <button
+                type="button"
+                aria-label={pinned ? "Unpin person" : "Pin person"}
+                onClick={onTogglePin}
+                className={`flex h-7 w-7 items-center justify-center rounded-md ${pinned ? "text-blue-700" : "text-slate-400 hover:bg-slate-100 hover:text-slate-700"}`}
+              >
+                <Pin className={`h-3.5 w-3.5 ${pinned ? "fill-blue-600" : ""}`} />
+              </button>
+            ) : null}
             {d.origin === "manual" || d.citation === "manual-observation" ? null : <VerifyConfidenceChip confidence={d.confidence} />}
           </div>
           <h3 className="mb-1.5 text-[14.5px] font-medium tracking-tight">{d.title}</h3>

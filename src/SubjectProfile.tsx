@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Camera, Link2, Loader2, MapPin, Upload, X } from "lucide-react";
+import { Camera, Link2, Loader2, MapPin, Pencil, Upload, X } from "lucide-react";
 import { setCaseLocated, updateCase, type CaseRecord, type CaseStatus } from "./db";
 import { encodeProfilePhoto, resolveProfilePhotoLookup } from "./lib/imageEvidence";
 import {
@@ -13,6 +13,7 @@ import {
   subjectPhotoSrc,
 } from "./lib/missingPerson";
 import { entityInitials } from "./utils/roleBadge";
+import EditSubjectProfileDrawer, { type ProfileFocusField } from "./EditSubjectProfileDrawer";
 
 const mono = "font-mono";
 
@@ -30,6 +31,8 @@ export default function SubjectProfile({
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [photoOpen, setPhotoOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editFocus, setEditFocus] = useState<ProfileFocusField>("name");
   const [lookup, setLookup] = useState("");
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoError, setPhotoError] = useState<string | null>(null);
@@ -74,6 +77,21 @@ export default function SubjectProfile({
       setPhotoBusy(false);
     }
   };
+
+  const openEdit = (field: ProfileFocusField = "name") => {
+    setEditFocus(field);
+    setEditOpen(true);
+  };
+
+  const dashBtn = (empty: boolean, field: ProfileFocusField, filled: string) => (
+    <button
+      type="button"
+      onClick={() => openEdit(field)}
+      className={`rounded-sm text-left ${empty ? "text-slate-400 underline decoration-slate-300 decoration-dotted underline-offset-4 hover:text-blue-700 hover:decoration-blue-500" : "hover:underline hover:decoration-slate-400"}`}
+    >
+      {empty ? "—" : filled}
+    </button>
+  );
 
   return (
     <section className={`mb-8 grid gap-5 rounded-[16px] border bg-white p-5 shadow-sm lg:grid-cols-[auto_minmax(0,1fr)_auto] ${urgent ? "border-amber-400" : "border-slate-200"}`}>
@@ -126,16 +144,56 @@ export default function SubjectProfile({
         </button>
       </div>
       <div className="min-w-0">
-        <h1 className="text-[28px] font-semibold leading-tight tracking-tight sm:text-[34px]">{subject}</h1>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => openEdit("name")}
+            className="min-w-0 text-left text-[28px] font-semibold leading-tight tracking-tight hover:underline sm:text-[34px]"
+            title="Edit subject name"
+          >
+            {subject}
+          </button>
+          <button
+            type="button"
+            onClick={() => openEdit("name")}
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-500 hover:border-slate-300 hover:text-slate-800"
+          >
+            <Pencil className="h-3 w-3" />
+            Edit Details
+          </button>
+        </div>
         <p className="mt-1 text-[13px] text-slate-600">
-          Age at disappearance {profile.ageAtDisappearance || "—"}
+          Age at disappearance {dashBtn(!profile.ageAtDisappearance?.trim(), "ageAtDisappearance", profile.ageAtDisappearance || "")}
+          {profile.dateOfBirth ? ` · Born ${profile.dateOfBirth}` : ""}
           {profile.currentEstimatedAge ? ` · Current estimate ${profile.currentEstimatedAge}` : ""}
         </p>
         <div className="mt-3 grid gap-2 text-[13px] text-slate-700 sm:grid-cols-2">
-          <div><span className="text-slate-500">Height / weight</span> · {[profile.height, profile.weight].filter(Boolean).join(" / ") || "—"}</div>
-          <div><span className="text-slate-500">Hair / eyes</span> · {[profile.hair, profile.eyes].filter(Boolean).join(" / ") || "—"}</div>
-          <div className="sm:col-span-2"><span className="text-slate-500">Marks</span> · {profile.distinguishingMarks || "None recorded"}</div>
-          <div className="sm:col-span-2"><span className="text-slate-500">Clothing last seen</span> · {profile.clothingLastSeen || "—"}</div>
+          <div>
+            <span className="text-slate-500">Height / weight</span>
+            {" · "}
+            {dashBtn(!profile.height && !profile.weight, profile.height ? "height" : "weight", [profile.height, profile.weight].filter(Boolean).join(" / "))}
+          </div>
+          <div>
+            <span className="text-slate-500">Hair / eyes</span>
+            {" · "}
+            {dashBtn(!profile.hair && !profile.eyes, profile.hair ? "hair" : "eyes", [profile.hair, profile.eyes].filter(Boolean).join(" / "))}
+          </div>
+          <div className="sm:col-span-2">
+            <span className="text-slate-500">Marks</span>
+            {" · "}
+            {profile.distinguishingMarks?.trim()
+              ? profile.distinguishingMarks
+              : (
+                <button type="button" onClick={() => openEdit("distinguishingMarks")} className="rounded-sm text-slate-400 underline decoration-slate-300 decoration-dotted underline-offset-4 hover:text-blue-700">
+                  None recorded
+                </button>
+              )}
+          </div>
+          <div className="sm:col-span-2">
+            <span className="text-slate-500">Clothing last seen</span>
+            {" · "}
+            {dashBtn(!profile.clothingLastSeen?.trim(), "clothingLastSeen", profile.clothingLastSeen || "")}
+          </div>
           {profile.medicalAlerts ? (
             <div className={`sm:col-span-2 rounded-lg border px-3 py-2 text-[12.5px] font-medium ${alertToneClass("CRITICAL_MEDICAL")}`}>
               Vital / medical: {profile.medicalAlerts}
@@ -143,7 +201,12 @@ export default function SubjectProfile({
           ) : null}
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px] text-slate-500">
-          <span className="inline-flex items-center gap-1.5"><MapPin className="h-3.5 w-3.5" />{activeCase.lksLocation?.trim() || activeCase.jurisdiction?.trim() || "LKS location unassigned"}</span>
+          <button type="button" onClick={() => openEdit("lksLocation")} className="inline-flex items-center gap-1.5 text-left hover:text-slate-800">
+            <MapPin className="h-3.5 w-3.5" />
+            {activeCase.lksLocation?.trim() || activeCase.jurisdiction?.trim() || (
+              <span className="text-slate-400 underline decoration-slate-300 decoration-dotted underline-offset-4">LKS location unassigned</span>
+            )}
+          </button>
         </div>
         <div className="mt-2.5">
           {activeCase.isArchived ? (
@@ -169,11 +232,27 @@ export default function SubjectProfile({
           )}
         </div>
       </div>
-      <div className={`flex min-w-[11rem] flex-col justify-center rounded-[14px] border px-4 py-4 text-center ${urgent ? "border-amber-400 bg-amber-50" : "border-slate-300 bg-slate-50"}`}>
+      <button
+        type="button"
+        onClick={() => openEdit("lksAt")}
+        className={`flex min-w-[11rem] flex-col justify-center rounded-[14px] border px-4 py-4 text-center ${urgent ? "border-amber-400 bg-amber-50" : "border-slate-300 bg-slate-50"}`}
+        title="Edit last known sighting time"
+      >
         <div className={`${mono} text-[10px] tracking-[0.14em] text-slate-700`}>TIME MISSING</div>
         <div className="mt-2 text-[15px] font-semibold leading-snug text-slate-950">{formatTimeMissing(lksMs, clock)}</div>
-        <div className="mt-1 text-[12px] text-slate-600">{lksMs ? new Date(lksMs).toLocaleString() : "Set LKS on case create"}</div>
-      </div>
+        <div className={`mt-1 text-[12px] ${lksMs ? "text-slate-600" : "text-slate-400 underline decoration-slate-300 decoration-dotted underline-offset-4"}`}>
+          {lksMs ? new Date(lksMs).toLocaleString() : "Set LKS date & time"}
+        </div>
+      </button>
+
+      {editOpen ? (
+        <EditSubjectProfileDrawer
+          key={`${activeCase.id}-${editFocus}`}
+          activeCase={activeCase}
+          focusField={editFocus}
+          onClose={() => setEditOpen(false)}
+        />
+      ) : null}
 
       {photoOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="photo-lookup-title">

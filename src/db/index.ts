@@ -129,6 +129,7 @@ export async function createCase(input: {
     lksLocation: input.lksLocation ?? input.jurisdiction ?? "",
     lksCircumstances: input.lksCircumstances ?? "",
     subjectProfile: input.subjectProfile ?? {},
+    pinnedPersonIds: [],
   };
   await db.cases.add(row);
   return row;
@@ -136,9 +137,21 @@ export async function createCase(input: {
 
 export async function updateCase(
   id: string,
-  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "locatedAt" | "incidentStart" | "incidentEnd" | "subjectName" | "fileIdentifier" | "lksAt" | "lksLocation" | "lksCircumstances" | "subjectProfile">>,
+  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "locatedAt" | "incidentStart" | "incidentEnd" | "subjectName" | "fileIdentifier" | "lksAt" | "lksLocation" | "lksCircumstances" | "subjectProfile" | "pinnedPersonIds">>,
 ) {
   await db.cases.update(id, { ...patch, updatedAt: Date.now() });
+}
+
+export async function togglePinnedPerson(caseId: string, personId: string, pinned?: boolean) {
+  const rec = await db.cases.get(caseId);
+  if (!rec) return;
+  const cur = rec.pinnedPersonIds ?? [];
+  const has = cur.includes(personId);
+  const nextPinned = pinned ?? !has;
+  const pinnedPersonIds = nextPinned
+    ? [...new Set([...cur, personId])]
+    : cur.filter((id) => id !== personId);
+  await db.cases.update(caseId, { pinnedPersonIds, updatedAt: Date.now() });
 }
 
 export async function setCaseArchived(id: string, isArchived: boolean) {
@@ -538,6 +551,46 @@ export async function deleteEvidence(id: string) {
     await db.evidence.delete(id);
     await db.cases.update(rec.caseId, { updatedAt: Date.now() });
   });
+}
+
+const INTAKE_DONE_STATUSES = new Set(["indexed", "extracted", "completed"]);
+
+export function isIntakeCompleteStatus(status?: string) {
+  return INTAKE_DONE_STATUSES.has(String(status || "").toLowerCase());
+}
+
+/** Files that still need processing or operator attention in Intake. */
+export function isPendingIntakeEvidence(row: { status?: string; stagingHidden?: boolean }) {
+  if (row.stagingHidden) return false;
+  const s = String(row.status || "").toLowerCase();
+  if (isIntakeCompleteStatus(s)) return false;
+  return s === "queued" || s === "processing" || s === "ingesting" || s === "flagged" || s === "failed";
+}
+
+export function isVisibleInStagingQueue(row: { stagingHidden?: boolean }) {
+  return !row.stagingHidden;
+}
+
+export async function dismissEvidenceFromStaging(id: string) {
+  const rec = await db.evidence.get(id);
+  if (!rec) return;
+  if (isIntakeCompleteStatus(rec.status)) {
+    await db.evidence.update(id, { stagingHidden: true });
+    await touchCase(rec.caseId);
+    return;
+  }
+  await deleteEvidence(id);
+}
+
+export async function clearCompletedStaging(caseId: string) {
+  const rows = await db.evidence.where("caseId").equals(caseId).toArray();
+  const ids = rows.filter((row) => isIntakeCompleteStatus(row.status) && !row.stagingHidden).map((row) => row.id);
+  if (!ids.length) return 0;
+  await db.transaction("rw", db.evidence, db.cases, async () => {
+    for (const id of ids) await db.evidence.update(id, { stagingHidden: true });
+    await db.cases.update(caseId, { updatedAt: Date.now() });
+  });
+  return ids.length;
 }
 
 export { parseEventTime } from "../lib/eventTime";

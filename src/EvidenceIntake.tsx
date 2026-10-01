@@ -1,6 +1,6 @@
 import { useEffect, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { ArrowRight, CloudUpload, FileText, Globe, Loader2, TriangleAlert, X } from "lucide-react";
-import { db, deleteEvidence, formatBytes, type CaseRecord, type EvidenceRecord } from "./db";
+import { clearCompletedStaging, db, dismissEvidenceFromStaging, formatBytes, isIntakeCompleteStatus, isVisibleInStagingQueue, type CaseRecord, type EvidenceRecord } from "./db";
 import EvidenceThumb from "./EvidenceThumb";
 import { calculateSHA256 } from "./lib/cryptoUtils";
 import { encodeEvidenceImage, evidenceImageSrc, isImageFile } from "./lib/imageEvidence";
@@ -237,6 +237,14 @@ export default function EvidenceIntake({
   const [intakeTab, setIntakeTab] = useState<"official" | "press">("official");
   const [editorialText, setEditorialText] = useState("");
   const scrapeBusy = scrapeStage !== "idle";
+  const stagingRows = caseEvidence.filter(isVisibleInStagingQueue);
+  const completedStaging = stagingRows.filter((row) => isIntakeCompleteStatus(row.status));
+  const pendingStaging = stagingRows.filter((row) => !isIntakeCompleteStatus(row.status));
+
+  const removeFromStaging = async (id: string) => {
+    await dismissEvidenceFromStaging(id);
+    if (activeEvidenceId === id) setActiveEvidenceId(null);
+  };
   useEffect(() => {
     const tick = window.setInterval(() => {
       const now = Date.now();
@@ -440,13 +448,34 @@ export default function EvidenceIntake({
       </div>
       )}
 
-      <div className="mb-1 mt-10 flex items-center justify-between border-b border-slate-200 pb-3.5">
+      <div className="mb-1 mt-10 flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3.5">
         <h2 className={`${mono} text-[11px] font-medium tracking-[0.14em] text-slate-500`}>STAGING QUEUE</h2>
-        <span className={`${mono} text-[11px] text-slate-500`}>{caseEvidence.length} FILES</span>
+        <div className="flex flex-wrap items-center gap-2">
+          {completedStaging.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                void (async () => {
+                  await clearCompletedStaging(activeCase.id);
+                  if (activeEvidenceId && completedStaging.some((row) => row.id === activeEvidenceId)) {
+                    setActiveEvidenceId(null);
+                  }
+                })();
+              }}
+              className="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-medium text-slate-500 hover:border-slate-300 hover:text-slate-800"
+            >
+              Clear Indexed
+            </button>
+          )}
+          <span className={`${mono} text-[11px] text-slate-500`}>
+            {pendingStaging.length > 0 ? `${pendingStaging.length} PENDING · ` : ""}
+            {stagingRows.length} IN QUEUE
+          </span>
+        </div>
       </div>
 
       <div>
-        {caseEvidence.map((q) => {
+        {stagingRows.map((q) => {
           const job = ingestJob?.evidenceId === q.id ? ingestJob : null;
           const pct = job ? ingestPercent(job, nowMs) : 0;
           const elapsed = job ? ingestElapsedSec(job, nowMs) : 0;
@@ -498,7 +527,13 @@ export default function EvidenceIntake({
                     </span>
                   )}
                 </div>
-                <button type="button" onClick={() => void deleteEvidence(q.id)} className="mt-1.5 text-slate-400 hover:text-slate-700">
+                <button
+                  type="button"
+                  aria-label={`Remove ${q.fileName} from staging`}
+                  title={isIntakeCompleteStatus(q.status) ? "Dismiss from staging" : "Remove from staging"}
+                  onClick={(e) => { e.stopPropagation(); void removeFromStaging(q.id); }}
+                  className="mt-1.5 text-slate-400 hover:text-slate-700"
+                >
                   <X className="h-[15px] w-[15px]" />
                 </button>
               </div>

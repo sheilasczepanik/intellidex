@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
   addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent,
-  db, DEFAULT_OPERATOR, deleteEntity, deleteEvidence, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isLocatedCase, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft,
+  db, DEFAULT_OPERATOR, deleteEntity, deleteEvidence, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isIntakeCompleteStatus, isLocatedCase, isPendingIntakeEvidence, isVisibleInStagingQueue, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft, togglePinnedPerson,
   OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveManualEvidence, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
@@ -73,6 +73,9 @@ import { formatRoleLabel, normalizePersonRole, PERSON_ROLE_VALUES, roleDisplayCl
 import type { SearchHit } from "./lib/globalSearch";
 import { formatAlertLabel, ALERT_LEVELS } from "./lib/missingPerson";
 import LiveAlertsFeed from "./LiveAlertsFeed";
+import VerifyIngestDropzone from "./VerifyIngestDropzone";
+import CaseSidebarTree from "./CaseSidebarTree";
+import PersonWorkspace from "./PersonWorkspace";
 import { alertTypeToCaseStatus, parseAlertMissingAt, type LiveMissingAlert } from "./lib/liveMissingAlert";
 import type { SubjectProfile } from "./db/schema";
 import {
@@ -87,12 +90,37 @@ import {
 /* types                                                               */
 /* ------------------------------------------------------------------ */
 
-export type Screen = "Hub" | "Alerts" | "Setup" | "Overview" | "Intake" | "Media" | "Verify" | "Timeline" | "Locations" | "WorkingTheory" | "Profile" | "Preferences";
+export type Screen = "Hub" | "Alerts" | "Setup" | "Overview" | "Intake" | "Media" | "Verify" | "Timeline" | "Locations" | "WorkingTheory" | "Profile" | "Preferences" | "PersonOverview" | "PersonTimeline" | "PersonLocations" | "PersonMedia" | "PersonLinked";
 export type Tone = "active" | "review" | "cold" | "ok" | "fail";
 export type EntityKind = "People" | "Places" | "Vehicles" | "Phones" | "Digital" | "Exhibits";
 
-function parseAppPath(pathname: string): { screen: Screen; caseId: string | null } {
+const PERSON_SCREENS: Screen[] = ["PersonOverview", "PersonTimeline", "PersonLocations", "PersonMedia", "PersonLinked"];
+const PERSON_LEAF_BY_SCREEN: Record<string, import("./PersonWorkspace").PersonLeaf> = {
+  PersonOverview: "overview",
+  PersonTimeline: "timeline",
+  PersonLocations: "locations",
+  PersonMedia: "media",
+  PersonLinked: "linked",
+};
+const SCREEN_BY_PERSON_LEAF: Record<string, Screen> = {
+  overview: "PersonOverview",
+  timeline: "PersonTimeline",
+  locations: "PersonLocations",
+  media: "PersonMedia",
+  linked: "PersonLinked",
+};
+
+function parseAppPath(pathname: string): { screen: Screen; caseId: string | null; personId: string | null } {
   const path = pathname.replace(/\/+$/, "") || "/";
+  const personMatch = path.match(/^\/cases\/([^/]+)\/persons\/([^/]+)(?:\/(timeline|locations|media|linked))?$/i);
+  if (personMatch) {
+    const leaf = (personMatch[3] || "overview").toLowerCase();
+    return {
+      screen: SCREEN_BY_PERSON_LEAF[leaf] ?? "PersonOverview",
+      caseId: decodeURIComponent(personMatch[1]),
+      personId: decodeURIComponent(personMatch[2]),
+    };
+  }
   const caseMatch = path.match(/^\/cases\/([^/]+)(?:\/(overview|intake|media|verify|timeline|locations|graph|working-theory))?$/i);
   if (caseMatch) {
     const leaf = (caseMatch[2] || "overview").toLowerCase();
@@ -106,36 +134,41 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
       "working-theory": "WorkingTheory",
       graph: "Overview",
     };
-    return { screen: screens[leaf] ?? "Overview", caseId: decodeURIComponent(caseMatch[1]) };
+    return { screen: screens[leaf] ?? "Overview", caseId: decodeURIComponent(caseMatch[1]), personId: null };
   }
-  if (path === "/" || path === "/hub") return { screen: "Hub", caseId: null };
-  if (path === "/hub/alerts" || path === "/alerts") return { screen: "Alerts", caseId: null };
-  if (path === "/setup") return { screen: "Setup", caseId: null };
-  if (path === "/overview") return { screen: "Overview", caseId: null };
-  if (path === "/intake") return { screen: "Intake", caseId: null };
-  if (path === "/media") return { screen: "Media", caseId: null };
-  if (path === "/verify") return { screen: "Verify", caseId: null };
-  if (path === "/timeline") return { screen: "Timeline", caseId: null };
-  if (path === "/locations") return { screen: "Locations", caseId: null };
-  if (path === "/working-theory") return { screen: "WorkingTheory", caseId: null };
-  if (path === "/graph") return { screen: "Overview", caseId: null };
-  if (path.startsWith("/settings/profile")) return { screen: "Profile", caseId: null };
-  if (path.startsWith("/settings/workspace")) return { screen: "Preferences", caseId: null };
-  return { screen: "Hub", caseId: null };
+  if (path === "/" || path === "/hub") return { screen: "Hub", caseId: null, personId: null };
+  if (path === "/hub/alerts" || path === "/alerts") return { screen: "Alerts", caseId: null, personId: null };
+  if (path === "/setup") return { screen: "Setup", caseId: null, personId: null };
+  if (path === "/overview") return { screen: "Overview", caseId: null, personId: null };
+  if (path === "/intake") return { screen: "Intake", caseId: null, personId: null };
+  if (path === "/media") return { screen: "Media", caseId: null, personId: null };
+  if (path === "/verify") return { screen: "Verify", caseId: null, personId: null };
+  if (path === "/timeline") return { screen: "Timeline", caseId: null, personId: null };
+  if (path === "/locations") return { screen: "Locations", caseId: null, personId: null };
+  if (path === "/working-theory") return { screen: "WorkingTheory", caseId: null, personId: null };
+  if (path === "/graph") return { screen: "Overview", caseId: null, personId: null };
+  if (path.startsWith("/settings/profile")) return { screen: "Profile", caseId: null, personId: null };
+  if (path.startsWith("/settings/workspace")) return { screen: "Preferences", caseId: null, personId: null };
+  return { screen: "Hub", caseId: null, personId: null };
 }
 
-function pathFromScreen(screen: Screen, caseId?: string | null) {
+function pathFromScreen(screen: Screen, caseId?: string | null, personId?: string | null) {
   if (screen === "Hub") return "/hub";
   if (screen === "Alerts") return "/hub/alerts";
   if (screen === "Profile") return "/settings/profile";
   if (screen === "Preferences") return "/settings/workspace";
   if (screen === "Setup") return "/setup";
+  if (PERSON_SCREENS.includes(screen) && caseId && personId) {
+    const leaf = PERSON_LEAF_BY_SCREEN[screen] || "overview";
+    const suffix = leaf === "overview" ? "" : `/${leaf}`;
+    return `/cases/${encodeURIComponent(caseId)}/persons/${encodeURIComponent(personId)}${suffix}`;
+  }
   const leaf = screen === "WorkingTheory" ? "working-theory" : screen.toLowerCase();
   if (caseId) return `/cases/${encodeURIComponent(caseId)}/${leaf}`;
   return `/${leaf}`;
 }
 
-const CASE_WORKSPACE: Screen[] = ["Overview", "Intake", "Media", "Verify", "Timeline", "Locations", "WorkingTheory"];
+const CASE_WORKSPACE: Screen[] = ["Overview", "Intake", "Media", "Verify", "Timeline", "Locations", "WorkingTheory", ...PERSON_SCREENS];
 
 function NoActiveCase({ onHub }: { onHub: () => void }) {
   return (
@@ -412,6 +445,7 @@ export default function DesktopApp() {
   const [toast, setToast] = useState<string | null>(null);
   const [archivePrompt, setArchivePrompt] = useState<{ id: string; title: string } | null>(null);
   const [activeCaseId, setActiveCaseId] = useState<string | null>(boot.caseId ?? "CASE-0038");
+  const [workspacePersonId, setWorkspacePersonId] = useState<string | null>(boot.personId);
 
   const hubCases = useLiveQuery(listHubCases);
   const locatedHubCases = (hubCases ?? []).filter((c) => isLocatedCase(c));
@@ -551,19 +585,22 @@ export default function DesktopApp() {
       const loc = parseAppPath(window.location.pathname);
       setScreen(loc.screen);
       if (loc.caseId) setActiveCaseId(loc.caseId);
+      setWorkspacePersonId(loc.personId);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  const goTo = (next: Screen, caseId?: string | null) => {
+  const goTo = (next: Screen, caseId?: string | null, personId?: string | null) => {
     if (caseId) setActiveCaseId(caseId);
     if (caseId === "") setActiveCaseId("");
     setScreen(next);
     setOperatorMenu(false);
     setNavOpen(false);
     const id = caseId || (next === "Hub" || next === "Alerts" || next === "Setup" || next === "Profile" || next === "Preferences" ? null : resolvedCaseId);
-    const path = pathFromScreen(next, id);
+    const pid = PERSON_SCREENS.includes(next) ? (personId ?? workspacePersonId) : null;
+    setWorkspacePersonId(pid);
+    const path = pathFromScreen(next, id, pid);
     if (window.location.pathname !== path) window.history.pushState({}, "", path);
   };
 
@@ -592,9 +629,9 @@ export default function DesktopApp() {
       return;
     }
     if (!resolvedCaseId) return;
-    const path = pathFromScreen(screen, resolvedCaseId);
+    const path = pathFromScreen(screen, resolvedCaseId, PERSON_SCREENS.includes(screen) ? workspacePersonId : null);
     if (window.location.pathname !== path) window.history.replaceState({}, "", path);
-  }, [screen, resolvedCaseId]);
+  }, [screen, resolvedCaseId, workspacePersonId]);
 
   useEffect(() => {
     if (!toast) return;
@@ -624,15 +661,8 @@ export default function DesktopApp() {
     { id: "Hub", icon: LayoutGrid },
     { id: "Alerts", icon: Radio, label: "Live alerts", indent: true },
   ];
-  const CASE_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }>; badge?: number; label?: string }[] = [
-    { id: "Overview", icon: LayoutDashboard },
-    { id: "Locations", icon: MapPin, label: "Locations & Map" },
-    { id: "Intake", icon: Inbox, badge: caseEvidence.length || undefined },
-    { id: "Media", icon: ImageIcon, label: "Case Media Vault" },
-    { id: "Verify", icon: ShieldCheck, badge: pendingDrafts.length || undefined },
-    { id: "Timeline", icon: GitCommitHorizontal },
-    { id: "WorkingTheory", icon: StickyNote, label: "Working Theory" },
-  ];
+  const intakeNavBadge = caseEvidence.filter(isPendingIntakeEvidence).length || undefined;
+  const verifyNavBadge = pendingDrafts.length || undefined;
 
   const ensureActiveCase = async () => {
     if (activeCaseId && activeCaseId !== "" && hubCases?.some((c) => c.id === activeCaseId)) return activeCaseId;
@@ -1463,6 +1493,7 @@ export default function DesktopApp() {
         }
       }
     }
+    if (ids.length) setActiveEvidenceId(ids[ids.length - 1]);
     return ids;
   };
 
@@ -2012,6 +2043,14 @@ export default function DesktopApp() {
   };
 
   const sourceEvidence = caseEvidence.find((e) => e.id === activeEvidenceId) ?? caseEvidence[0] ?? null;
+  const intakeIndexedFiles = useMemo(
+    () => {
+      const visible = caseEvidence.filter((row) => isIntakeCompleteStatus(row.status) && isVisibleInStagingQueue(row));
+      const rest = caseEvidence.filter((row) => isIntakeCompleteStatus(row.status) && !isVisibleInStagingQueue(row));
+      return [...visible, ...rest].map((row) => ({ id: row.id, fileName: row.fileName }));
+    },
+    [caseEvidence],
+  );
   const drawerEvent = caseEvents.find((e) => e.id === drawerEventId) ?? null;
   const drawerEntity = drawerEvent ? caseEntities.find((e) => e.id === drawerEvent.entityId) : null;
   const drawerSource = drawerEvent ? caseEvidence.find((e) => e.id === drawerEvent.sourceDocId) : null;
@@ -2168,7 +2207,7 @@ export default function DesktopApp() {
         ) : null}
 
         {/* sidebar */}
-        <aside className={`app-shell-nav z-40 flex w-[min(236px,88vw)] flex-col border-r border-slate-200 bg-white transition-transform duration-200 ${navOpen ? "is-open" : ""}`}>
+        <aside className={`app-shell-nav z-40 flex w-[min(256px,88vw)] flex-col border-r border-slate-200 bg-white transition-transform duration-200 ${navOpen ? "is-open" : ""}`}>
           <div className="flex shrink-0">
           <button
             type="button"
@@ -2190,7 +2229,7 @@ export default function DesktopApp() {
             <X className="h-4 w-4" />
           </button>
           </div>
-          <nav className="flex flex-1 flex-col gap-[3px] p-3 pt-4">
+          <nav className="flex min-h-0 flex-1 flex-col overflow-auto p-3 pt-4">
             <div className={`px-2.5 pb-2 pt-1.5 ${mono} text-[10px] tracking-[0.14em] text-slate-500`}>GLOBAL</div>
             {GLOBAL_NAV.map(({ id, icon: Icon, label, indent }) => {
               const on = screen === id;
@@ -2202,30 +2241,20 @@ export default function DesktopApp() {
                 </button>
               );
             })}
-            <div className={`mt-3 px-2.5 pb-2 pt-1.5 ${mono} text-[10px] tracking-[0.14em] text-slate-500`}>CASE WORKSPACE</div>
-            {CASE_NAV.map(({ id, icon: Icon, badge, label }) => {
-              const on = screen === id;
-              const locked = screen === "Hub" || screen === "Alerts" || !activeCase;
-              return (
-                <div key={id} title={locked ? "Select a case from the Hub to view" : undefined}>
-                  <button
-                    type="button"
-                    disabled={locked}
-                    onClick={() => goTo(id)}
-                    className={`flex h-[38px] w-full items-center gap-3 rounded-[10px] px-2.5 text-left text-[13.5px] transition-colors ${locked ? "cursor-not-allowed opacity-40" : on ? "bg-blue-50 font-semibold text-blue-700" : "font-medium text-slate-600 hover:bg-slate-50"}`}
-                  >
-                    <Icon className="h-[17px] w-[17px] shrink-0" />
-                    {label ?? id}
-                    <div className="flex-1" />
-                    {badge != null && (
-                      <span className={`rounded-md px-1.5 py-0.5 ${mono} text-[10.5px] font-semibold ${id === "Verify" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}>
-                        {badge}
-                      </span>
-                    )}
-                  </button>
-                </div>
-              );
-            })}
+            <CaseSidebarTree
+              screen={screen}
+              personId={PERSON_SCREENS.includes(screen) ? workspacePersonId : null}
+              personLeaf={PERSON_SCREENS.includes(screen) ? (PERSON_LEAF_BY_SCREEN[screen] ?? "overview") : null}
+              activeCase={activeCase}
+              people={caseEntities.filter((e) => e.type === "person")}
+              intakeBadge={intakeNavBadge}
+              verifyBadge={verifyNavBadge}
+              locked={screen === "Hub" || screen === "Alerts" || !activeCase}
+              onGoCase={(id) => goTo(id)}
+              onGoPerson={(id, leaf) => goTo(SCREEN_BY_PERSON_LEAF[leaf] ?? "PersonOverview", resolvedCaseId, id)}
+              onPinPerson={(id) => { if (resolvedCaseId) void togglePinnedPerson(resolvedCaseId, id, true); }}
+              onUnpinPerson={(id) => { if (resolvedCaseId) void togglePinnedPerson(resolvedCaseId, id, false); }}
+            />
           </nav>
           <div className="shrink-0 p-3.5">
             <div className="rounded-[14px] border border-slate-200 bg-slate-50 p-3.5">
@@ -2601,6 +2630,31 @@ export default function DesktopApp() {
               />
             )}
 
+            {PERSON_SCREENS.includes(screen) && activeCase && (() => {
+              const person = caseEntities.find((e) => e.id === workspacePersonId);
+              if (!person) {
+                return (
+                  <div className="flex flex-1 items-center justify-center px-8 text-center text-[14px] text-slate-500">
+                    Pinned person not found. Pin someone from Overview or Verify.
+                  </div>
+                );
+              }
+              return (
+                <PersonWorkspace
+                  activeCase={activeCase}
+                  person={person}
+                  entities={caseEntities}
+                  events={caseEvents}
+                  evidence={caseEvidence}
+                  leaf={PERSON_LEAF_BY_SCREEN[screen] ?? "overview"}
+                  onUnpin={() => {
+                    void togglePinnedPerson(activeCase.id, person.id, false);
+                    goTo("Overview", activeCase.id);
+                  }}
+                />
+              );
+            })()}
+
             {/* ---------------- OVERVIEW ---------------- */}
             {screen === "Overview" && activeCase && (
               <CaseOverview
@@ -2630,6 +2684,8 @@ export default function DesktopApp() {
                 extractPreview={extractPreview}
                 selectedExtractNames={selectedExtractNames}
                 stagedEvidence={caseEvidence.filter((row) => drawerStagedIds.includes(row.id))}
+                pinnedPersonIds={activeCase.pinnedPersonIds}
+                onTogglePinPerson={(id) => void togglePinnedPerson(activeCase.id, id)}
                 onToggleExtractName={(name) => {
                   setSelectedExtractNames((prev) => {
                     const next = new Set(prev);
@@ -2894,11 +2950,13 @@ export default function DesktopApp() {
                         onEdit={() => setEditingDraftId(d.id)}
                         onDoneEdit={() => setEditingDraftId(null)}
                         onPatch={(patch) => void updateVerifyDraft(d.id, patch as Parameters<typeof updateVerifyDraft>[1])}
+                        pinned={Boolean(d.entityId && (activeCase?.pinnedPersonIds ?? []).includes(d.entityId))}
+                        onTogglePin={d.entityId && activeCase ? () => void togglePinnedPerson(activeCase.id, d.entityId) : undefined}
                       />
                     ))}
 
                     {pendingDrafts.length === 0 && narrativeQueue.length === 0 && (
-                      <div className="flex flex-col items-center gap-2.5 rounded-[14px] border border-dashed border-slate-300 px-5 py-14 text-center">
+                      <div className="flex flex-col items-center gap-4 rounded-[14px] border border-dashed border-slate-300 px-5 py-10 text-center">
                         <CheckCheck className="h-[18px] w-[18px] text-blue-600" />
                         <div className="text-[20px] font-semibold">
                           {extractError || (sourceEvidence && isUnreadableScan(sourceEvidence.rawText))
@@ -2913,10 +2971,30 @@ export default function DesktopApp() {
                             : sourceEvidence?.textClarity === "low"
                             ? SCAN_NOTE
                             : caseEvidence.length
-                            ? "Confirmed events are on the chronology. Rejected cards stay dismissed. Highlight source text to extract a card, or Re-run Extraction."
-                            : "Ingest a narrative on Intake, then run Extract with AI."}
+                            ? "Confirmed events are on the chronology. Rejected cards stay dismissed. Drop a new source below to extract, or highlight text in the viewer."
+                            : "Drop a document here to extract entities, or pull an indexed file from Intake."}
                         </p>
+                        <VerifyIngestDropzone
+                          busy={busy || extracting}
+                          indexedFiles={intakeIndexedFiles}
+                          onFiles={(files) => { void ingestFiles(files, { extract: true, background: true }); }}
+                          onPickIndexed={(id) => {
+                            setActiveEvidenceId(id);
+                            void runExtract(id, { stayOnWorkspace: true });
+                          }}
+                        />
                       </div>
+                    )}
+                    {pendingDrafts.length === 0 && narrativeQueue.length > 0 && (
+                      <VerifyIngestDropzone
+                        busy={busy || extracting}
+                        indexedFiles={intakeIndexedFiles}
+                        onFiles={(files) => { void ingestFiles(files, { extract: true, background: true }); }}
+                        onPickIndexed={(id) => {
+                          setActiveEvidenceId(id);
+                          void runExtract(id, { stayOnWorkspace: true });
+                        }}
+                      />
                     )}
                   </div>
 
@@ -2950,6 +3028,8 @@ export default function DesktopApp() {
                   onSelect={setSelected}
                   onPromoteEntity={(id) => void promoteEntityToVerified(id)}
                   ToggleIcon={sidebarOpen ? PanelLeftClose : PanelLeftOpen}
+                  pinnedIds={activeCase?.pinnedPersonIds}
+                  onTogglePin={(id) => { if (activeCase) void togglePinnedPerson(activeCase.id, id); }}
                 />
 
                 <div className="flex min-w-0 flex-1 flex-col">

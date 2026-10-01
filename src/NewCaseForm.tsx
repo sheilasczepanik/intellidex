@@ -1,5 +1,8 @@
-import { ArrowRight, Loader2 } from "lucide-react";
+import { useState } from "react";
+import { ArrowRight, Check, Loader2, Sparkles } from "lucide-react";
 import type { CaseStatus, SubjectProfile } from "./db/schema";
+import { fetchNamusRecord } from "./lib/namusClient";
+import { extractNamusId, namusLksDatetime } from "./lib/namusRecord";
 import { ALERT_LEVELS, formatAlertLabel } from "./lib/missingPerson";
 
 const mono = "font-mono";
@@ -44,6 +47,52 @@ export default function NewCaseForm({
   onSubmit: () => void;
 }) {
   const setP = (key: keyof SubjectProfile, value: string) => onProfile({ ...profile, [key]: value });
+  const [namusBusy, setNamusBusy] = useState(false);
+  const [namusOk, setNamusOk] = useState(false);
+  const [namusErr, setNamusErr] = useState("");
+
+  const autoFillNamus = async () => {
+    const query = fileIdentifier.trim() || title.trim();
+    if (!extractNamusId(query)) {
+      setNamusOk(false);
+      setNamusErr("Enter a NamUs ID such as MP54 in the case identifier field.");
+      return;
+    }
+    setNamusBusy(true);
+    setNamusOk(false);
+    setNamusErr("");
+    try {
+      const data = await fetchNamusRecord(query);
+      const record = data.record;
+      if (!record?.fullName) {
+        setNamusErr(data.error || "NamUs did not return a usable record.");
+        return;
+      }
+      onTitle(record.fullName);
+      onFileIdentifier(record.namusId ? `NamUs #${record.namusId}` : fileIdentifier);
+      onJurisdiction(record.location);
+      const lks = namusLksDatetime(record);
+      if (lks) onLksAt(lks);
+      if (record.circumstances) onSummary(record.circumstances);
+      onProfile({
+        ...profile,
+        ageAtDisappearance: record.ageAtDisappearance || profile.ageAtDisappearance,
+        currentEstimatedAge: record.currentAge || profile.currentEstimatedAge,
+        height: record.height || profile.height,
+        weight: record.weight || profile.weight,
+        hair: record.hairColor || profile.hair,
+        eyes: record.eyeColor || profile.eyes,
+        distinguishingMarks: record.distinguishingMarks || profile.distinguishingMarks,
+        clothingLastSeen: record.clothing || profile.clothingLastSeen,
+        medicalAlerts: record.medicalAlerts || profile.medicalAlerts,
+      });
+      setNamusOk(true);
+    } catch (err) {
+      setNamusErr(err instanceof Error ? err.message : "NamUs lookup failed.");
+    } finally {
+      setNamusBusy(false);
+    }
+  };
 
   return (
     <div className="mx-auto w-full max-w-[720px] px-4 pb-20 pt-10 sm:px-6 sm:pt-16 lg:px-10">
@@ -68,12 +117,33 @@ export default function NewCaseForm({
           className={`${inputCls} mb-4 h-11 text-[15px] font-semibold`}
         />
         <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Case / file identifier</label>
-        <input
-          value={fileIdentifier}
-          onChange={(e) => onFileIdentifier(e.target.value)}
-          placeholder="MP-2004-01, NamUs #, or agency case #"
-          className={`${inputCls} mb-4 h-11 text-[14px]`}
-        />
+        <div className="mb-1.5 flex flex-col gap-2 sm:flex-row sm:items-center">
+          <input
+            value={fileIdentifier}
+            onChange={(e) => { setNamusOk(false); setNamusErr(""); onFileIdentifier(e.target.value); }}
+            placeholder="MP54, NamUs #, or agency case #"
+            className={`${inputCls} h-11 flex-1 text-[14px]`}
+          />
+          <button
+            type="button"
+            onClick={() => void autoFillNamus()}
+            disabled={namusBusy}
+            className="inline-flex h-11 shrink-0 items-center justify-center gap-1.5 rounded-[10px] border border-slate-300 bg-white px-3 text-[12.5px] font-semibold text-slate-700 hover:border-slate-400 hover:bg-slate-50 disabled:opacity-50"
+          >
+            {namusBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 text-blue-600" />}
+            {namusBusy ? "Fetching NamUs data…" : "Auto-Fill from NamUs"}
+          </button>
+        </div>
+        {namusOk ? (
+          <div className="mb-4 inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[12px] font-medium text-emerald-800">
+            <Check className="h-3.5 w-3.5" />
+            Loaded from NamUs record
+          </div>
+        ) : namusErr ? (
+          <p className="mb-4 text-[12.5px] text-rose-700">{namusErr}</p>
+        ) : (
+          <p className="mb-4 text-[12px] text-slate-400">Use a NamUs ID such as MP54 to pull public case details into this form.</p>
+        )}
         <div className="mb-4 grid gap-3 sm:grid-cols-2">
           <div>
             <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Last known sighting date & time</label>
