@@ -23,29 +23,26 @@ export function sourceRefKey(event: TimelineEventRecord) {
   );
 }
 
+export function duplicateEventKey(event: { id?: string; entityId?: string; title: string; timestamp: number }) {
+  const entity = (event.entityId || event.title.toLowerCase().trim());
+  return `${entity}-${event.timestamp}-${event.entityId || ""}`;
+}
+
 export function clusterMergeableEvents(events: TimelineEventRecord[]) {
-  const groups: TimelineEventRecord[][] = [];
-  const used = new Set<string>();
-  const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
-  for (const event of sorted) {
-    if (used.has(event.id)) continue;
-    const group = [event];
-    used.add(event.id);
-    const title = normalizeIntelText(event.title);
-    const source = sourceRefKey(event);
-    for (const other of sorted) {
-      if (used.has(other.id)) continue;
-      if (other.entityId !== event.entityId) continue;
-      if (Math.abs(other.timestamp - event.timestamp) > MERGE_WINDOW_MS) continue;
-      const otherSource = sourceRefKey(other);
-      if (source !== otherSource) continue;
-      if (normalizeIntelText(other.title) !== title) continue;
-      group.push(other);
-      used.add(other.id);
-    }
-    groups.push(group);
+  const groups = new Map<string, TimelineEventRecord[]>();
+  for (const event of events) {
+    const key = duplicateEventKey(event);
+    const list = groups.get(key) ?? [];
+    list.push(event);
+    groups.set(key, list);
   }
-  return groups;
+  return [...groups.values()].map((group) =>
+    [...group].sort((a, b) => {
+      if (a.isVerified !== b.isVerified) return a.isVerified ? -1 : 1;
+      if ((a.tier === "secondary") !== (b.tier === "secondary")) return a.tier === "secondary" ? 1 : -1;
+      return a.id.localeCompare(b.id);
+    }),
+  );
 }
 
 function placeForEvent(event: TimelineEventRecord, entities: EntityRecord[]) {

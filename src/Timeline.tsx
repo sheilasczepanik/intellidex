@@ -46,6 +46,7 @@ export function TimelineHoverTip({
   timestamp,
   source,
   verified,
+  mergeCount,
   grow,
   children,
 }: {
@@ -53,6 +54,7 @@ export function TimelineHoverTip({
   timestamp: number;
   source: string;
   verified: boolean;
+  mergeCount?: number;
   grow?: boolean;
   children: ReactNode;
 }) {
@@ -61,8 +63,10 @@ export function TimelineHoverTip({
   const show = (node: HTMLElement) => {
     const rect = node.getBoundingClientRect();
     const place = rect.top < 168 ? "bottom" : "top";
+    const half = 150;
+    const left = Math.min(window.innerWidth - 16 - half, Math.max(16 + half, rect.left + rect.width / 2));
     setTip({
-      left: rect.left + rect.width / 2,
+      left,
       top: place === "top" ? rect.top - 8 : rect.bottom + 8,
       place,
     });
@@ -79,23 +83,30 @@ export function TimelineHoverTip({
       {children}
       {tip && createPortal(
         <span
-          className="pointer-events-none fixed z-50 w-[min(16rem,calc(100vw-2rem))] rounded-xl border border-slate-200 bg-white p-3 text-left shadow-xl"
+          className="pointer-events-none fixed z-50 w-max max-w-[300px] rounded-xl border border-slate-200 bg-white p-3 text-left shadow-xl dark:border-zinc-800 dark:bg-zinc-900"
           style={{
             left: tip.left,
             top: tip.top,
             transform: tip.place === "top" ? "translate(-50%, -100%)" : "translate(-50%, 0)",
           }}
         >
-          <span className="block text-[12.5px] font-semibold leading-snug text-slate-900">{entityName}</span>
+          <span className="block max-w-[260px] text-[12.5px] font-semibold leading-snug break-words text-slate-900">{entityName}</span>
           <span className={`mt-1.5 block ${mono} text-[10.5px] text-slate-500`}>
             {new Date(timestamp).toLocaleString()}
           </span>
-          <span className="mt-1 block text-[11.5px] leading-snug text-slate-600">{source || "No source document"}</span>
+          <span className="mt-1 block max-w-[260px] text-[11.5px] leading-snug break-words text-slate-600">
+            {source || "No source document"}
+          </span>
+          {mergeCount && mergeCount > 1 ? (
+            <span className="mt-2 block max-w-[260px] text-[11px] leading-snug text-amber-800">
+              ⚠ Duplicate entries merged ({mergeCount} citations from identical timestamp)
+            </span>
+          ) : null}
           <span className={`mt-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold ${verified ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
             {verified ? "Verified" : "Unverified"}
           </span>
           <span
-            className={`absolute left-1/2 h-2 w-2 -translate-x-1/2 rotate-45 border-slate-200 bg-white ${tip.place === "top" ? "top-full -mt-1 border-r border-b" : "bottom-full -mb-1 border-l border-t"}`}
+            className={`absolute left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 border-slate-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 ${tip.place === "top" ? "bottom-[-5px] border-r border-b" : "top-[-5px] border-l border-t"}`}
           />
         </span>,
         document.body,

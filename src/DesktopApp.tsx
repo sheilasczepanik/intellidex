@@ -557,6 +557,8 @@ export default function DesktopApp() {
   const [dateMenu, setDateMenu] = useState(false);
   const [timeMenu, setTimeMenu] = useState(false);
   const [conflictInspectorOpen, setConflictInspectorOpen] = useState(false);
+  const [focusMerged, setFocusMerged] = useState(false);
+  const [mergedInspectIds, setMergedInspectIds] = useState<string[]>([]);
   const [operatorMenu, setOperatorMenu] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [resetPrompt, setResetPrompt] = useState(false);
@@ -845,7 +847,12 @@ export default function DesktopApp() {
         name: ent?.name,
         text: `${e.title} ${e.description}`,
       });
-      const mergeCount = group.length + (e.mergedFrom?.length ?? 0);
+      const mergeCount = Math.max(group.length, 1 + (e.mergedFrom?.length ?? 0));
+      const mergedIds = [...new Set([e.id, ...group.map((row) => row.id), ...(e.mergedFrom || [])])];
+      const sourceNames = [...new Set(group.map((row) => {
+        const rowSrc = evidenceMap.get(row.sourceDocId);
+        return row.sourceCitation?.sourceName || rowSrc?.originalFileName || rowSrc?.fileName || row.title;
+      }).filter(Boolean))];
       return {
         id: e.id,
         entityId: laneId,
@@ -859,9 +866,10 @@ export default function DesktopApp() {
         verified: e.isVerified,
         secondary,
         citeUrl,
-        sourceName: e.sourceCitation?.sourceName || src?.originalFileName || src?.fileName || "",
+        sourceName: sourceNames.join(" · ") || e.sourceCitation?.sourceName || src?.originalFileName || src?.fileName || "",
         entityName: ent?.name || "Unassigned",
         mergeCount,
+        mergedIds,
         semantic,
       };
     });
@@ -967,6 +975,8 @@ export default function DesktopApp() {
       busiest,
       activeDay,
       conflictPairs,
+      mergedCount: plotted.filter((row) => row.mergeCount > 1).reduce((sum, row) => sum + row.mergeCount, 0),
+      mergedLaneIds: plotted.filter((row) => row.mergeCount > 1).map((row) => row.entityId),
       dayLabel: viewAllDates ? "All dates" : (activeDay ? formatDaySelector(activeDay) : "No date"),
       timeLabel: formatClockRange(start, end),
     };
@@ -1309,7 +1319,7 @@ export default function DesktopApp() {
     }
   };
 
-  const openEventDrawer = (id: string) => {
+  const openEventDrawer = (id: string, mergedIds?: string[]) => {
     const ev = caseEvents.find((e) => e.id === id);
     if (!ev) return;
     setDrawerEventId(id);
@@ -1318,6 +1328,12 @@ export default function DesktopApp() {
     setDrawerWhen(toDatetimeLocal(ev.timestamp));
     setDrawerDesc(ev.description);
     setDrawerEntityId(ev.entityId);
+    const fromPlot = chrono.all.find((row) => row.id === id);
+    setMergedInspectIds(
+      mergedIds && mergedIds.length > 1
+        ? mergedIds
+        : (fromPlot && fromPlot.mergeCount > 1 ? fromPlot.mergedIds : []),
+    );
   };
 
   const persistDrawerStamp = async (date: string, time: string) => {
@@ -3343,6 +3359,19 @@ export default function DesktopApp() {
                         {chrono.all.length} EVENTS · {chrono.lanes.length} LANES
                       </span>
                     )}
+                    {chrono.mergedCount > 1 ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFocusMerged((v) => !v);
+                          if (!focusMerged) setSelected(null);
+                        }}
+                        className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11.5px] font-semibold ${focusMerged ? "border-amber-500 bg-amber-100 text-amber-900" : "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"}`}
+                      >
+                        <TriangleAlert className="h-3.5 w-3.5" />
+                        {chrono.mergedCount} Duplicate Events Merged
+                      </button>
+                    ) : null}
                     <div className="min-w-0 flex-1" />
                     <button
                       onClick={openAddEvent}
@@ -3382,7 +3411,8 @@ export default function DesktopApp() {
                       </div>
 
                       {chrono.lanes.map(({ def, height, placed, tracks, count }) => {
-                        const dim = selected != null && selected !== def.id;
+                        const dim = (selected != null && selected !== def.id)
+                          || (focusMerged && !chrono.mergedLaneIds.includes(def.id));
                         const KindIcon = ENTITY_ICON[TYPE_KIND[def.type]] ?? Clock;
                         return (
                           <div key={def.id} className={`relative overflow-visible border-b border-slate-200 transition-opacity ${dim ? "opacity-40" : "opacity-100"}`} style={{ height }}>
@@ -3407,13 +3437,14 @@ export default function DesktopApp() {
                               )}
                             </div>
                             {placed.map(({ e, row, left }) => {
-                              const focused = conflictPulse > 0 && chrono.tether && (e.id === chrono.tether.aId || e.id === chrono.tether.bId);
+                              const focused = (conflictPulse > 0 && chrono.tether && (e.id === chrono.tether.aId || e.id === chrono.tether.bId))
+                                || (focusMerged && e.mergeCount > 1);
                               return (
                               <button
                                 type="button"
                                 key={e.id}
                                 id={`timeline-node-${e.id}`}
-                                onClick={() => openEventDrawer(e.id)}
+                                onClick={() => openEventDrawer(e.id, e.mergedIds)}
                                 className={`absolute z-[2] flex min-w-[228px] items-start gap-2 overflow-visible rounded-[10px] border border-l-2 bg-white px-2.5 py-1.5 text-left shadow-sm transition-colors hover:border-blue-300 ${e.secondary ? "border-dashed border-amber-400 border-l-amber-500" : e.flag ? "border-amber-300 border-l-amber-600 ring-[3px] ring-amber-500/10" : `border-slate-200 ${getCategoryColor(e.semantic, "border")}`} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
                                 style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width: CARD_W, height: CARD_H }}
                               >
@@ -3440,13 +3471,22 @@ export default function DesktopApp() {
                                   timestamp={e.timestamp}
                                   source={e.sourceName}
                                   verified={e.verified}
+                                  mergeCount={e.mergeCount}
                                   grow
                                 >
                                   <span className="min-w-0 flex-1 whitespace-normal text-[12.5px] font-medium leading-snug text-slate-900 line-clamp-2">{e.title}</span>
                                 </TimelineHoverTip>
                                 {e.mergeCount > 1 ? (
-                                  <span className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[9.5px] font-semibold text-slate-600">
-                                    Merged x{e.mergeCount}
+                                  <span
+                                    role="button"
+                                    title="View merged source records"
+                                    onClick={(ev) => {
+                                      ev.stopPropagation();
+                                      openEventDrawer(e.id, e.mergedIds);
+                                    }}
+                                    className="shrink-0 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[9.5px] font-semibold text-amber-900"
+                                  >
+                                    Merged ({e.mergeCount})
                                   </span>
                                 ) : null}
                                 {e.citeUrl ? (
@@ -3567,7 +3607,7 @@ export default function DesktopApp() {
       {/* ---------------- event detail drawer ---------------- */}
       {drawerEvent && (
         <div className="fixed inset-0 z-[60] flex justify-end bg-slate-900/30 backdrop-blur-[2px]">
-          <div className="flex-1" onClick={() => { setDrawerEventId(null); setDrawerEdit(false); }} />
+          <div className="flex-1" onClick={() => { setDrawerEventId(null); setDrawerEdit(false); setMergedInspectIds([]); }} />
           <div className="flex h-full w-[440px] max-w-[92vw] flex-col border-l border-slate-200 bg-white shadow-2xl">
             <div className="flex shrink-0 items-start gap-3.5 border-b border-slate-200 px-6 pb-[18px] pt-[22px]">
               <div className="min-w-0 flex-1">
@@ -3580,7 +3620,7 @@ export default function DesktopApp() {
                 <p className="mt-1 text-[13px] text-slate-500">{drawerEntity?.name ?? "Unknown entity"}</p>
               </div>
               <button
-                onClick={() => { setDrawerEventId(null); setDrawerEdit(false); }}
+                onClick={() => { setDrawerEventId(null); setDrawerEdit(false); setMergedInspectIds([]); }}
                 className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-100"
               >
                 <X className="h-[15px] w-[15px]" />
@@ -3667,6 +3707,31 @@ export default function DesktopApp() {
                       ) : null}
                     </div>
                   </div>
+                  {mergedInspectIds.length > 1 ? (
+                    <div>
+                      <div className={`mb-1 ${mono} text-[10.5px] tracking-[0.12em] text-slate-500`}>MERGED CITATIONS</div>
+                      <p className="mb-2 text-[12px] text-amber-800">⚠ Duplicate entries merged ({mergedInspectIds.length} citations from identical timestamp)</p>
+                      <div className="flex flex-col gap-1.5">
+                        {mergedInspectIds.map((id) => {
+                          const rec = caseEvents.find((row) => row.id === id);
+                          const src = rec ? caseEvidence.find((row) => row.id === rec.sourceDocId) : undefined;
+                          const label = src?.originalFileName || src?.fileName || rec?.sourceCitation?.sourceName || rec?.title || id;
+                          const on = id === drawerEvent.id;
+                          return (
+                            <button
+                              key={id}
+                              type="button"
+                              onClick={() => openEventDrawer(id, mergedInspectIds)}
+                              className={`rounded-lg border px-2.5 py-2 text-left text-[12.5px] ${on ? "border-blue-300 bg-blue-50 text-blue-900" : "border-slate-200 text-slate-700 hover:border-slate-300"}`}
+                            >
+                              <span className="block font-medium break-words">{rec?.title || "Event"}</span>
+                              <span className="mt-0.5 block max-w-full break-words text-[11px] text-slate-500">{label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
                 </>
               )}
             </div>
