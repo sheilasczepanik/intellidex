@@ -1,7 +1,7 @@
 import { localDayKey } from "./eventTime";
 
 export const HOUR_MS = 60 * 60 * 1000;
-export const LANE_PAD = 190;
+export const LANE_PAD = 208;
 export const UNASSIGNED_LANE_ID = "__unassigned__";
 
 export type TimeWindow = "full" | "00-06" | "06-12" | "12-18" | "18-24" | "custom";
@@ -45,6 +45,12 @@ export function formatDayHeading(dayKey: string) {
   const [y, m, d] = dayKey.split("-").map(Number);
   const date = new Date(y, (m ?? 1) - 1, d ?? 1);
   return date.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }).toUpperCase();
+}
+
+export function formatDaySelector(dayKey: string) {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  const date = new Date(y, (m ?? 1) - 1, d ?? 1);
+  return date.toLocaleDateString(undefined, { month: "short", day: "2-digit", year: "numeric" });
 }
 
 export function formatClockRange(start: number, end: number) {

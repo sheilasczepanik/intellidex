@@ -8,6 +8,26 @@ export type QuoteSegment =
   | { type: "text"; key: string; value: string }
   | { type: "quote"; key: string; draftId: string; value: string };
 
+export const MIN_HIGHLIGHT_CHARS = 4;
+
+const PRIORITY_ENTITIES = [
+  "Faith Westman",
+  "Ronda Marsh",
+  "Cecil Smith",
+  "Fred Murray",
+  "Butch Atwood",
+  "Maura Murray",
+  "Kathleen Murray",
+  "Weathered Barn",
+  "Haverhill",
+  "Route 112",
+  "Bradley Hill Road",
+  "Wild Ammonoosuc Road",
+  "Case F 04-1514",
+  "9-1-1 Dispatcher",
+  "Bath",
+];
+
 function compactWithMap(source: string) {
   let out = "";
   const map: number[] = [];
@@ -25,66 +45,89 @@ function compactWithMap(source: string) {
   return { out, map };
 }
 
-export function highlightNeedles(parts: Array<string | undefined | null>): string[] {
-  const out: string[] = [];
+export function isUsableHighlightNeedle(snippet: string) {
+  const t = snippet.replace(/\s+/g, " ").trim();
+  if (t.length < MIN_HIGHLIGHT_CHARS) return false;
+  const compact = t.replace(/[^A-Za-z0-9]/g, "");
+  if (compact.length < 3) return false;
+  if (/^(yes|ok|no|fw|g\d+)[.:]?$/i.test(t)) return false;
+  return true;
+}
+
+function uniqueNeedles(parts: Array<string | undefined | null>) {
   const seen = new Set<string>();
-  const push = (value: string) => {
-    const t = value.replace(/\s+/g, " ").trim();
-    if (t.length < 5) return;
+  const out: string[] = [];
+  for (const part of parts) {
+    const t = String(part || "").replace(/\s+/g, " ").trim();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
+/** Prefer the card's explicit contiguous quote; never prefix-match fragments. */
+export function highlightNeedles(parts: Array<string | undefined | null>): string[] {
+  const explicit = uniqueNeedles(parts).filter(isUsableHighlightNeedle);
+  const blob = explicit.join(" ");
+  const extras: string[] = [];
+  for (const ent of PRIORITY_ENTITIES) {
+    if (blob.includes(ent) || blob.toLowerCase().includes(ent.toLowerCase())) extras.push(ent);
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of [...explicit, ...extras]) {
     const key = t.toLowerCase();
-    if (seen.has(key)) return;
+    if (seen.has(key) || !isUsableHighlightNeedle(t)) continue;
     seen.add(key);
     out.push(t);
-  };
-  for (const part of parts) {
-    if (!part) continue;
-    push(part);
-    push(part.replace(/\s*\([^)]*\)/g, " "));
-    const names = part.replace(/\s*\([^)]*\)/g, " ").match(/[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,3}/g);
-    names?.forEach(push);
-    const extras = part.match(/\$\d+(?:\.\d{2})?|\d{1,2}:\d{2}(?:\s*EST)?|[A-Z]{2}\s*Reg:\s*[A-Z0-9-]+|Route\s+\d+|Bradley Hill Road|Wild Ammonoosuc Road/gi);
-    extras?.forEach(push);
   }
   return out.sort((a, b) => b.length - a.length);
 }
 
 export function locateAnySnippet(haystack: string, parts: Array<string | undefined | null>) {
-  for (const needle of highlightNeedles(parts)) {
+  return locateCardHighlight(haystack, { quote: parts[0] || "", snippet: parts[1], title: parts[2], exactQuote: parts[0] });
+}
+
+export function locateCardHighlight(
+  haystack: string,
+  card: { quote?: string; snippet?: string; exactQuote?: string; anchorText?: string; title?: string },
+) {
+  const explicit = uniqueNeedles([card.exactQuote, card.quote, card.anchorText, card.snippet]);
+  for (const needle of explicit) {
     const loc = locateSnippet(haystack, needle);
     if (loc) return loc;
   }
+  const blob = `${explicit.join(" ")} ${card.title || ""}`;
+  for (const ent of PRIORITY_ENTITIES) {
+    if (!blob.includes(ent) && !blob.toLowerCase().includes(ent.toLowerCase())) continue;
+    const loc = locateSnippet(haystack, ent);
+    if (loc) return loc;
+  }
+  const title = String(card.title || "").replace(/\s*\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
+  if (title && isUsableHighlightNeedle(title)) return locateSnippet(haystack, title);
   return null;
 }
 
-/** Locate a card quote in source text, tolerant of PDF whitespace. */
+/** Locate a card quote in source text. Full phrase only — no prefix / fragment matches. */
 export function locateSnippet(haystack: string, snippet: string): { start: number; end: number } | null {
-  const needle = snippet.trim();
-  if (needle.length < 5) return null;
+  const needle = snippet.replace(/\s+/g, " ").trim();
+  if (!isUsableHighlightNeedle(needle)) return null;
+
+  const exact = haystack.indexOf(needle);
+  if (exact >= 0) return { start: exact, end: exact + needle.length };
 
   const hayLower = haystack.toLowerCase();
   const needleLower = needle.toLowerCase();
-  const exact = hayLower.indexOf(needleLower);
-  if (exact >= 0) return { start: exact, end: exact + needle.length };
+  const folded = hayLower.indexOf(needleLower);
+  if (folded >= 0) return { start: folded, end: folded + needle.length };
 
   const h = compactWithMap(haystack);
   const n = compactWithMap(needle).out.trim();
-  if (n.length < 5) return null;
-
-  let idx = h.out.indexOf(n);
-  let matched = n;
-  if (idx < 0) {
-    for (let len = Math.min(n.length, 96); len >= 8; len -= 4) {
-      const head = n.slice(0, len);
-      const found = h.out.indexOf(head);
-      if (found >= 0) {
-        idx = found;
-        matched = head;
-        break;
-      }
-    }
-  }
+  if (n.length < MIN_HIGHLIGHT_CHARS) return null;
+  const idx = h.out.indexOf(n);
   if (idx < 0 || h.map[idx] === undefined) return null;
-  const last = idx + matched.length - 1;
+  const last = idx + n.length - 1;
   if (last >= h.map.length) return null;
   return { start: h.map[idx], end: h.map[last] + 1 };
 }
@@ -134,12 +177,12 @@ export function sortByNarrativeOrder<T extends { id: string; snippet: string; ti
 
 export function collectQuoteSpans(
   text: string,
-  drafts: { id: string; snippet: string; title?: string; exactQuote?: string }[],
+  drafts: { id: string; snippet: string; title?: string; exactQuote?: string; anchorText?: string }[],
 ): QuoteSpan[] {
   const found: QuoteSpan[] = [];
-  const ranked = [...drafts].sort((a, b) => b.snippet.trim().length - a.snippet.trim().length);
+  const ranked = [...drafts].sort((a, b) => (b.exactQuote || b.snippet).trim().length - (a.exactQuote || a.snippet).trim().length);
   for (const d of ranked) {
-    const loc = locateAnySnippet(text, [d.exactQuote, d.snippet, d.title]);
+    const loc = locateCardHighlight(text, d);
     if (!loc) continue;
     if (found.some((span) => loc.start < span.end && loc.end > span.start)) continue;
     found.push({ draftId: d.id, start: loc.start, end: loc.end });

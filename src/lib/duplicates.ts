@@ -144,6 +144,62 @@ export async function findDuplicateLocation(
   return null;
 }
 
+export function clusterDuplicateLocations(places: EntityRecord[]) {
+  const clusters: EntityRecord[][] = [];
+  const used = new Set<string>();
+  for (const place of places) {
+    if (used.has(place.id)) continue;
+    const group = [place];
+    used.add(place.id);
+    const name = normText(place.name);
+    const address = normText(place.metadata?.address || place.notes || "");
+    const point = entityPoint(place);
+    for (const other of places) {
+      if (used.has(other.id)) continue;
+      const otherName = normText(other.name);
+      const otherAddr = normText(other.metadata?.address || other.notes || "");
+      const otherPoint = entityPoint(other);
+      const nameHit = Boolean(name && otherName && name === otherName);
+      const addrHit = Boolean(address && otherAddr && address === otherAddr);
+      const near = Boolean(point && otherPoint && metersBetween(point, otherPoint) <= 50);
+      if (!nameHit && !addrHit && !near) continue;
+      group.push(other);
+      used.add(other.id);
+    }
+    if (group.length > 1) clusters.push(group);
+  }
+  return clusters;
+}
+
+export async function mergeLocationCluster(ids: string[]) {
+  const unique = [...new Set(ids)].filter(Boolean);
+  if (unique.length < 2) return null;
+  const rows = (await Promise.all(unique.map((id) => db.entities.get(id)))).filter(Boolean) as EntityRecord[];
+  if (rows.length < 2) return null;
+  const primary = rows.find((row) => row.classification === "VERIFIED" || row.role === "VERIFIED") || rows[0];
+  const rest = rows.filter((row) => row.id !== primary.id);
+  let notes = primary.notes;
+  const metadata = { ...(primary.metadata || {}) };
+  const mergedFrom = [
+    ...(metadata.mergedFrom ? metadata.mergedFrom.split(",").map((s) => s.trim()).filter(Boolean) : []),
+  ];
+  for (const dup of rest) {
+    notes = [notes, dup.notes].filter(Boolean).join("\n");
+    if (!metadata.coordinates && (dup.metadata?.coordinates || dup.metadata?.coords)) {
+      metadata.coordinates = dup.metadata.coordinates || dup.metadata.coords;
+    }
+    if (!metadata.address && dup.metadata?.address) metadata.address = dup.metadata.address;
+    if (!metadata.photoUrl && dup.metadata?.photoUrl) metadata.photoUrl = dup.metadata.photoUrl;
+    mergedFrom.push(dup.id);
+    await db.timelineEvents.where("entityId").equals(dup.id).modify({ entityId: primary.id });
+    await deleteEntity(dup.id);
+  }
+  metadata.mergedFrom = [...new Set(mergedFrom)].join(",");
+  await updateEntity(primary.id, { notes });
+  await db.entities.update(primary.id, { metadata });
+  return primary.id;
+}
+
 export async function findDuplicatePerson(caseId: string, name: string, excludeId?: string) {
   const rows = (await db.entities.where("caseId").equals(caseId).toArray()).filter((e) => e.type === "person");
   return rows.find((row) => row.id !== excludeId && namesLooselyMatch(row.name, name)) ?? null;

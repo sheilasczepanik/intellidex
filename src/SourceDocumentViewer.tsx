@@ -3,7 +3,7 @@ import { FileText, Globe, Loader2, Minus, Plus, Radio, X } from "lucide-react";
 import { getDocument, type PDFDocumentProxy } from "pdfjs-dist";
 import { pdfBlobFromBytes, pdfBytesFromBase64 } from "./lib/pdfjsSetup";
 import { db, type EvidenceRecord } from "./db";
-import { collectQuoteSpans, locateAnySnippet, splitTextBySpans } from "./lib/quoteAnchors";
+import { collectQuoteSpans, locateCardHighlight, splitTextBySpans } from "./lib/quoteAnchors";
 import { cropImageRegion, evidenceImageSrc } from "./lib/imageEvidence";
 import PdfScrollPages from "./PdfScrollPages";
 import { documentText } from "./lib/pdfParser";
@@ -15,9 +15,9 @@ import {
 } from "./types";
 
 const MARK =
-  "cursor-pointer rounded px-0.5 bg-amber-400/25 border-b-2 border-amber-400 box-decoration-clone";
+  "cursor-pointer rounded px-0.5 bg-amber-400/20 border-b-2 border-amber-400 text-inherit box-decoration-clone";
 const MARK_ACTIVE =
-  "cursor-pointer rounded px-0.5 bg-amber-400/40 border-b-2 border-amber-500 ring-2 ring-amber-500/50 box-decoration-clone";
+  "cursor-pointer rounded px-0.5 bg-amber-400/40 border-b-2 border-amber-500 shadow-sm text-inherit box-decoration-clone";
 
 export function CitationPill({
   citation,
@@ -187,7 +187,7 @@ export default function SourceDocumentViewer({
 
   useEffect(() => {
     if ((kind === "text" || kind === "external_intel" || kind === "web_article") && quote && sourcePlain) {
-      setMatched(Boolean(locateAnySnippet(sourcePlain, [quote])));
+      setMatched(Boolean(locateCardHighlight(sourcePlain, { quote, exactQuote: quote })));
     }
   }, [kind, quote, sourcePlain]);
 
@@ -399,7 +399,7 @@ export default function SourceDocumentViewer({
                   id={`source-hit-${box.id}`}
                   title={box.title || "Logged observation"}
                   onClick={() => onSelectAnchor?.(box.id)}
-                  className={`absolute rounded-sm border-2 ${box.id === (activeId || "focus") ? "border-amber-500 bg-amber-300/30 shadow-[0_0_16px_rgba(245,158,11,0.6)]" : "border-amber-400/70 bg-amber-200/20"}`}
+                  className={`absolute rounded-sm border-2 ${box.id === (activeId || "focus") ? "border-amber-500 bg-amber-400/40 shadow-sm" : "border-amber-400/70 bg-amber-400/20"}`}
                   style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.width}%`, height: `${box.height}%` }}
                 />
               ))}
@@ -430,6 +430,7 @@ export default function SourceDocumentViewer({
                   <mark
                     key={part.key}
                     id={`source-hit-${part.draftId}`}
+                    data-verify-quote={part.draftId}
                     onClick={() => onSelectAnchor?.(part.draftId)}
                     className={active ? MARK_ACTIVE : MARK}
                   >

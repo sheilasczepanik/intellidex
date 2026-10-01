@@ -37,7 +37,8 @@ import ExportDossierModal from "./ExportDossierModal";
 import GlobalSearch from "./GlobalSearch";
 import ProfileSettings from "./ProfileSettings";
 import SourceDocumentViewer, { CitationPill } from "./SourceDocumentViewer";
-import TimelineToolbar from "./Timeline";
+import TimelineToolbar, { TimelineHoverTip } from "./Timeline";
+import TimelineConflictInspector from "./TimelineConflictInspector";
 import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQueueCard";
 import WorkspacePreferences from "./WorkspacePreferences";
 import { ExtractSelectionTip, LogEvidenceModal, VERIFY_CATEGORIES, type ManualLogCategoryId } from "./Verify";
@@ -61,11 +62,12 @@ import {
 } from "./lib/extractSchema";
 import { collectQuoteSpans, locateAnySnippet, narrativeSortKey, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
 import { applyDupDecision, evidenceToSide, eventToSide, findDuplicateEvidence, findDuplicateEvent, hashNormalizedText, type DupDecision, type DupMatch } from "./lib/duplicates";
+import { clusterMergeableEvents, detectLocationConflicts } from "./lib/timelineDedupe";
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
 import { joinLocalDateTime, localDayKey, namesLooselyMatch, splitLocalDateTime } from "./lib/eventTime";
 import {
   HOUR_MS, LANE_PAD, UNASSIGNED_LANE_ID, busiestDayKey, eventInHourWindow, fitPxPerHour,
-  formatClockRange, formatDayHeading, paddedBounds, pxForPreset, tickMsFor, uniqueDayKeys,
+  formatClockRange, formatDaySelector, paddedBounds, pxForPreset, tickMsFor, uniqueDayKeys,
   windowHours, type TickPreset, type TimeWindow,
 } from "./lib/timelineView";
 import { getCategoryColor, resolveSemanticCategory } from "./utils/categoryColors";
@@ -367,7 +369,7 @@ Network records show the handset registered to J. Vance ceased reporting to any 
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
 
-const CARD_W = 168, CARD_H = 44, CARD_GAP = 8, CARD_PAD = 12, RULER_H = 35;
+const CARD_W = 228, CARD_H = 58, CARD_GAP = 10, CARD_PAD = 12, RULER_H = 35;
 const TRANSIT_CONFLICT_MS = 50 * 60 * 1000;
 
 const TONE_CHIP: Record<Tone, string> = {
@@ -554,6 +556,7 @@ export default function DesktopApp() {
   const [viewportFit, setViewportFit] = useState(true);
   const [dateMenu, setDateMenu] = useState(false);
   const [timeMenu, setTimeMenu] = useState(false);
+  const [conflictInspectorOpen, setConflictInspectorOpen] = useState(false);
   const [operatorMenu, setOperatorMenu] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [resetPrompt, setResetPrompt] = useState(false);
@@ -739,7 +742,7 @@ export default function DesktopApp() {
 
   const chrono = useMemo(() => {
     const entityMap = new Map(caseEntities.map((e) => [e.id, e]));
-    const places = caseEntities.filter((e) => e.type === "place");
+    const places = caseEntities.filter((e) => e.type === "place" || e.type === "location");
     const dayKeys = uniqueDayKeys(caseEvents.map((e) => e.timestamp));
     const dayCounts: Record<string, number> = {};
     for (const e of caseEvents) {
@@ -801,6 +804,9 @@ export default function DesktopApp() {
     if (caseEvents.some((e) => e.id === "te-a1") && caseEvents.some((e) => e.id === "te-t2")) {
       addPair("te-a1", "te-t2", "Impossible transit", "The motel alibi cannot coexist with the Gate 4 toll exit.");
     }
+    for (const pair of detectLocationConflicts(caseEvents, caseEntities, activeCase?.subjectName || activeCase?.title)) {
+      addPair(pair.aId, pair.bId, pair.label, pair.detail);
+    }
 
     const byEntity = new Map<string, TimelineEventRecord[]>();
     caseEvents.forEach((e) => {
@@ -826,7 +832,8 @@ export default function DesktopApp() {
     }
 
     const evidenceMap = new Map(caseEvidence.map((row) => [row.id, row]));
-    const plotted = scoped.map((e) => {
+    const plotted = clusterMergeableEvents(scoped).map((group) => {
+      const e = group[0];
       const laneId = entityMap.has(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID;
       const ent = entityMap.get(e.entityId);
       const src = evidenceMap.get(e.sourceDocId);
@@ -838,6 +845,7 @@ export default function DesktopApp() {
         name: ent?.name,
         text: `${e.title} ${e.description}`,
       });
+      const mergeCount = group.length + (e.mergedFrom?.length ?? 0);
       return {
         id: e.id,
         entityId: laneId,
@@ -847,10 +855,13 @@ export default function DesktopApp() {
         title: e.title,
         sub: e.description,
         tag: e.isVerified ? "EVENT" : "UNVERIFIED",
-        flag: conflictIds.has(e.id),
+        flag: group.some((row) => conflictIds.has(row.id)),
         verified: e.isVerified,
         secondary,
         citeUrl,
+        sourceName: e.sourceCitation?.sourceName || src?.originalFileName || src?.fileName || "",
+        entityName: ent?.name || "Unassigned",
+        mergeCount,
         semantic,
       };
     });
@@ -955,10 +966,11 @@ export default function DesktopApp() {
       dayCounts,
       busiest,
       activeDay,
-      dayLabel: viewAllDates ? "ALL DATES" : (activeDay ? formatDayHeading(activeDay) : "NO DATE"),
+      conflictPairs,
+      dayLabel: viewAllDates ? "All dates" : (activeDay ? formatDaySelector(activeDay) : "No date"),
       timeLabel: formatClockRange(start, end),
     };
-  }, [caseEvents, caseEntities, caseEvidence, viewDay, viewAllDates, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit]);
+  }, [activeCase?.subjectName, activeCase?.title, caseEvents, caseEntities, caseEvidence, viewDay, viewAllDates, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit]);
 
   useEffect(() => {
     setViewDay("");
@@ -998,8 +1010,36 @@ export default function DesktopApp() {
 
   const inspectContradiction = (contradictionId?: string) => {
     setSelected(null);
+    setConflictInspectorOpen(true);
     setPendingInspectId(`${contradictionId ?? chrono.tether?.id ?? "primary"}:${Date.now()}`);
     if (screen !== "Timeline") setScreen("Timeline");
+  };
+
+  const mergeConflictEvents = async (keepId: string, dropId: string) => {
+    const keep = caseEvents.find((row) => row.id === keepId);
+    const drop = caseEvents.find((row) => row.id === dropId);
+    if (!keep || !drop) return;
+    await updateTimelineEvent(keep.id, {
+      description: [keep.description, drop.description].filter(Boolean).join("\n"),
+    });
+    await db.timelineEvents.update(keep.id, {
+      mergedFrom: [...(keep.mergedFrom || []), drop.id],
+    });
+    await deleteTimelineEvent(drop.id);
+    setConflictInspectorOpen(false);
+  };
+
+  const reassignConflictTime = async (eventId: string) => {
+    const rec = caseEvents.find((row) => row.id === eventId);
+    if (!rec) return;
+    await updateTimelineEvent(rec.id, { timestamp: rec.timestamp + 5 * 60 * 1000, isVerified: rec.isVerified });
+    setConflictInspectorOpen(false);
+  };
+
+  const flagConflictUnverified = async (aId: string, bId: string) => {
+    await updateTimelineEvent(aId, { isVerified: false });
+    await updateTimelineEvent(bId, { isVerified: false });
+    setConflictInspectorOpen(false);
   };
 
   const focusContradictionInViewport = () => {
@@ -2263,7 +2303,10 @@ export default function DesktopApp() {
     const source = sourcePaneRef.current;
     const queue = queuePaneRef.current;
     if (!source || !queue) return;
-    const marks = [...source.querySelectorAll<HTMLElement>("[id^='verify-quote-']")];
+    const marks = [
+      ...source.querySelectorAll<HTMLElement>("[id^='source-hit-']"),
+      ...source.querySelectorAll<HTMLElement>("[id^='verify-quote-']"),
+    ];
     if (!marks.length) return;
     const probeY = source.getBoundingClientRect().top + Math.min(140, source.clientHeight * 0.25);
     let lead: HTMLElement | null = null;
@@ -2272,7 +2315,8 @@ export default function DesktopApp() {
       else break;
     }
     const target = lead ?? marks[0];
-    const card = document.getElementById(`verify-card-${target.id.slice("verify-quote-".length)}`);
+    const draftId = target.getAttribute("data-verify-quote") || target.id.replace(/^(source-hit-|verify-quote-)/, "");
+    const card = document.getElementById(`verify-card-${draftId}`);
     if (!card || !queue.contains(card)) return;
     const qBox = queue.getBoundingClientRect();
     const cBox = card.getBoundingClientRect();
@@ -2285,11 +2329,12 @@ export default function DesktopApp() {
   useEffect(() => {
     if (screen !== "Verify" || !activeHoveredCardId) return;
     const origin = hoverOriginRef.current;
-    const targetId = origin === "doc"
-      ? `verify-card-${activeHoveredCardId}`
-      : `verify-quote-${activeHoveredCardId}`;
     const timer = window.setTimeout(() => {
-      document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      const card = document.getElementById(`verify-card-${activeHoveredCardId}`);
+      const quote = document.getElementById(`source-hit-${activeHoveredCardId}`)
+        ?? document.getElementById(`verify-quote-${activeHoveredCardId}`);
+      const el = origin === "doc" ? card : quote;
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 40);
     return () => window.clearTimeout(timer);
   }, [activeHoveredCardId, screen, sourceEvidence?.id, sourceQuoteSegments.length]);
@@ -3188,7 +3233,7 @@ export default function DesktopApp() {
                     <div className="flex shrink-0 items-center gap-3 border-b border-amber-200 bg-amber-50 px-5 py-2.5">
                       <TriangleAlert className="h-[15px] w-[15px] shrink-0 text-amber-700" />
                       <span className="min-w-0 text-[13px] text-amber-900 text-pretty">
-                        <span className="font-semibold text-amber-700">{chrono.tether.count} contradiction{chrono.tether.count === 1 ? "" : "s"} detected</span>
+                        <span className="font-semibold text-amber-700">{chrono.tether.count} timeline conflict{chrono.tether.count === 1 ? "" : "s"} detected</span>
                         {" — "}{chrono.tether.detail}
                       </span>
                       <div className="min-w-[8px] flex-1" />
@@ -3232,6 +3277,9 @@ export default function DesktopApp() {
                       dayCounts={chrono.dayCounts}
                       viewAllDates={viewAllDates}
                       activeDay={chrono.activeDay}
+                      eventCount={viewAllDates ? caseEvents.length : (chrono.dayCounts[chrono.activeDay] ?? chrono.all.length)}
+                      canPrevDay={chrono.dayKeys.indexOf(chrono.activeDay) > 0}
+                      canNextDay={chrono.dayKeys.indexOf(chrono.activeDay) >= 0 && chrono.dayKeys.indexOf(chrono.activeDay) < chrono.dayKeys.length - 1}
                       timeWindow={timeWindow}
                       customStart={customStart}
                       customEnd={customEnd}
@@ -3250,6 +3298,20 @@ export default function DesktopApp() {
                         setViewportFit(true);
                         setDateMenu(false);
                       }}
+                      onPrevDay={() => {
+                        const idx = chrono.dayKeys.indexOf(chrono.activeDay);
+                        if (idx <= 0) return;
+                        setViewAllDates(false);
+                        setViewDay(chrono.dayKeys[idx - 1]);
+                        setViewportFit(true);
+                      }}
+                      onNextDay={() => {
+                        const idx = chrono.dayKeys.indexOf(chrono.activeDay);
+                        if (idx < 0 || idx >= chrono.dayKeys.length - 1) return;
+                        setViewAllDates(false);
+                        setViewDay(chrono.dayKeys[idx + 1]);
+                        setViewportFit(true);
+                      }}
                       onSelectWindow={(w) => {
                         setTimeWindow(w);
                         setViewportFit(w === "full");
@@ -3267,13 +3329,20 @@ export default function DesktopApp() {
                       }}
                     />
                     <span className="h-4 w-px shrink-0 bg-slate-200" />
-                    <button
-                      type="button"
-                      onClick={() => chrono.tether && inspectContradiction()}
-                      className={`shrink-0 whitespace-nowrap ${mono} text-[11px] ${chrono.tether ? "text-amber-700 hover:underline" : "text-slate-500"}`}
-                    >
-                      {chrono.all.length} EVENTS · {chrono.lanes.length} LANES{chrono.tether ? ` · ${chrono.tether.count} CONTRADICTION${chrono.tether.count === 1 ? "" : "S"}` : ""}
-                    </button>
+                    {chrono.tether ? (
+                      <button
+                        type="button"
+                        onClick={() => inspectContradiction()}
+                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-amber-400 bg-amber-50 px-2.5 text-[11.5px] font-semibold text-amber-800 hover:bg-amber-100"
+                      >
+                        <TriangleAlert className="h-3.5 w-3.5" />
+                        {chrono.tether.count} Timeline Conflict{chrono.tether.count === 1 ? "" : "s"} Detected
+                      </button>
+                    ) : (
+                      <span className={`shrink-0 whitespace-nowrap ${mono} text-[11px] text-slate-500`}>
+                        {chrono.all.length} EVENTS · {chrono.lanes.length} LANES
+                      </span>
+                    )}
                     <div className="min-w-0 flex-1" />
                     <button
                       onClick={openAddEvent}
@@ -3319,12 +3388,18 @@ export default function DesktopApp() {
                           <div key={def.id} className={`relative overflow-visible border-b border-slate-200 transition-opacity ${dim ? "opacity-40" : "opacity-100"}`} style={{ height }}>
                             <div className={`sticky left-0 z-[3] flex h-full flex-col justify-center gap-1 border-r border-slate-200 bg-slate-50 pl-5 pr-3.5 ${mono} text-[11px] uppercase leading-snug tracking-[0.06em] text-slate-600`}
                               style={{ width: LANE_PAD }}
-                              title={`${def.name} · ${formatRoleLabel(def.role) || def.type}`}
                             >
-                              <span className="flex items-center gap-2.5">
-                                <span className={`h-[7px] w-[7px] shrink-0 rounded-[2px] ${def.dot}`} />
-                                <span className="min-w-0 truncate">{def.name} · {count} {count === 1 ? "event" : "events"}</span>
-                              </span>
+                              <TimelineHoverTip
+                                entityName={def.name}
+                                timestamp={placed[0]?.e.timestamp ?? Date.now()}
+                                source={formatRoleLabel(def.role) || def.type}
+                                verified={!def.uncorroborated}
+                              >
+                                <span className="flex items-center gap-2.5">
+                                  <span className={`h-[7px] w-[7px] shrink-0 rounded-[2px] ${def.dot}`} />
+                                  <span className="min-w-0 whitespace-normal leading-snug line-clamp-2">{def.name} · {count} {count === 1 ? "event" : "events"}</span>
+                                </span>
+                              </TimelineHoverTip>
                               {tracks > 1 && (
                                 <span className="pl-[18px] text-[9.5px] font-normal tracking-[0.08em] text-slate-400">
                                   {tracks} TRACKS
@@ -3338,12 +3413,11 @@ export default function DesktopApp() {
                                 type="button"
                                 key={e.id}
                                 id={`timeline-node-${e.id}`}
-                                title={`${e.title} · ${formatRoleLabel(def.role) || def.name}`}
                                 onClick={() => openEventDrawer(e.id)}
-                                className={`absolute z-[2] flex items-center gap-2 overflow-hidden rounded-[10px] border border-l-2 bg-white px-2.5 text-left shadow-sm transition-colors hover:border-blue-300 ${e.secondary ? "border-dashed border-amber-400 border-l-amber-500" : e.flag ? "border-amber-300 border-l-amber-600 ring-[3px] ring-amber-500/10" : `border-slate-200 ${getCategoryColor(e.semantic, "border")}`} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
+                                className={`absolute z-[2] flex min-w-[228px] items-start gap-2 overflow-visible rounded-[10px] border border-l-2 bg-white px-2.5 py-1.5 text-left shadow-sm transition-colors hover:border-blue-300 ${e.secondary ? "border-dashed border-amber-400 border-l-amber-500" : e.flag ? "border-amber-300 border-l-amber-600 ring-[3px] ring-amber-500/10" : `border-slate-200 ${getCategoryColor(e.semantic, "border")}`} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
                                 style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width: CARD_W, height: CARD_H }}
                               >
-                                <KindIcon className={`h-3.5 w-3.5 shrink-0 ${e.flag ? "text-amber-700" : getCategoryColor(e.semantic, "text")}`} />
+                                <KindIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${e.flag ? "text-amber-700" : getCategoryColor(e.semantic, "text")}`} />
                                 <span
                                   role="button"
                                   title="Open source citation"
@@ -3354,14 +3428,26 @@ export default function DesktopApp() {
                                     if (!rec) return;
                                     setTimelineInspect({ eventId: rec.id, citation: citationFromEvent(rec, src) });
                                   }}
-                                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-amber-700 hover:bg-amber-50"
+                                  className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-amber-700 hover:bg-amber-50"
                                 >
                                   <FileText className="h-3 w-3" />
                                 </span>
                                 <span className={`shrink-0 rounded-md border px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] ${e.flag ? "bg-amber-500/10 text-amber-700 border-amber-500/30" : getCategoryColor(e.semantic, "badge")}`}>
                                   {e.time}
                                 </span>
-                                <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium leading-none text-slate-900">{e.title}</span>
+                                <TimelineHoverTip
+                                  entityName={e.entityName}
+                                  timestamp={e.timestamp}
+                                  source={e.sourceName}
+                                  verified={e.verified}
+                                >
+                                  <span className="min-w-0 flex-1 whitespace-normal text-[12.5px] font-medium leading-snug text-slate-900 line-clamp-2">{e.title}</span>
+                                </TimelineHoverTip>
+                                {e.mergeCount > 1 ? (
+                                  <span className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[9.5px] font-semibold text-slate-600">
+                                    Merged x{e.mergeCount}
+                                  </span>
+                                ) : null}
                                 {e.citeUrl ? (
                                   <a
                                     href={e.citeUrl}
@@ -3432,8 +3518,8 @@ export default function DesktopApp() {
                                 ))}
                               </div>
                               <div className="flex gap-2">
-                                <button type="button" className="h-8 flex-1 rounded-lg border border-amber-300 bg-amber-500/10 text-[12.5px] font-medium text-amber-700">Flag for review</button>
-                                <button type="button" className="h-8 flex-1 rounded-lg border border-slate-300 text-[12.5px] text-slate-600">Dismiss</button>
+                                <button type="button" onClick={() => { if (chrono.tether) void flagConflictUnverified(chrono.tether.aId, chrono.tether.bId); }} className="h-8 flex-1 rounded-lg border border-amber-300 bg-amber-500/10 text-[12.5px] font-medium text-amber-700">Flag for review</button>
+                                <button type="button" onClick={() => setPopover(false)} className="h-8 flex-1 rounded-lg border border-slate-300 text-[12.5px] text-slate-600">Dismiss</button>
                               </div>
                             </div>
                           )}
@@ -3448,6 +3534,16 @@ export default function DesktopApp() {
           </main>
         </div>
       </div>
+
+      <TimelineConflictInspector
+        open={conflictInspectorOpen}
+        pair={chrono.conflictPairs[0] ?? (chrono.tether ? { aId: chrono.tether.aId, bId: chrono.tether.bId, label: chrono.tether.label, detail: chrono.tether.detail } : null)}
+        events={caseEvents}
+        onClose={() => setConflictInspectorOpen(false)}
+        onMerge={(keepId, dropId) => { void mergeConflictEvents(keepId, dropId); }}
+        onReassignTime={(eventId) => { void reassignConflictTime(eventId); }}
+        onFlagUnverified={(aId, bId) => { void flagConflictUnverified(aId, bId); }}
+      />
 
       {timelineInspect && (
         <div className="fixed inset-0 z-[80] flex flex-col bg-slate-900/40 sm:flex-row">
