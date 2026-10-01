@@ -73,25 +73,34 @@ export function regexExtractFromText(text: string, fileName: string): ExtractBun
 
 /** Guaranteed cards so Verify is usable when the extract API is down. */
 export function sampleExtractedCards(fileName: string): ExtractBundle {
-  const label = fileName.replace(/\.[^.]+$/, "") || "Sample source";
-  return {
-    events: [
-      eventFrom(
-        "Last known location (sample)",
-        label,
-        "Unknown",
-        "Sample card — extraction service was unavailable. Confirm, edit, or reject after retrying with a valid API key.",
-        "location",
-      ),
-      eventFrom(
-        "Timeline placeholder (sample)",
-        label,
-        "Unknown",
-        `Placeholder event generated from ${fileName} so verification can continue without the model.`,
-        "time",
-      ),
-    ],
-    entities: [{ name: label, type: "person", classification: "UNVERIFIED", identifiers: [] }],
-    relationships: [],
-  };
+  return metadataPlaceholderCards(fileName, "");
+}
+
+/** Structured placeholders from filename / sparse OCR (call numbers, agencies, report dates). */
+export function metadataPlaceholderCards(fileName: string, text = ""): ExtractBundle {
+  const hay = `${fileName}\n${text}`.slice(0, 20_000);
+  const label = fileName.replace(/\.[^.]+$/, "") || "Source file";
+  const call = hay.match(/\b(\d{2,4}[-–]\d{3,6})\b/);
+  const dept = hay.match(/\b([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){0,4}\s+(?:Police|PD|Sheriff|Department|Dept)\.?)\b/);
+  const date = hay.match(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b/);
+  const events: ExtractedEvent[] = [];
+  const entities: ExtractedRosterEntity[] = [];
+  if (call) {
+    events.push(eventFrom(`Call / case number ${call[1]}`, dept?.[1] || label, date?.[1] || "Unknown", call[0], "evidence"));
+    entities.push({ name: call[1], type: "exhibit", classification: "UNVERIFIED", identifiers: [call[1]] });
+  }
+  if (dept) {
+    events.push(eventFrom(`Reporting agency · ${dept[1]}`, dept[1], date?.[1] || "Unknown", dept[0], "person"));
+    entities.push({ name: dept[1], type: "person", classification: "UNVERIFIED", identifiers: [] });
+  }
+  if (date) {
+    events.push(eventFrom(`Incident / report date ${date[1]}`, label, date[1], date[0], "time"));
+  }
+  if (!events.length) {
+    events.push(eventFrom(`Indexed source · ${label}`, label, "Unknown", `Placeholder card from ${fileName}. Highlight text in the viewer to add facts.`, "evidence"));
+  }
+  if (!entities.length) {
+    entities.push({ name: label, type: "exhibit", classification: "UNVERIFIED", identifiers: [] });
+  }
+  return { events: events.slice(0, 8), entities: entities.slice(0, 8), relationships: [] };
 }

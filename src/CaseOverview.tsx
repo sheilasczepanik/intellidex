@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
   AlertTriangle, Archive, ArchiveRestore, ArrowRight, Check, Clock, Copy, Download, Eye, FileAudio, FileDown, FileText, Globe, Image as ImageIcon,
@@ -220,6 +221,7 @@ export default function CaseOverview({
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [sourceMenuId, setSourceMenuId] = useState<string | null>(null);
+  const [sourceMenuRect, setSourceMenuRect] = useState<DOMRect | null>(null);
   const [registryTab, setRegistryTab] = useState<"official" | "news">("official");
   const [ingestOpen, setIngestOpen] = useState(false);
   const [contactsExpanded, setContactsExpanded] = useState(false);
@@ -261,7 +263,10 @@ export default function CaseOverview({
 
   useEffect(() => {
     if (!sourceMenuId) return;
-    const close = () => setSourceMenuId(null);
+    const close = () => {
+      setSourceMenuId(null);
+      setSourceMenuRect(null);
+    };
     window.addEventListener("click", close);
     return () => window.removeEventListener("click", close);
   }, [sourceMenuId]);
@@ -436,7 +441,7 @@ export default function CaseOverview({
             Tips, Sightings & Media Archive ({newsSources.length})
           </button>
         </div>
-        <div className="rounded-xl border border-[#E2E8F0] bg-white p-5">
+        <div className="overflow-visible rounded-xl border border-[#E2E8F0] bg-white p-5 pb-12">
           <div className="mb-4 flex justify-end">
             <button
               type="button"
@@ -455,7 +460,7 @@ export default function CaseOverview({
                 : "No tips or media yet. Log a community tip, news clip, or social lead."}
             </div>
           ) : (
-            <ul className="divide-y divide-slate-100 overflow-hidden rounded-[10px] border border-slate-200">
+            <ul className="relative z-10 divide-y divide-slate-100 overflow-visible rounded-[10px] border border-slate-200">
               {registryRows.map((ev) => {
                 const kind = sourceKind(ev);
                 const badge = ingestLabel(ev.status);
@@ -463,7 +468,7 @@ export default function CaseOverview({
                 const stamp = ev.ingestedAt ? formatStamp(new Date(ev.ingestedAt).getTime()) : formatStamp(activeCase.updatedAt);
                 const size = formatBytes(ev.byteSize ?? ev.fileSize);
                 return (
-                  <li key={ev.id} className="flex flex-col gap-3 px-3.5 py-3 sm:flex-row sm:items-start">
+                  <li key={ev.id} className="relative z-0 flex flex-col gap-3 overflow-visible px-3.5 py-3 last:z-20 sm:flex-row sm:items-start">
                     <div className="flex min-w-0 flex-1 gap-3">
                       <SourceKindIcon kind={kind} />
                       <div className="min-w-0 flex-1">
@@ -519,57 +524,21 @@ export default function CaseOverview({
                       >
                         Extracted Entities
                       </button>
-                      <div className="relative">
+                      <div className="relative z-20">
                         <button
                           type="button"
                           aria-label="Source actions"
+                          aria-expanded={sourceMenuId === ev.id}
                           onClick={(e) => {
                             e.stopPropagation();
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setSourceMenuRect(rect);
                             setSourceMenuId((id) => (id === ev.id ? null : ev.id));
                           }}
                           className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-800"
                         >
                           <MoreHorizontal className="h-4 w-4" />
                         </button>
-                        {sourceMenuId === ev.id && (
-                          <div
-                            role="menu"
-                            onClick={(e) => e.stopPropagation()}
-                            className="absolute right-0 z-20 mt-1 w-[240px] rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
-                          >
-                            <button
-                              type="button"
-                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-slate-700 hover:bg-slate-50"
-                              onClick={() => {
-                                downloadOriginal(ev);
-                                setSourceMenuId(null);
-                              }}
-                            >
-                              <Download className="h-3.5 w-3.5" /> Download Original
-                            </button>
-                            <button
-                              type="button"
-                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-slate-700 hover:bg-slate-50"
-                              onClick={() => {
-                                onReextract?.(ev.id);
-                                setSourceMenuId(null);
-                              }}
-                            >
-                              <RefreshCw className="h-3.5 w-3.5" /> Re-run Triage / Entity Extraction
-                            </button>
-                            <button
-                              type="button"
-                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-rose-700 hover:bg-rose-50"
-                              onClick={() => {
-                                setSourceMenuId(null);
-                                if (!window.confirm(`Disassociate “${ev.originalFileName || ev.fileName}” from this case?`)) return;
-                                void deleteEvidence(ev.id);
-                              }}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" /> Delete / Disassociate
-                            </button>
-                          </div>
-                        )}
                       </div>
                     </div>
                   </li>
@@ -579,6 +548,59 @@ export default function CaseOverview({
           )}
         </div>
       </div>
+      {sourceMenuId && sourceMenuRect && typeof document !== "undefined" ? createPortal((() => {
+        const ev = uniqueSources.find((row) => row.id === sourceMenuId);
+        if (!ev) return null;
+        const menuH = 148;
+        const openUp = window.innerHeight - sourceMenuRect.bottom < menuH + 12;
+        return (
+          <div
+            role="menu"
+            onClick={(e) => e.stopPropagation()}
+            className="fixed z-50 w-[240px] rounded-lg border border-zinc-200 bg-white py-1 shadow-xl dark:border-zinc-800 dark:bg-zinc-900"
+            style={{
+              right: Math.max(8, window.innerWidth - sourceMenuRect.right),
+              top: openUp ? undefined : sourceMenuRect.bottom + 4,
+              bottom: openUp ? Math.max(8, window.innerHeight - sourceMenuRect.top + 4) : undefined,
+            }}
+          >
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-slate-700 hover:bg-slate-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              onClick={() => {
+                downloadOriginal(ev);
+                setSourceMenuId(null);
+                setSourceMenuRect(null);
+              }}
+            >
+              <Download className="h-3.5 w-3.5" /> Download Original
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-slate-700 hover:bg-slate-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              onClick={() => {
+                onReextract?.(ev.id);
+                setSourceMenuId(null);
+                setSourceMenuRect(null);
+              }}
+            >
+              <RefreshCw className="h-3.5 w-3.5" /> Re-run Triage / Entity Extraction
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] text-rose-700 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-zinc-800"
+              onClick={() => {
+                setSourceMenuId(null);
+                setSourceMenuRect(null);
+                if (!window.confirm(`Disassociate “${ev.originalFileName || ev.fileName}” from this case?`)) return;
+                void deleteEvidence(ev.id);
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Delete / Disassociate
+            </button>
+          </div>
+        );
+      })(), document.body) : null}
 
       <div className="mb-8">
         <div className="mb-3.5 flex flex-wrap items-center justify-between gap-3">

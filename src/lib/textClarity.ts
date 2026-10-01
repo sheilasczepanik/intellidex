@@ -23,14 +23,10 @@ export function assessTextClarity(text: string, pageCount = 1): TextClarity {
   return multiPageThin || noisy ? "low" : "ok";
 }
 
-/** Empty or mostly glyphs — do not send to Claude. Imperfect OCR can still pass. */
+/** Completely empty text layer only — sparse OCR and redactions still go to the model. */
 export function isUnreadableScan(text: string) {
   const stripped = text.replace(/\n\n\[Initial pass:[\s\S]*$/, "").trim();
-  if (!stripped) return true;
-  const compact = stripped.replace(/\s+/g, "");
-  const alnum = (stripped.match(/[A-Za-z0-9]/g) ?? []).length;
-  const words = realWordCount(stripped);
-  return alnum / Math.max(compact.length, 1) < 0.4 || words < 8;
+  return stripped.length === 0;
 }
 
 export function logExtractedText(rawText: string, source = "PDF") {

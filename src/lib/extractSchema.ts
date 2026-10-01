@@ -59,49 +59,40 @@ export type ExtractedEvent = {
   tier?: "primary" | "secondary";
 };
 
-export const EXTRACT_SYSTEM = `You are a missing persons intelligence specialist. Extract high-confidence investigative facts from police blotters, missing flyers, witness statements, search logs, and news reports.
+export const EXTRACT_SYSTEM = `You are INTELLIDEX, an elite investigative intelligence extraction engine.
+Analyze the provided case document and extract ALL verified investigative entities, key persons, critical timestamps, locations, vehicles, and physical evidence.
 
-Return ONLY a JSON object with this exact shape:
+Return ONLY a JSON object (no markdown) of this shape:
 {
-  "subject": {
-    "name": string,
-    "age": string,
-    "identifyingMarks": string[],
-    "clothingLastSeen": string,
-    "medicalVulnerabilities": string[]
-  },
-  "lks": {
-    "date": string,
-    "time": string,
-    "location": string,
-    "circumstances": string
-  },
-  "sightingsAndEvents": [
-    { "date": string, "time": string, "title": string, "description": string, "tier": "primary" | "secondary" }
-  ],
-  "searchLocations": [
-    { "name": string, "type": "last_seen" | "item_recovered" | "cell_ping" | "search_grid", "description": string }
-  ],
-  "contacts": [
-    { "name": string, "role": string, "relation": string }
-  ],
   "entities": [
-    { "name": string, "category": "person" | "location" | "vehicle" | "phone" | "exhibit", "role": string, "context": string }
-  ],
-  "events": [
-    { "date": string, "time": string, "title": string, "summary": string, "sourceReference": string }
+    {
+      "type": "person" | "location" | "timeline_event" | "vehicle" | "evidence",
+      "title": "concise name or summary (e.g. Butch Atwood (Bus Driver), Route 112 Crash Site, 1996 Saturn SL2)",
+      "category": "display badge (e.g. Primary Witness, Last Known Sighting, Physical Evidence)",
+      "date": "ISO date (YYYY-MM-DD) or source date/time text if applicable, else empty string",
+      "quote": "verbatim excerpt from the document proving the extraction",
+      "confidence": 80,
+      "details": "1-2 sentence investigative context summary",
+      "role": "optional person role: subject | witness | investigator | family | other"
+    }
   ]
 }
 
+Category coverage (extract every distinct item you can support with a quote):
+- PERSON: full name, role (subject, witness, investigator, family), source quote, confidence 85-98.
+- LOCATION: specific addresses, landmarks, roadways, cities, states, coordinates, source quote.
+- TIMELINE_EVENT: explicit date/time timestamps, chronological event description, source quote.
+- VEHICLE: year, make, model, color, registration/plates, distinguishing characteristics.
+- EVIDENCE: physical items found, personal effects, digital traces, ATM receipts, phone pings.
+
 Rules:
-- Normalize OCR typos before extracting (e.g. MASSACHUSEATS → Massachusetts; fix split names and garbled titles).
-- Distinguish report/file dates from incident dates. Prefer the incident / last-known-sighting date.
-- Extract only high-confidence items: named people, last-known locations, times, key narrative statements, vehicles, and physical evidence.
-- Format dates as YYYY-MM-DD when possible; times as HH:MM (24h) or "".
-- title and summary must be clean investigator language, not raw OCR fragments.
-- tier "primary" for official records / verified sightings; "secondary" for tips and press.
-- Skip court boilerplate, headers, page numbers, and unreadable OCR garbage.
-- If the excerpt has no search facts, return empty arrays and empty strings.`;
+- Feed facts from the document text (and any attached page images). Do not invent names, plates, or dates that are not in the source.
+- Extract despite OCR errors or redactions: dates, locations, department names, call numbers, officer names.
+- Normalize obvious OCR typos (MASSACHUSEATS → Massachusetts) in title/details; keep quote verbatim.
+- Distinguish report/file dates from incident dates. Prefer incident / last-known-sighting time for timeline_event.date.
+- confidence is an integer 80-99 (typically 85-98) reflecting how clearly the quote supports the card.
+- One card per distinct person, place, timestamped event, vehicle, or exhibit. Do not collapse a crash site and a later search grid into one location.
+- If almost nothing is recoverable, still return identifiers (call number, agency, report date) rather than an empty array.`;
 
 export function unwrapModelJson(raw: string) {
   let s = raw.trim();
@@ -118,12 +109,13 @@ export function unwrapModelJson(raw: string) {
 
 export function parseExtractedEvents(raw: string): ExtractedEvent[] {
   try {
-    const parsed = JSON.parse(unwrapModelJson(raw)) as { items?: unknown; events?: unknown };
-    const rows = Array.isArray(parsed.items)
-      ? parsed.items
-      : Array.isArray(parsed.events)
-        ? parsed.events
-        : [];
+    const parsed = JSON.parse(unwrapModelJson(raw)) as { items?: unknown; events?: unknown; entities?: unknown };
+    const fromCards = Array.isArray(parsed.entities) ? parsed.entities.filter(isIntelExtractCard) : [];
+    const rows = [
+      ...(Array.isArray(parsed.items) ? parsed.items : []),
+      ...(Array.isArray(parsed.events) ? parsed.events : []),
+      ...fromCards,
+    ];
     return rows.map(normalizeEvent).filter((e) => e.title.trim() || e.rawQuote.trim() || e.entityName.trim());
   } catch (err) {
     const detail = err instanceof Error ? err.message : "Invalid JSON";
@@ -131,14 +123,23 @@ export function parseExtractedEvents(raw: string): ExtractedEvent[] {
   }
 }
 
+export function isIntelExtractCard(row: unknown): boolean {
+  if (!row || typeof row !== "object") return false;
+  const r = row as Record<string, unknown>;
+  const t = String(r.type ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  if (!/^(person|location|timeline_event|timeline|vehicle|evidence|exhibit)$/.test(t)) return false;
+  return Boolean(String(r.title ?? r.name ?? "").trim() || String(r.quote ?? r.details ?? "").trim());
+}
+
 function normalizeCategory(value: unknown): ExtractCategory {
-  const s = String(value ?? "").toLowerCase();
+  const s = String(value ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  if (s.includes("timeline") || s === "time" || s.includes("time_window") || s.includes("timestamp") || s.includes("clock")) return "time";
   if (s.includes("telecom") || s.includes("phone") || s.includes("ping") || s.includes("tower") || s.includes("imei") || s.includes("handset")) return "telecom";
-  if (s === "time" || s.includes("time_window") || s.includes("timestamp") || s.includes("clock")) return "time";
-  if (s.includes("comm") || s.includes("radio") || s.includes("dispatch") || s.includes("interview") || s.includes("call")) return "communication";
-  if (s.includes("exhibit") || s.includes("evidence") || s.includes("forensic") || s.includes("weapon") || s.includes("physical") || s.includes("descrip")) return "evidence";
-  if (s.includes("place") || s.includes("location") || s.includes("address")) return "location";
-  if (s.includes("vehicle") || s.includes("car") || s.includes("plate") || s.includes("elantra")) return "vehicle";
+  if (s.includes("comm") || s.includes("radio") || s.includes("dispatch") || s.includes("interview") || s.includes("call_log")) return "communication";
+  if (s.includes("exhibit") || s.includes("evidence") || s.includes("forensic") || s.includes("weapon") || s.includes("physical")) return "evidence";
+  if (s.includes("place") || s.includes("location") || s.includes("address") || s.includes("sighting")) return "location";
+  if (s.includes("vehicle") || s.includes("car") || s.includes("plate") || s.includes("elantra") || s.includes("saturn")) return "vehicle";
+  if (s.includes("person") || s.includes("witness") || s.includes("investigator") || s.includes("subject") || s.includes("family")) return "person";
   return "person";
 }
 
@@ -161,20 +162,27 @@ function normalizeEntityType(value: unknown, category: ExtractCategory): EntityT
 
 function normalizeEvent(row: unknown): ExtractedEvent {
   const r = (row && typeof row === "object") ? row as Record<string, unknown> : {};
+  const typeKey = String(r.type ?? "").trim();
+  const displayBadge = String(r.category ?? r.role ?? "").trim();
   const date = String(r.date ?? "").trim();
   const time = String(r.time ?? "").trim();
   const composedTs = [date, time].filter(Boolean).join(" ");
-  const category = normalizeCategory(r.category ?? r.newEntityType);
-  const entityType = normalizeEntityType(r.entityType ?? r.newEntityType ?? r.category, category);
-  const rawQuote = String(r.sourceReference ?? r.rawQuote ?? r.exactQuote ?? r.snippet ?? "").trim();
+  const category = normalizeCategory(typeKey || r.category || r.newEntityType);
+  const entityType = normalizeEntityType(r.entityType ?? r.newEntityType ?? typeKey ?? r.category, category);
+  const rawQuote = String(r.quote ?? r.sourceReference ?? r.rawQuote ?? r.exactQuote ?? r.snippet ?? "").trim();
   const exactQuote = String(r.exactQuote ?? rawQuote).trim();
   const ts = r.timestamp === null || r.timestamp === undefined ? composedTs : String(r.timestamp).trim();
   const timestampLabel = String(r.timestampLabel ?? (composedTs || ts || "Unknown")).trim() || "Unknown";
-  const entityName = String(r.entityName ?? r.name ?? "Unknown").trim() || "Unknown";
+  const title = String(r.title ?? r.name ?? "Untitled fact").trim() || "Untitled fact";
+  const entityName = String(r.entityName ?? r.name ?? title.replace(/\s*\([^)]*\)\s*$/, "").trim() ?? "Unknown").trim() || "Unknown";
   const entityId = typeof r.entityId === "string" && r.entityId.trim() ? r.entityId.trim() : null;
-  const conf = Number(r.confidence);
+  const confRaw = Number(r.confidence);
+  const confidence = Number.isFinite(confRaw)
+    ? Math.min(0.99, Math.max(0.8, confRaw > 1 ? confRaw / 100 : confRaw))
+    : 0.88;
   const pageNumber = parsePageNumber(r.pageNumber ?? r.page);
   const boundingBox = normalizeBoundingBox(r.boundingBox ?? r.bbox);
+  const details = [displayBadge && !/^(person|location|timeline_event|vehicle|evidence|exhibit|time)$/i.test(displayBadge) ? displayBadge : "", String(r.details ?? r.summary ?? r.citation ?? "").trim()].filter(Boolean).join(" · ");
   return {
     timestamp: ts || null,
     timestampLabel,
@@ -184,12 +192,12 @@ function normalizeEvent(row: unknown): ExtractedEvent {
     suggestNewEntity: r.suggestNewEntity == null ? !entityId : Boolean(r.suggestNewEntity),
     newEntityType: entityType,
     category,
-    title: String(r.title ?? "Untitled fact").trim() || "Untitled fact",
+    title,
     snippet: rawQuote,
     rawQuote,
-    details: String(r.summary ?? r.details ?? r.citation ?? "").trim(),
-    confidence: Number.isFinite(conf) ? Math.min(1, Math.max(0, conf)) : 0.8,
-    citation: String(r.sourceReference ?? r.citation ?? (pageNumber ? `p.${pageNumber}` : r.category ?? category)),
+    details,
+    confidence,
+    citation: String(r.sourceReference ?? r.citation ?? (pageNumber ? `p.${pageNumber}` : displayBadge || category)),
     pageNumber,
     exactQuote: exactQuote || rawQuote,
     boundingBox,
@@ -361,6 +369,7 @@ function normalizeExtractedRelationship(row: unknown): ExtractedRelationship | n
 export function parseExtractGraph(raw: unknown): Pick<ExtractBundle, "entities" | "relationships"> {
   const parsed = (raw && typeof raw === "object" ? raw : {}) as { entities?: unknown; relationships?: unknown; links?: unknown };
   const entities = (Array.isArray(parsed.entities) ? parsed.entities : [])
+    .filter((row) => !isIntelExtractCard(row))
     .map(normalizeRosterEntity)
     .filter((e): e is ExtractedRosterEntity => Boolean(e));
   const relRaw = Array.isArray(parsed.relationships) ? parsed.relationships
@@ -642,11 +651,13 @@ export function userExtractPrompt(
   const excerpt = prioritizeLegalFacts(text, opts?.maxChars ?? EXTRACT_MODEL_MAX_CHARS);
   return [
     `Source file: ${fileName}`,
+    "Return JSON { \"entities\": [ ... ] } covering person, location, timeline_event, vehicle, and evidence.",
+    "Extract any recognizable investigative facts (dates, locations, department names, call numbers, officer names) despite OCR errors or redactions.",
     "OCR cleanup: correct obvious scanning typos, expand garbled place names, and keep incident dates separate from report dates.",
     opts?.summary
-      ? "Mode: condensed summary of this excerpt only. Prefer fewer, high-confidence items."
-      : "Mode: extract people, last-known locations, times, vehicles, physical evidence, and key narrative facts from this excerpt only (first pages / current window). Skip court boilerplate.",
-    "Known case entities (match entityId / entityName when possible):",
+      ? "Mode: condensed summary of this excerpt only. Prefer fewer, high-confidence cards with verbatim quotes."
+      : "Mode: exhaustive extraction of every named person, last-known location, timestamped event, vehicle, and physical/digital exhibit in this excerpt.",
+    "Known case entities (match names when possible; still emit a card even if unmatched):",
     JSON.stringify(entities, null, 2),
     "",
     "Source text:",

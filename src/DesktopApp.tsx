@@ -8,7 +8,7 @@ import {
 } from "./db";
 import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
 import { extractPdfText, renderPdfPagesToJpeg, ocrImageSource, documentText } from "./lib/pdfHelpers";
-import { regexExtractFromText, sampleExtractedCards } from "./lib/regexExtract";
+import { regexExtractFromText, sampleExtractedCards, metadataPlaceholderCards } from "./lib/regexExtract";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
 import { scrapeArticleFromUrl } from "./lib/scrapeClient";
@@ -44,7 +44,7 @@ import { ExtractSelectionTip, LogEvidenceModal, VERIFY_CATEGORIES, type ManualLo
 import {
   ingestElapsedSec, type IngestJob,
 } from "./lib/ingestProgress";
-import { LOW_CLARITY_BADGE, UNREADABLE_SCAN_ALERT, assessTextClarity, isUnreadableScan, logExtractedText } from "./lib/textClarity";
+import { LOW_CLARITY_BADGE, assessTextClarity, isUnreadableScan, logExtractedText } from "./lib/textClarity";
 import { isPdfFile, isTextFile, EVIDENCE_ACCEPT } from "./lib/pdfText";
 import { isImageFile } from "./lib/imageEvidence";
 import { inferSourceType, type SourceBoundingBox, type SourceCitation } from "./types";
@@ -1585,29 +1585,6 @@ export default function DesktopApp() {
     }
     const isPdf = (ev.fileType === "pdf" || ev.mediaType === "application/pdf") && Boolean(ev.fileBase64);
     const canVision = Boolean(ev.fileBase64 || ev.imageBase64);
-    if (!canVision && !isPdf && (!ev.rawText.trim() || isUnreadableScan(ev.rawText))) {
-      const fallback = regexExtractFromText(ev.rawText || ev.fileName, ev.fileName);
-      if (deferApply && (fallback.events.length || fallback.entities.length)) {
-        pushDrawerStaged([ev.id]);
-        setExtractPreview({
-          evidenceId: ev.id,
-          fileName: ev.fileName,
-          entities: fallback.entities,
-          events: fallback.events,
-          relationships: fallback.relationships,
-          usedFallback: true,
-          bundle: fallback,
-        });
-        setSelectedExtractNames(new Set(fallback.entities.map((ent) => ent.name)));
-        await db.evidence.update(ev.id, { status: "flagged", lastError: "" });
-        setExtractError(null);
-        return;
-      }
-      const message = UNREADABLE_SCAN_ALERT;
-      await db.evidence.update(ev.id, { status: "failed", lastError: message, textClarity: "low" });
-      setExtractError(message);
-      return;
-    }
     if (!canVision) logExtractedText(ev.rawText, ev.fileName);
     const startedAt = opts?.startedAt ?? Date.now();
     setExtracting(true);
@@ -1665,7 +1642,7 @@ export default function DesktopApp() {
         sourceText = ev.fullText;
       }
 
-      const textUsable = Boolean(sourceText.trim()) && !isUnreadableScan(sourceText);
+      const textUsable = Boolean(sourceText.trim());
       let bundle: ExtractBundle;
       let usedFallback = false;
 
@@ -1720,7 +1697,10 @@ export default function DesktopApp() {
       }
 
       if (!bundle.events.length) {
-        const fallback = regexExtractFromText(sourceText || ev.rawText, ev.fileName);
+        const fallback = mergeExtractBundles([
+          regexExtractFromText(sourceText || ev.rawText, ev.fileName),
+          metadataPlaceholderCards(ev.fileName, sourceText || ev.rawText),
+        ]);
         bundle = mergeExtractBundles([bundle, fallback]);
         usedFallback = true;
       }
@@ -3094,21 +3074,15 @@ export default function DesktopApp() {
                       <div className="flex flex-col items-center gap-4 rounded-[14px] border border-dashed border-slate-300 px-5 py-10 text-center">
                         <CheckCheck className="h-[18px] w-[18px] text-blue-600" />
                         <div className="text-[20px] font-semibold">
-                          {extractUnavailable
-                            ? (caseEvidence.length ? "Queue cleared" : "Nothing to verify")
-                            : extractError || (sourceEvidence && isUnreadableScan(sourceEvidence.rawText))
-                            ? "Extraction blocked"
-                            : caseEvidence.length ? "Queue cleared" : "Nothing to verify"}
+                          {caseEvidence.length ? "Queue cleared" : "Nothing to verify"}
                         </div>
                         <p className="max-w-[34ch] text-[12.5px] text-slate-500 text-pretty">
                           {extractUnavailable
                             ? EXTRACT_SERVICE_UNAVAILABLE
-                            : extractError
+                            : extractError && extractError !== EXTRACT_SERVICE_UNAVAILABLE
                             ? extractError
-                            : sourceEvidence && isUnreadableScan(sourceEvidence.rawText)
-                            ? UNREADABLE_SCAN_ALERT
                             : sourceEvidence?.textClarity === "low"
-                            ? SCAN_NOTE
+                            ? `${SCAN_NOTE} Highlight text in the viewer to add cards.`
                             : caseEvidence.length
                             ? "Confirmed events are on the chronology. Rejected cards stay dismissed. Drop a new source below to extract, or highlight text in the viewer."
                             : "Drop a document here to extract entities, or pull an indexed file from Intake."}

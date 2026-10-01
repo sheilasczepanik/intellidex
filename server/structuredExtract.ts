@@ -22,6 +22,17 @@ export class ExtractHttpError extends Error {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "sk-unconfigured" });
 
+export const intelExtractCardSchema = z.object({
+  type: z.enum(["person", "location", "timeline_event", "vehicle", "evidence"]),
+  title: z.string(),
+  category: z.string(),
+  date: z.string().optional(),
+  quote: z.string(),
+  confidence: z.number().optional(),
+  details: z.string().optional(),
+  role: z.string().optional(),
+});
+
 export const structuredEntitySchema = z.object({
   name: z.string(),
   category: z.enum(["person", "location", "vehicle", "phone", "exhibit"]),
@@ -38,6 +49,8 @@ export const structuredEventSchema = z.object({
 });
 
 export const structuredExtractSchema = z.object({
+  entities: z.array(z.union([intelExtractCardSchema, structuredEntitySchema])).optional(),
+  events: z.array(structuredEventSchema).optional(),
   subject: z.object({
     name: z.string().optional(),
     age: z.string().optional(),
@@ -69,8 +82,6 @@ export const structuredExtractSchema = z.object({
     role: z.string().optional(),
     relation: z.string().optional(),
   })).optional(),
-  entities: z.array(structuredEntitySchema).optional(),
-  events: z.array(structuredEventSchema).optional(),
 }).passthrough();
 
 export type StructuredExtract = z.infer<typeof structuredExtractSchema>;
