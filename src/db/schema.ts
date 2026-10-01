@@ -242,6 +242,7 @@ export interface CaseMediaRecord {
   faviconUrl?: string;
   summary?: string;
   mergedFrom?: string[];
+  isPinned?: boolean;
 }
 
 export type ThemePreference = "system" | "dark" | "light";

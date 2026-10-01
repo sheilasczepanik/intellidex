@@ -1,6 +1,34 @@
 export type LatLng = { lat: number; lng: number };
 
 const cache = new Map<string, LatLng | null>();
+const GEO_CACHE_KEY = "dossier-geocode-v1";
+
+function loadGeocodeCache() {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const raw = localStorage.getItem(GEO_CACHE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Record<string, LatLng | null>;
+    for (const [key, value] of Object.entries(parsed)) cache.set(key, value);
+  } catch {
+    /* ignore a corrupt cache */
+  }
+}
+
+function rememberGeocode(key: string, value: LatLng | null) {
+  cache.set(key, value);
+  if (value == null || typeof localStorage === "undefined") return;
+  try {
+    const raw = localStorage.getItem(GEO_CACHE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, LatLng | null> : {};
+    parsed[key] = value;
+    localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(parsed));
+  } catch {
+    /* storage may be full or blocked */
+  }
+}
+
+loadGeocodeCache();
 
 export function parseCoordinates(raw?: string | null): LatLng | null {
   const text = String(raw || "").trim();
@@ -23,34 +51,35 @@ export function parseCoordinates(raw?: string | null): LatLng | null {
 export async function geocodeQuery(query: string): Promise<LatLng | null> {
   const q = query.trim();
   if (!q) return null;
-  if (cache.has(q.toLowerCase())) return cache.get(q.toLowerCase()) ?? null;
+  const key = q.toLowerCase();
+  if (cache.has(key)) return cache.get(key) ?? null;
   const parsed = parseCoordinates(q);
   if (parsed) {
-    cache.set(q.toLowerCase(), parsed);
+    rememberGeocode(key, parsed);
     return parsed;
   }
   try {
     const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
     const res = await fetch(url, { headers: { Accept: "application/json" } });
     if (!res.ok) {
-      cache.set(q.toLowerCase(), null);
+      rememberGeocode(key, null);
       return null;
     }
     const rows = (await res.json()) as { lat: string; lon: string }[];
     const hit = rows[0];
     if (!hit) {
-      cache.set(q.toLowerCase(), null);
+      rememberGeocode(key, null);
       return null;
     }
     const loc = { lat: Number(hit.lat), lng: Number(hit.lon) };
     if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lng)) {
-      cache.set(q.toLowerCase(), null);
+      rememberGeocode(key, null);
       return null;
     }
-    cache.set(q.toLowerCase(), loc);
+    rememberGeocode(key, loc);
     return loc;
   } catch {
-    cache.set(q.toLowerCase(), null);
+    rememberGeocode(key, null);
     return null;
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -290,6 +290,7 @@ export default function LocationsMap({
   const mapEl = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layersRef = useRef<L.LayerGroup | null>(null);
+  const markerRefs = useRef<Map<string, L.Marker>>(new Map());
   const fittedKey = useRef("");
 
   const locationsApi = useLocations();
@@ -349,9 +350,7 @@ export default function LocationsMap({
       setGeoBusy(true);
       const fallbackQuery = activeCase.lksLocation || activeCase.jurisdiction || "United States";
       const origin = (await geocodeQuery(fallbackQuery)) || { lat: 39.8283, lng: -98.5795 };
-      const next: MappedPlace[] = [];
-      for (const entity of snapshot) {
-        if (cancelled) return;
+      const next = await Promise.all(snapshot.map(async (entity) => {
         const kind = inferSearchLocationKind(entity);
         const address = entity.metadata?.address?.trim()
           || entity.metadata?.jurisdiction?.trim()
@@ -370,8 +369,8 @@ export default function LocationsMap({
         const related = linkedEvents(entity, events, latlng);
         const dateLogged = entity.metadata?.dateLogged
           || (related[0] ? new Date(related[0].timestamp).toLocaleDateString() : (Number.isFinite(lksMs) ? new Date(lksMs).toLocaleDateString() : "Date not logged"));
-        next.push({ entity, kind, latlng, precise, address, dateLogged });
-      }
+        return { entity, kind, latlng, precise, address, dateLogged };
+      }));
       if (!cancelled) {
         setMapped(next);
         setGeoBusy(false);
@@ -406,26 +405,36 @@ export default function LocationsMap({
   const duplicateClusters = useMemo(() => clusterDuplicateLocations(places), [places]);
   const duplicateCount = duplicateClusters.reduce((sum, cluster) => sum + cluster.length, 0);
 
-  useEffect(() => {
-    if (!mapEl.current || mapRef.current) return;
-    const map = L.map(mapEl.current, { scrollWheelZoom: true, zoomControl: false }).setView([39.8283, -98.5795], 4);
-    L.control.zoom({ position: "topright" }).addTo(map);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "&copy; OpenStreetMap",
-      maxZoom: 19,
-    }).addTo(map);
-    layersRef.current = L.layerGroup().addTo(map);
-    map.on("click", () => setFocusId(null));
-    mapRef.current = map;
-    setMapReady(true);
-    const resize = () => map.invalidateSize();
-    window.setTimeout(resize, 80);
+  useLayoutEffect(() => {
+    const host = mapEl.current;
+    if (!host || mapRef.current) return;
+    let map: L.Map | null = null;
+    let cancelled = false;
+    const frame = window.requestAnimationFrame(() => {
+      if (cancelled || !mapEl.current || mapRef.current) return;
+      map = L.map(mapEl.current, { scrollWheelZoom: true, zoomControl: false, fadeAnimation: false, zoomAnimation: false }).setView([39.8283, -98.5795], 4);
+      L.control.zoom({ position: "topright" }).addTo(map);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap",
+        maxZoom: 19,
+        updateWhenIdle: true,
+      }).addTo(map);
+      layersRef.current = L.layerGroup().addTo(map);
+      map.on("click", () => setFocusId(null));
+      mapRef.current = map;
+      setMapReady(true);
+      map.invalidateSize();
+    });
+    const resize = () => mapRef.current?.invalidateSize();
     window.addEventListener("resize", resize);
     return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
       window.removeEventListener("resize", resize);
-      map.remove();
+      map?.remove();
       mapRef.current = null;
       layersRef.current = null;
+      markerRefs.current.clear();
       setMapReady(false);
     };
   }, []);
@@ -435,6 +444,7 @@ export default function LocationsMap({
     const group = layersRef.current;
     if (!map || !group) return;
     group.clearLayers();
+    markerRefs.current.clear();
     map.invalidateSize();
     const bounds: L.LatLngExpression[] = [];
     const preciseBounds: L.LatLngExpression[] = [];
@@ -458,7 +468,8 @@ export default function LocationsMap({
       bounds.push([lat, lng]);
       if (row.precise) preciseBounds.push([lat, lng]);
       const pin = classifyPin(row.entity, row.kind);
-      const marker = L.marker([lat, lng], { icon: pinIcon(pin.glyph, pin.accent), zIndexOffset: focusId === row.entity.id ? 800 : 0 }).addTo(group);
+      const marker = L.marker([lat, lng], { icon: pinIcon(pin.glyph, pin.accent) }).addTo(group);
+      markerRefs.current.set(row.entity.id, marker);
       marker.on("click", (event) => {
         L.DomEvent.stopPropagation(event);
         setFocusId(row.entity.id);
@@ -481,7 +492,11 @@ export default function LocationsMap({
         });
       }
     }
-  }, [listed, routeStops, subject, subjectId, query, focusId, mapReady]);
+  }, [listed, routeStops, subject, subjectId, query, mapReady]);
+
+  useEffect(() => {
+    markerRefs.current.forEach((marker, id) => marker.setZIndexOffset(id === focusId ? 800 : 0));
+  }, [focusId, listed]);
 
   useEffect(() => {
     const map = mapRef.current;

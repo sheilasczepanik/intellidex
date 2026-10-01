@@ -31,7 +31,7 @@ import PinPersonButton from "./PinPersonButton";
 import SubjectProfile from "./SubjectProfile";
 import TimelineSnapshot from "./TimelineSnapshot";
 import { isSecondaryEvidence, sourceClassLabel } from "./lib/sourceTier";
-import { isSearchNetworkPerson, looksLikeIndividualName } from "./lib/personDirectory";
+import { hasContactFragment, isSearchNetworkPerson, looksLikeIndividualName } from "./lib/personDirectory";
 
 const mono = "font-mono";
 
@@ -40,6 +40,7 @@ function initials(name: string) {
 }
 
 function isLivingRolodexContact(contact: CaseContactRecord, entities: EntityRecord[]) {
+  if (hasContactFragment(contact.name)) return false;
   if (/\b(deceased|decedent)\b/i.test(`${contact.notes} ${contact.affiliation}`)) return false;
   if (/^victim$/i.test(contact.affiliation.trim())) return false;
   if (/missing person/i.test(contact.affiliation)) return false;
@@ -88,8 +89,8 @@ function sourceKind(ev: EvidenceRecord): "PDF" | "TXT" | "DOCX" | "JPG/PNG" | "A
   return "TXT";
 }
 
-function ingestLabel(status: EvidenceRecord["status"]): { text: "Indexed" | "Processing" | "Needs Review"; cls: string } {
-  if (status === "indexed") return { text: "Indexed", cls: "border-emerald-200 bg-emerald-50 text-emerald-800" };
+function ingestLabel(status: EvidenceRecord["status"]): { text: "Processed" | "Processing" | "Needs Review"; cls: string } {
+  if (status === "indexed") return { text: "Processed", cls: "border border-slate-200 bg-slate-100 text-slate-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" };
   if (status === "ingesting" || status === "queued") return { text: "Processing", cls: "border-blue-200 bg-blue-50 text-blue-800" };
   return { text: "Needs Review", cls: "border-amber-200 bg-amber-50 text-amber-900" };
 }
@@ -431,7 +432,7 @@ export default function CaseOverview({
       <div className="mb-8">
         <div className="mb-3.5 flex flex-wrap items-center justify-between gap-3">
           <h2 className={`${mono} text-[11px] tracking-[0.14em] text-slate-500`}>INGESTED EVIDENCE & TIP VAULT</h2>
-          <span className={`${mono} text-[11px] text-slate-400`}>{uniqueSources.length} FILES INDEXED</span>
+          <span className={`${mono} text-[11px] text-slate-400`}>{uniqueSources.length} FILES PROCESSED</span>
         </div>
         <div className="mb-3 grid grid-cols-2 gap-1 rounded-[10px] border border-slate-200 bg-slate-50 p-1">
           <button

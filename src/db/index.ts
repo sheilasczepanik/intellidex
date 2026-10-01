@@ -382,7 +382,7 @@ export async function addCaseMedia(input: {
 
 export async function updateCaseMedia(
   id: string,
-  patch: Partial<Pick<CaseMediaRecord, "title" | "category" | "tags" | "summary" | "description" | "mergedFrom" | "thumbnailUrl" | "author">>,
+  patch: Partial<Pick<CaseMediaRecord, "title" | "category" | "tags" | "summary" | "description" | "mergedFrom" | "thumbnailUrl" | "author" | "isPinned">>,
 ) {
   await db.caseMedia.update(id, patch);
 }
@@ -586,7 +586,7 @@ export async function createTimelineEvent(input: {
 
 export async function updateTimelineEvent(
   id: string,
-  patch: Partial<Pick<TimelineEventRecord, "entityId" | "timestamp" | "title" | "description" | "isVerified" | "confidenceTier" | "timeEnd" | "latitude" | "longitude" | "flaggedNoise">>,
+  patch: Partial<Pick<TimelineEventRecord, "entityId" | "timestamp" | "title" | "description" | "isVerified" | "confidenceTier" | "timeEnd" | "latitude" | "longitude" | "flaggedNoise" | "tier">>,
 ) {
   const rec = await db.timelineEvents.get(id);
   if (!rec) return;

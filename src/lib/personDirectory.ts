@@ -20,6 +20,8 @@ const PLACE_LABEL = /\b(barn|motel|pier|precinct|county|highway|route|dock|wareh
 
 const STATE_LABEL = /^(new hampshire|vermont|maine|massachusetts|arizona|texas|california|florida|new york|north carolina|south carolina|new mexico|rhode island|west virginia|north dakota|south dakota|washington|oregon|pennsylvania|connecticut|new jersey)$/i;
 
+const CONTACT_FRAGMENT = /\b(source|statements?|thanks|dispatch|reports?|roads?|streets?|ave|hwy|barn|saturn|vehicles?|age|descriptions?)\b/i;
+
 const PERSON_ROLES = new Set([
   "WITNESS",
   "FAMILY",
@@ -47,8 +49,13 @@ export function looksLikeIndividualName(name: string) {
   return names.every((part) => /^[A-Z][A-Za-z'’.()-]*$/.test(part) || /^[A-Z]\.$/.test(part));
 }
 
+export function hasContactFragment(name: string) {
+  return CONTACT_FRAGMENT.test(name);
+}
+
 export function isSearchNetworkPerson(entity: { type?: string; role?: string; name?: string }) {
   const type = (entity.type || "").trim().toLowerCase();
+  if (hasContactFragment(entity.name || "")) return false;
   if (NON_PERSON_TYPES.has(type)) return false;
   if (type && type !== "person") return false;
   if (!looksLikeIndividualName(entity.name || "")) return false;

@@ -76,7 +76,7 @@ export default function VerifyIngestDropzone({
             className="w-full rounded-[10px] border border-slate-300 bg-white px-3 py-2 text-[13px] text-slate-800 outline-none focus:border-blue-600"
           >
             <option value="" disabled>
-              Indexed files in Intake…
+              Processed files in Intake…
             </option>
             {indexedFiles.map((file) => (
               <option key={file.id} value={file.id}>{file.fileName}</option>

@@ -89,7 +89,6 @@ import { formatAlertLabel, ALERT_LEVELS } from "./lib/missingPerson";
 import LiveAlertsFeed from "./LiveAlertsFeed";
 import VerifyIngestDropzone from "./VerifyIngestDropzone";
 import CaseSidebarTree from "./CaseSidebarTree";
-import HubPersons from "./HubPersons";
 import { isSearchNetworkPerson } from "./lib/personDirectory";
 import PersonWorkspace from "./PersonWorkspace";
 import { alertTypeToCaseStatus, parseAlertMissingAt, type LiveMissingAlert } from "./lib/liveMissingAlert";
@@ -484,7 +483,6 @@ export default function DesktopApp() {
   const activeCase = hubCases?.find((c) => c.id === resolvedCaseId) ?? null;
 
   const allEntities = useLiveQuery(() => db.entities.toArray(), []) ?? [];
-  const allEvents = useLiveQuery(() => db.timelineEvents.toArray(), []) ?? [];
   const caseEntities = useLiveQuery(
     () => (resolvedCaseId ? db.entities.where("caseId").equals(resolvedCaseId).toArray() : Promise.resolve([] as EntityRecord[])),
     [resolvedCaseId],
@@ -804,7 +802,7 @@ export default function DesktopApp() {
     const span = new Set(spanKeys);
     const { startH, endH } = windowHours(timeWindow, customStart, customEnd);
 
-    let scoped = caseEvents;
+    let scoped = showInactiveLanes ? caseEvents : caseEvents.filter((event) => !event.flaggedNoise);
     if (span.size) {
       scoped = scoped.filter((e) => span.has(localDayKey(e.timestamp)));
     }
@@ -928,6 +926,7 @@ export default function DesktopApp() {
         mergeCount,
         mergedIds,
         semantic,
+        noise: group.some((row) => row.flaggedNoise),
       };
     });
 
@@ -956,7 +955,7 @@ export default function DesktopApp() {
         role: ent?.role ?? "",
         note: ent?.notes ?? "",
         type: (ent?.type ?? "person") as EntityType,
-        category: { entityType: ent?.type, role: ent?.role, name: ent?.name, text: ent?.notes },
+        category: { entityType: ent?.type, role: ent?.role, name: ent?.name, text: ent?.notes, category: ent?.classification },
         dot: getCategoryColor(semantic, "dot"),
         border: getCategoryColor(semantic, "border"),
         semantic,
@@ -2862,20 +2861,6 @@ export default function DesktopApp() {
                     );
                   })}
                 </div>
-                <HubPersons
-                  people={allEntities.filter((entity) => isSearchNetworkPerson(entity))}
-                  cases={hubCases ?? []}
-                  events={allEvents}
-                  onOpenCase={(caseId) => {
-                    const row = (hubCases ?? []).find((item) => item.id === caseId);
-                    if (row) openExistingCase(row.id, row.title, row.summary, row.status);
-                    else goTo("Overview", caseId);
-                  }}
-                  onPin={(personId, caseId) => {
-                    void togglePinnedPerson(caseId, personId, true);
-                    goTo("Overview", caseId);
-                  }}
-                />
               </div>
               );
             })()}
@@ -3329,6 +3314,16 @@ export default function DesktopApp() {
                   ToggleIcon={sidebarOpen ? PanelLeftClose : PanelLeftOpen}
                   pinnedIds={activeCase?.pinnedPersonIds}
                   onTogglePin={(id) => { if (activeCase) void togglePinnedPerson(activeCase.id, id); }}
+                  onRecategorize={(id, bucket) => {
+                    const next = {
+                      Person: { type: "person" as const, classification: "PERSON" },
+                      Vehicle: { type: "vehicle" as const, classification: "VEHICLE" },
+                      Location: { type: "place" as const, classification: "LOCATION" },
+                      Evidence: { type: "exhibit" as const, classification: "EVIDENCE" },
+                      Organization: { type: "person" as const, classification: "ORGANIZATION" },
+                    }[bucket];
+                    void updateEntity(id, next);
+                  }}
                 />
 
                 <div className="flex min-w-0 flex-1 flex-col">
@@ -3349,15 +3344,9 @@ export default function DesktopApp() {
                       <PanelLeftOpen className="h-3.5 w-3.5" />
                       Entities
                     </button>
-                    <select
-                      value={resolvedCaseId ?? ""}
-                      onChange={(e) => setActiveCaseId(e.target.value || null)}
-                      className={`h-7 max-w-[220px] rounded-lg border border-slate-200 bg-white px-2 ${mono} text-[11px] text-slate-600 outline-none`}
-                    >
-                      {(hubCases ?? []).map((c) => (
-                        <option key={c.id} value={c.id}>{isArchivedCase(c) ? `[ARCHIVED] ${c.title}` : c.title}</option>
-                      ))}
-                    </select>
+                    <span className="max-w-[220px] truncate text-sm font-semibold text-slate-800 dark:text-zinc-200">
+                      {activeCase.subjectName || activeCase.title}
+                    </span>
                     <span className="h-4 w-px shrink-0 bg-slate-200" />
                     <TimelineToolbar
                       rangeLabel={chrono.rangeLabel}
@@ -3409,7 +3398,7 @@ export default function DesktopApp() {
                           setFocusMerged((v) => !v);
                           if (!focusMerged) setSelected(null);
                         }}
-                        className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11.5px] font-semibold ${focusMerged ? "border-amber-500 bg-amber-100 text-amber-900" : "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"}`}
+                        className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11.5px] font-semibold ${focusMerged ? "border-zinc-400 bg-zinc-200 text-zinc-800 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-100" : "border-zinc-200 bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"}`}
                       >
                         <TriangleAlert className="h-3.5 w-3.5" />
                         {chrono.mergedCount} Duplicate Events Merged
@@ -3521,7 +3510,7 @@ export default function DesktopApp() {
                                 key={e.id}
                                 id={`timeline-node-${e.id}`}
                                 onClick={() => openEventDrawer(e.id, e.mergedIds)}
-                                className={`absolute z-[2] flex w-max min-w-[220px] items-center overflow-hidden rounded-lg border text-left shadow-xs transition-colors hover:border-blue-300 ${laneAccent} ${sightingCard ? "border-amber-300 bg-amber-50" : e.secondary ? "border-dashed border-amber-400 bg-white" : e.flag ? "border-amber-300 bg-white ring-[3px] ring-amber-500/10" : "border-slate-200 bg-white"} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
+                                className={`absolute z-[2] flex w-max min-w-[220px] items-center overflow-hidden rounded-lg border text-left shadow-xs transition-colors hover:border-blue-300 ${laneAccent} ${e.noise ? "opacity-45" : ""} ${sightingCard ? "border-amber-300 bg-amber-50" : e.secondary ? "border-dashed border-amber-400 bg-white" : e.flag ? "border-amber-300 bg-white ring-[3px] ring-amber-500/10" : "border-slate-200 bg-white"} ${drawerEventId === e.id ? "ring-[3px] ring-blue-600/15" : ""} ${focused ? "contradiction-pulse z-[8] ring-2 ring-amber-500" : ""}`}
                                 style={{ left, top: 10 + row * (CARD_H + CARD_GAP), width: Math.max(width, 220), height: CARD_H }}
                               >
                                 <div className="flex w-full min-w-max items-center gap-2 px-2.5 py-1.5">
@@ -3568,7 +3557,7 @@ export default function DesktopApp() {
                                       ev.stopPropagation();
                                       openEventDrawer(e.id, e.mergedIds);
                                     }}
-                                    className="ml-auto inline-flex shrink-0 items-center whitespace-nowrap rounded-full border border-amber-300/80 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-700 dark:border-amber-700/60 dark:bg-amber-950/50 dark:text-amber-300"
+                                    className="ml-auto inline-flex shrink-0 items-center whitespace-nowrap rounded-full border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
                                   >
                                     Merged ({e.mergeCount})
                                   </span>
@@ -3703,7 +3692,15 @@ export default function DesktopApp() {
             </div>
             <div className="flex flex-1 flex-col gap-5 overflow-auto px-6 py-5">
               <div className="flex flex-wrap items-center gap-2">
-                <Chip tone={drawerEvent.isVerified ? "ok" : "review"}>{drawerEvent.isVerified ? "VERIFIED" : "UNVERIFIED"}</Chip>
+                {drawerEvent.isVerified ? (
+                  <span className="inline-flex items-center rounded border border-emerald-300/80 bg-emerald-50 px-2 py-0.5 font-mono text-xs font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300">
+                    VERIFIED
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center rounded border border-zinc-200 bg-zinc-100 px-2 py-0.5 font-mono text-xs font-semibold text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
+                    UNVERIFIED
+                  </span>
+                )}
                 {(drawerEvent.tier === "secondary" || (drawerSource && isSecondaryEvidence(drawerSource))) && (
                   <span className={`rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 ${mono} text-[10px] tracking-[0.06em] text-amber-900`}>SECONDARY</span>
                 )}
@@ -3713,7 +3710,7 @@ export default function DesktopApp() {
                     onPromote={() => void promoteEntityToVerified(drawerEntity.id)}
                   />
                 )}
-                {drawerEntity && (
+                {drawerEntity && !/^unverified$/i.test(formatRoleLabel(drawerEntity.role)) && (
                   <span className={`inline-flex max-w-full shrink-0 items-center rounded-md border px-2 py-0.5 ${mono} text-[10px] tracking-[0.08em] whitespace-nowrap ${roleDisplayClass(drawerEntity.role, getCategoryColor({ entityType: drawerEntity.type, role: drawerEntity.role, name: drawerEntity.name }, "badge"))}`}>
                     {formatRoleLabel(drawerEntity.role) || drawerEntity.type.toUpperCase()}
                   </span>
@@ -3819,21 +3816,28 @@ export default function DesktopApp() {
                   {mergedInspectIds.length > 1 ? (
                     <div>
                       <div className={`mb-1 ${mono} text-[10.5px] tracking-[0.12em] text-slate-500`}>MERGED CITATIONS</div>
-                      <p className="mb-2 text-[12px] text-amber-800">⚠ Duplicate entries merged ({mergedInspectIds.length} citations from identical timestamp)</p>
+                      <p className="mb-2 text-[12px] text-slate-500">Corroborating Citations ({Math.max(0, mergedInspectIds.length - 1)})</p>
                       <div className="flex flex-col gap-1.5">
                         {mergedInspectIds.map((id) => {
                           const rec = caseEvents.find((row) => row.id === id);
                           const src = rec ? caseEvidence.find((row) => row.id === rec.sourceDocId) : undefined;
                           const label = src?.originalFileName || src?.fileName || rec?.sourceCitation?.sourceName || rec?.title || id;
-                          const on = id === drawerEvent.id;
+                          const markedPrimary = mergedInspectIds.some((rowId) => caseEvents.find((row) => row.id === rowId)?.tier === "primary");
+                          const primary = markedPrimary ? rec?.tier === "primary" : id === drawerEvent.id;
                           return (
                             <button
                               key={id}
                               type="button"
-                              onClick={() => openEventDrawer(id, mergedInspectIds)}
-                              className={`rounded-lg border px-2.5 py-2 text-left text-[12.5px] ${on ? "border-blue-300 bg-blue-50 text-blue-900" : "border-slate-200 text-slate-700 hover:border-slate-300"}`}
+                              onClick={() => {
+                                void Promise.all(mergedInspectIds.map((rowId) => updateTimelineEvent(rowId, { tier: rowId === id ? "primary" : "secondary" })));
+                                openEventDrawer(id, mergedInspectIds);
+                              }}
+                              className={`rounded-lg border px-2.5 py-2 text-left text-[12.5px] ${primary ? "border-blue-300 bg-blue-50 text-blue-900" : "border-slate-200 text-slate-700 hover:border-slate-300"}`}
                             >
-                              <span className="block font-medium break-words">{rec?.title || "Event"}</span>
+                              <span className="flex items-center justify-between gap-2">
+                                <span className="block font-medium break-words">{rec?.title || "Event"}</span>
+                                {primary ? <span className="shrink-0 rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-600">Primary Source ✓</span> : null}
+                              </span>
                               <span className="mt-0.5 block max-w-full break-words text-[11px] text-slate-500">{label}</span>
                             </button>
                           );
@@ -3877,7 +3881,15 @@ export default function DesktopApp() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => void updateTimelineEvent(drawerEvent.id, { isVerified: false, confidenceTier: "TIER_2_UNVERIFIED", flaggedNoise: true })}
+                      onClick={() => {
+                        const ids = mergedInspectIds.length > 1 ? mergedInspectIds : [drawerEvent.id];
+                        void Promise.all(ids.map((id) => updateTimelineEvent(id, { isVerified: false, confidenceTier: "TIER_2_UNVERIFIED", flaggedNoise: true }))).then(() => {
+                          setDrawerEventId(null);
+                          setDrawerEdit(false);
+                          setMergedInspectIds([]);
+                          setToast("Event flagged as noise and moved to archive.");
+                        });
+                      }}
                       className="h-10 flex-1 rounded-[10px] border border-slate-300 text-[12.5px] font-medium text-slate-700"
                     >
                       Flag as Noise

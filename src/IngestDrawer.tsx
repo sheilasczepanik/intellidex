@@ -124,7 +124,7 @@ export default function IngestDrawer({
                   <Loader2 className="h-2.5 w-2.5 animate-spin" />EXTRACTING
                 </span>
               ) : extractPreview?.autoApplied ? (
-                <span className={`rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 ${mono} text-[9px] tracking-[0.1em] text-emerald-800`}>INDEXED</span>
+                <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 font-mono text-[9px] tracking-[0.1em] text-slate-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">PROCESSED</span>
               ) : extractPreview ? (
                 <span className={`rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 ${mono} text-[9px] tracking-[0.1em] text-amber-900`}>REVIEW</span>
               ) : null}

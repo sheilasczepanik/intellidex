@@ -26,6 +26,19 @@ export type DossierLane = {
 
 type GroupId = "persons" | "places" | "vehicles" | "phones";
 type Pill = "all" | "persons" | "places" | "evidence";
+type EntityBucket = "Person" | "Vehicle" | "Location" | "Evidence" | "Organization";
+
+const ENTITY_BUCKETS: EntityBucket[] = ["Person", "Vehicle", "Location", "Evidence", "Organization"];
+
+function bucketFor(lane: DossierLane): EntityBucket {
+  const classification = String(lane.def.category.category || "").toUpperCase();
+  const type = String(lane.def.type || "").toLowerCase();
+  if (classification === "ORGANIZATION") return "Organization";
+  if (classification === "VEHICLE" || type === "vehicle") return "Vehicle";
+  if (classification === "LOCATION" || type === "place" || type === "location") return "Location";
+  if (classification === "EVIDENCE" || type === "exhibit" || type === "evidence") return "Evidence";
+  return "Person";
+}
 
 const GROUPS: { id: GroupId; title: string }[] = [
   { id: "persons", title: "Key Persons" },
@@ -35,10 +48,12 @@ const GROUPS: { id: GroupId; title: string }[] = [
 ];
 
 function groupFor(lane: DossierLane): GroupId {
+  const bucket = bucketFor(lane);
   const type = String(lane.def.type || "").toLowerCase();
   const blob = `${lane.def.name} ${lane.def.role} ${lane.def.note}`.toLowerCase();
-  if (type === "person") return "persons";
-  if (type === "place" || type === "location") return "places";
+  if (bucket === "Vehicle" || bucket === "Evidence") return "vehicles";
+  if (bucket === "Organization" || bucket === "Person" || type === "person") return "persons";
+  if (bucket === "Location" || type === "place" || type === "location") return "places";
   if (type === "phone" || type === "digital" || /call|phone|transmission|tower|handset/.test(blob)) return "phones";
   return "vehicles";
 }
@@ -53,9 +68,10 @@ type Props = {
   ToggleIcon: ComponentType<{ className?: string }>;
   pinnedIds?: string[];
   onTogglePin?: (id: string) => void;
+  onRecategorize?: (id: string, bucket: EntityBucket) => void;
 };
 
-export default function EntityDossier({ open, selected, lanes, onToggle, onSelect, onPromoteEntity, ToggleIcon, pinnedIds, onTogglePin }: Props) {
+export default function EntityDossier({ open, selected, lanes, onToggle, onSelect, onPromoteEntity, ToggleIcon, pinnedIds, onTogglePin, onRecategorize }: Props) {
   const [query, setQuery] = useState("");
   const [pill, setPill] = useState<Pill>("all");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -183,7 +199,20 @@ export default function EntityDossier({ open, selected, lanes, onToggle, onSelec
                                 </button>
                               ) : null}
                             </div>
-                            <div className={`mb-1.5 ${mono} text-[10.5px] tracking-[0.06em] text-slate-500`}>{def.role ? formatRoleLabel(def.role) : "ENTITY"}</div>
+                            <div className="mb-1.5 flex items-center gap-2">
+                              <span className={`min-w-0 ${mono} text-[10.5px] tracking-[0.06em] text-slate-500`}>{def.role ? formatRoleLabel(def.role) : "ENTITY"}</span>
+                              {on && def.entityId && onRecategorize ? (
+                                <select
+                                  aria-label="Entity category"
+                                  value={bucketFor({ def, count })}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onChange={(e) => onRecategorize(def.entityId!, e.target.value as EntityBucket)}
+                                  className="ml-auto h-6 max-w-[118px] rounded-md border border-slate-200 bg-white px-1 text-[11px] text-slate-700"
+                                >
+                                  {ENTITY_BUCKETS.map((bucket) => <option key={bucket} value={bucket}>{bucket}</option>)}
+                                </select>
+                              ) : null}
+                            </div>
                             <div className="text-[12px] leading-relaxed text-slate-500 text-pretty line-clamp-2">{def.note || "No notes recorded."}</div>
                             <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                               <span className={`rounded-md border px-[7px] py-0.5 ${mono} text-[10px] ${getCategoryColor(semantic, "badge")}`}>

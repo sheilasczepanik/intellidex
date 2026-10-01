@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import { ExternalLink, FileText, Image as ImageIcon, Link2, Pencil, Plus, Trash2, Upload, X, ZoomIn, ZoomOut } from "lucide-react";
+import { ExternalLink, FileText, Image as ImageIcon, Link2, Pencil, Pin, Plus, Trash2, Upload, X, ZoomIn, ZoomOut } from "lucide-react";
 import {
   addCaseCustomMediaCategory,
   addCaseMedia,
@@ -84,10 +84,11 @@ export default function MediaGallery({
   const shown = useMemo(() => {
     const filtered = rows.filter((r) => (filter === "all" || r.category === filter) && (typeFilter === "all" || r.type === typeFilter));
     const copy = [...filtered];
-    if (sort === "oldest") copy.sort((a, b) => a.dateAdded - b.dateAdded);
-    else if (sort === "category") copy.sort((a, b) => a.category.localeCompare(b.category) || b.dateAdded - a.dateAdded);
-    else if (sort === "type") copy.sort((a, b) => a.type.localeCompare(b.type) || b.dateAdded - a.dateAdded);
-    else copy.sort((a, b) => b.dateAdded - a.dateAdded);
+    const pinRank = (row: CaseMediaRecord) => (row.isPinned ? 1 : 0);
+    if (sort === "oldest") copy.sort((a, b) => pinRank(b) - pinRank(a) || a.dateAdded - b.dateAdded);
+    else if (sort === "category") copy.sort((a, b) => pinRank(b) - pinRank(a) || a.category.localeCompare(b.category) || b.dateAdded - a.dateAdded);
+    else if (sort === "type") copy.sort((a, b) => pinRank(b) - pinRank(a) || a.type.localeCompare(b.type) || b.dateAdded - a.dateAdded);
+    else copy.sort((a, b) => pinRank(b) - pinRank(a) || b.dateAdded - a.dateAdded);
     return copy;
   }, [rows, filter, typeFilter, sort]);
 
@@ -507,7 +508,7 @@ export default function MediaGallery({
       ) : (
         <ul className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr))]">
           {shown.map((row) => (
-            <li key={row.id} className="overflow-hidden rounded-[14px] border border-slate-200 bg-white shadow-sm">
+            <li key={row.id} className={`overflow-hidden rounded-[14px] border bg-white shadow-sm ${row.isPinned ? "border-blue-300 ring-1 ring-blue-200" : "border-slate-200"}`}>
               <button
                 type="button"
                 onClick={() => { if (row.type !== "url") { setLightbox(row); setZoom(1); } }}
@@ -521,6 +522,9 @@ export default function MediaGallery({
                 <span className="absolute left-2 top-2 rounded-md bg-slate-950/75 px-1.5 py-0.5 font-mono text-[10px] tracking-[0.08em] text-white">
                   {row.type.toUpperCase()}
                 </span>
+                {row.isPinned ? (
+                  <span className="absolute right-2 top-2 rounded-md border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-600">PINNED</span>
+                ) : null}
               </button>
               <div className="space-y-2 p-3">
                 <input
@@ -581,6 +585,15 @@ export default function MediaGallery({
                 ) : null}
                 <div className="flex items-center justify-between text-[11px] text-slate-400">
                   <span>{new Date(row.dateAdded).toLocaleDateString()}</span>
+                  <span className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    aria-label={row.isPinned ? "Unpin media" : "Pin media"}
+                    onClick={() => void updateCaseMedia(row.id, { isPinned: !row.isPinned })}
+                    className={`rounded p-1 ${row.isPinned ? "text-blue-700" : "text-slate-400 hover:bg-slate-100 hover:text-slate-700"}`}
+                  >
+                    <Pin className={`h-3.5 w-3.5 ${row.isPinned ? "fill-blue-600" : ""}`} />
+                  </button>
                   <button
                     type="button"
                     onClick={() => void deleteCaseMedia(row.id)}
@@ -589,6 +602,7 @@ export default function MediaGallery({
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
+                  </span>
                 </div>
               </div>
             </li>
