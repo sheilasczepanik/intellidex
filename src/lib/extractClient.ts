@@ -9,6 +9,7 @@ import {
   splitPageChunks,
 } from "./extractSchema";
 import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource } from "./mauraExtractFallback";
+import { isMm1Source, mm1ExtractBundle } from "../data/caseFixtures";
 import { locateSnippet } from "./quoteAnchors";
 
 export type { ExtractedEvent, ExtractEntityHint, ScoutedEntity };
@@ -59,13 +60,16 @@ function snapBundleToSource(bundle: ExtractBundle, source: string): ExtractBundl
 
 function bundleFromResponse(json: Record<string, unknown>, fallbackText: string, fileName: string): ExtractBundle {
   let bundle = snapBundleToSource(coerceExtractBundle(json), fallbackText);
-  if (!bundle.events.length && isLocalMauraExtractSource(fileName)) {
+  if (!bundle.events.length && isMm1Source(fileName)) {
+    bundle = mm1ExtractBundle();
+  } else if (!bundle.events.length && isLocalMauraExtractSource(fileName)) {
     bundle = mauraVerifiedBundle();
   }
   return bundle;
 }
 
 async function postExtract(body: object, fallbackText: string, fileName: string): Promise<ExtractBundle> {
+  if (isMm1Source(fileName)) return mm1ExtractBundle();
   if (isLocalMauraExtractSource(fileName)) {
     return mauraVerifiedBundle();
   }
@@ -100,6 +104,7 @@ async function postExtract(body: object, fallbackText: string, fileName: string)
     }
     return bundle;
   } catch {
+    if (isMm1Source(fileName)) return mm1ExtractBundle();
     if (isLocalMauraExtractSource(fileName)) return mauraVerifiedBundle();
     return mauraFallbackBundle();
   } finally {
@@ -134,6 +139,7 @@ export async function extractEventsFromText(input: {
 }): Promise<ExtractBundle> {
   void input.maxPages;
   void input.maxChars;
+  if (isMm1Source(input.fileName)) return mm1ExtractBundle();
   if (isLocalMauraExtractSource(input.fileName)) return mauraVerifiedBundle();
   const chunks = splitPageChunks(input.text, EXTRACT_PAGES_PER_CHUNK);
   const selected = input.summary ? chunks.slice(0, 1) : chunks;
@@ -157,6 +163,7 @@ export async function extractEventsFromRenderedPages(input: {
   pages: { pageNumber: number; imageBase64: string }[];
   entities: ExtractEntityHint[];
 }): Promise<ExtractBundle> {
+  if (isMm1Source(input.fileName)) return mm1ExtractBundle();
   if (isLocalMauraExtractSource(input.fileName)) return mauraVerifiedBundle();
   const bundle = await postExtract({
     type: "rendered_pages",

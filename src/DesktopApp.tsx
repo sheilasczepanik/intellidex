@@ -9,6 +9,7 @@ import {
 import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
 import { extractPdfText, documentText } from "./lib/pdfHelpers";
 import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource, MAURA_FALLBACK_ENTITIES } from "./lib/mauraExtractFallback";
+import { isMm1Source, mm1DraftRows, mm1ExtractBundle } from "./data/caseFixtures";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
 import { scrapeArticleFromUrl, fallbackArticleFromUrl } from "./lib/scrapeClient";
@@ -1781,7 +1782,7 @@ export default function DesktopApp() {
       const hints = caseEntities.map((e) => ({ id: e.id, name: e.name, type: e.type, role: e.role }));
       const localMaura = isLocalMauraExtractSource(ev.fileName);
 
-      if (localMaura) {
+      if (localMaura && !isMm1Source(ev.fileName)) {
         const quotes = MAURA_FALLBACK_ENTITIES.map((row) => row.exactSnippet);
         const missing = quotes.filter((q) => !locateAnySnippet(sourceText, [q]));
         if (missing.length) {
@@ -1795,7 +1796,10 @@ export default function DesktopApp() {
 
       let bundle: ExtractBundle;
 
-      if (localMaura) {
+      if (isMm1Source(ev.fileName)) {
+        bundle = mm1ExtractBundle();
+        setExtractError(null);
+      } else if (localMaura) {
         bundle = mauraVerifiedBundle();
         setExtractError(null);
       } else if (isPdf && ev.fileBase64) {
@@ -1851,7 +1855,9 @@ export default function DesktopApp() {
         });
       }
 
-      if (!bundle.events.length && localMaura) {
+      if (!bundle.events.length && isMm1Source(ev.fileName)) {
+        bundle = mm1ExtractBundle();
+      } else if (!bundle.events.length && localMaura) {
         bundle = mauraVerifiedBundle();
       }
       setExtractError(null);
@@ -2210,7 +2216,10 @@ export default function DesktopApp() {
     }
   };
 
-  const sourceEvidence = caseEvidence.find((e) => e.id === activeEvidenceId) ?? caseEvidence[0] ?? null;
+  const sourceEvidence = caseEvidence.find((e) => e.id === activeEvidenceId)
+    ?? caseEvidence.find((e) => isMm1Source(e.fileName))
+    ?? caseEvidence[0]
+    ?? null;
 
   const intakeIndexedFiles = useMemo(
     () => {
@@ -2402,6 +2411,19 @@ export default function DesktopApp() {
   };
 
   useEffect(() => {
+    if (!activeCase || !sourceEvidence || !isMm1Source(sourceEvidence.fileName)) return;
+    let cancelled = false;
+    void (async () => {
+      const existing = await db.verifyDrafts.where("evidenceId").equals(sourceEvidence.id).toArray();
+      if (cancelled || existing.some((draft) => draft.citation === "mm1-fixture" || draft.id.startsWith("mm1-"))) return;
+      await addVerifyDrafts(mm1DraftRows(activeCase.id, sourceEvidence.id, sourceEvidence.fileName), {
+        replacePendingForEvidence: sourceEvidence.id,
+      });
+    })();
+    return () => { cancelled = true; };
+  }, [activeCase?.id, sourceEvidence?.id, sourceEvidence?.fileName]);
+
+  useEffect(() => {
     verifyPdfPageRef.current = 1;
     setActiveHoveredCardId(null);
     setEditingDraftId(null);
@@ -2421,16 +2443,21 @@ export default function DesktopApp() {
         card?.scrollIntoView({ behavior: "smooth", block: "center" });
         return;
       }
+      const pageNumber = sourceDrafts.find((row) => row.id === activeHoveredCardId)?.sourceCitation?.pageNumber;
+      const pageEl = pageNumber
+        ? sourcePaneRef.current?.querySelector<HTMLElement>(`[data-page-number="${pageNumber}"]`)
+        : null;
       const scroller = sourcePaneRef.current?.querySelector<HTMLElement>("[data-pdf-scroll]");
       if (quote && scroller) {
         const top = quote.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 120;
         scroller.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
         return;
       }
+      pageEl?.scrollIntoView({ behavior: "smooth", block: "center" });
       quote?.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 40);
     return () => window.clearTimeout(timer);
-  }, [activeHoveredCardId, screen, sourceEvidence?.id, sourceQuoteSegments.length]);
+  }, [activeHoveredCardId, screen, sourceEvidence?.id, sourceQuoteSegments.length, sourceDrafts]);
 
   /* ---------------------------------------------------------------- */
 

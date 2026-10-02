@@ -28,7 +28,7 @@ import {
 } from "./schema";
 
 export * from "./schema";
-export { initDb, seedIfEmpty, seedRelationshipsIfEmpty } from "./seed";
+export { initDb, seedIfEmpty, seedRelationshipsIfEmpty, ensureMm1Extractions } from "./seed";
 
 export interface HubCase extends CaseRecord {
   entityCount: number;
@@ -737,7 +737,7 @@ export { parseEventTime } from "../lib/eventTime";
 export type { ParseEventTimeOpts } from "../lib/eventTime";
 
 export async function addVerifyDrafts(
-  drafts: (Omit<VerifyDraftRecord, "id" | "status"> & { status?: VerifyDraftStatus })[],
+  drafts: (Omit<VerifyDraftRecord, "id" | "status"> & { id?: string; status?: VerifyDraftStatus })[],
   opts?: { replacePendingForEvidence?: string },
 ) {
   const rows: VerifyDraftRecord[] = drafts.map((d) => ({
@@ -745,7 +745,7 @@ export async function addVerifyDrafts(
     category: d.category || "",
     details: d.details || "",
     origin: d.origin ?? "ai",
-    id: crypto.randomUUID(),
+    id: d.id || crypto.randomUUID(),
     status: d.status ?? "pending",
   }));
   await db.transaction("rw", db.verifyDrafts, db.evidence, db.cases, async () => {

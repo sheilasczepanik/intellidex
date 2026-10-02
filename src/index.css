@@ -116,8 +116,9 @@ body {
 
 .pdf-text-layer mark.extract-hit-active,
 mark.extract-hit-active {
-  background-color: rgb(251 191 36 / 0.45);
-  border-bottom-color: rgb(245 158 11);
+  color: #0f172a;
+  background-color: #fcd34d;
+  box-shadow: 0 0 0 2px #f59e0b, 0 4px 6px rgb(15 23 42 / 0.12);
   animation: source-hit-pulse 0.85s ease-in-out 2;
 }
 

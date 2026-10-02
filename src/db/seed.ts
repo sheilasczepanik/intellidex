@@ -10,6 +10,7 @@ import {
 import type { EntityRelationship } from "../types";
 import { hashStoredEvidenceBytes } from "../lib/cryptoUtils";
 import { PLACEHOLDER_CCTV_STILL } from "../lib/placeholderStills";
+import { isMm1Source, mm1DraftRows, mm1ReportText } from "../data/caseFixtures";
 
 const hour = 60 * 60 * 1000;
 const day = 24 * hour;
@@ -195,6 +196,50 @@ export async function backfillEvidenceCustody() {
   }
 }
 
+/** Put MM_1.pdf and its seven findings on the Maura Murray case when they are not already stored. */
+export async function ensureMm1Extractions() {
+  const caseId = "CASE-0041";
+  const caseRow = await db.cases.get(caseId);
+  if (!caseRow) return;
+  const evidence = await db.evidence.where("caseId").equals(caseId).toArray();
+  let row = evidence.find((item) => isMm1Source(item.fileName));
+  const transcript = mm1ReportText();
+  if (!row) {
+    row = {
+      id: "ev-mm1",
+      caseId,
+      fileName: "MM_1.pdf",
+      originalFileName: "MM_1.pdf",
+      fileType: "pdf",
+      mediaType: "application/pdf",
+      mimeType: "application/pdf",
+      sourceType: "pdf",
+      sourceClass: "police_report",
+      tier: "primary",
+      rawText: transcript,
+      fullText: transcript,
+      pageCount: 38,
+      wordCount: transcript.split(/\s+/).filter(Boolean).length,
+      status: "indexed",
+      lastError: "",
+    };
+    await db.evidence.add(row);
+  } else if (!row.fileBase64 && !(row.fullText || row.rawText || "").includes("returned borrowed clothes")) {
+    await db.evidence.update(row.id, {
+      rawText: transcript,
+      fullText: transcript,
+      pageCount: row.pageCount || 38,
+      status: "indexed",
+      lastError: "",
+    });
+  }
+  const existing = await db.verifyDrafts.where("evidenceId").equals(row.id).toArray();
+  if (existing.some((draft) => draft.citation === "mm1-fixture" || draft.id.startsWith("mm1-"))) return;
+  const stale = existing.filter((draft) => draft.status === "pending").map((draft) => draft.id);
+  if (stale.length) await db.verifyDrafts.bulkDelete(stale);
+  await db.verifyDrafts.bulkAdd(mm1DraftRows(caseId, row.id, row.fileName));
+}
+
 export async function initDb() {
   await db.open();
   await seedIfEmpty();
@@ -207,6 +252,11 @@ export async function initDb() {
     await seedOperatorIfMissing();
   } catch (err) {
     console.error("[DB] operator profile seed failed", err);
+  }
+  try {
+    await ensureMm1Extractions();
+  } catch (err) {
+    console.error("[DB] MM 1 extraction seed failed", err);
   }
   try {
     await backfillEvidenceCustody();

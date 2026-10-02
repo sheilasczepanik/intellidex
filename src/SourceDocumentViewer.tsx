@@ -8,6 +8,7 @@ import { articleBodyReady } from "./lib/scrapeClient";
 import { cropImageRegion, evidenceImageSrc } from "./lib/imageEvidence";
 import PdfScrollPages from "./PdfScrollPages";
 import { documentText } from "./lib/pdfParser";
+import { reportPages } from "./data/caseFixtures";
 import {
   citationPillLabel,
   inferSourceType,
@@ -18,7 +19,7 @@ import {
 const MARK =
   "cursor-pointer rounded px-0.5 bg-amber-400/25 border-b-2 border-amber-400 text-inherit box-decoration-clone extract-hit";
 const MARK_ACTIVE =
-  "cursor-pointer rounded px-0.5 bg-amber-400/25 border-b-2 border-amber-400 text-inherit box-decoration-clone extract-hit extract-hit-active shadow-sm";
+  "cursor-pointer rounded px-0.5 bg-amber-300 text-slate-900 ring-2 ring-amber-500 shadow-md transition-all duration-300 extract-hit extract-hit-active";
 
 export function CitationPill({
   citation,
@@ -152,8 +153,10 @@ export default function SourceDocumentViewer({
         const sourceRecord = await db.evidence.get(evidenceId);
         const raw = sourceRecord?.fileBase64 || evidence?.fileBase64 || "";
         if (!sourceRecord || !raw) {
-          console.error("Missing raw file data in IndexedDB");
-          if (!cancelled) setPdfError("Missing raw PDF data in the local vault.");
+          if (!cancelled) {
+            setPdfDoc(null);
+            setPdfError(documentText(sourceRecord) ? null : "Missing raw PDF data in the local vault.");
+          }
           return;
         }
         const bytes = pdfBytesFromBase64(raw);
@@ -203,6 +206,8 @@ export default function SourceDocumentViewer({
   }, []);
 
   const sourcePlain = documentText(evidence) || evidence?.rawText || "";
+  const pagedTranscript = useMemo(() => reportPages(sourcePlain), [sourcePlain]);
+  const showPagedTranscript = kind === "pdf" && !pdfDoc && pagedTranscript.length > 1;
   const bodyReady = kind !== "web_article" || articleBodyReady(sourcePlain);
   const termSig = highlightTerms.join("|");
   const textSegments = useMemo(() => {
@@ -435,8 +440,50 @@ export default function SourceDocumentViewer({
           />
         ) : kind === "pdf" && (evidence.fileBase64 || blobUrl) && busy ? (
           <div className="flex min-h-[50vh] items-center justify-center text-[13px] text-slate-500">Loading pages…</div>
-        ) : kind === "pdf" && !evidence.fileBase64 ? (
+        ) : kind === "pdf" && !evidence.fileBase64 && !showPagedTranscript ? (
           <div className="px-6 py-16 text-center text-[13px] text-slate-500">This PDF has no stored file bytes in the local vault.</div>
+        ) : showPagedTranscript ? (
+          <div className="flex w-full flex-col items-center gap-4 p-4">
+            {pagedTranscript.map((block) => {
+              const drafts = anchors
+                .filter((anchor) => !anchor.citation.pageNumber || anchor.citation.pageNumber === block.page)
+                .map((anchor) => ({
+                  id: anchor.id,
+                  snippet: anchor.citation.exactQuote,
+                  exactQuote: anchor.citation.exactQuote,
+                  title: anchor.label,
+                }));
+              const segments = splitTextBySpans(block.body, collectQuoteSpans(block.body, drafts));
+              return (
+                <article
+                  key={block.page}
+                  id={`pdf-page-${block.page}`}
+                  data-pdf-page={block.page}
+                  data-page-number={block.page}
+                  className="w-full max-w-[920px] rounded-md border border-slate-200 bg-white p-8 shadow-sm"
+                >
+                  <p className="mb-4 font-mono text-[11px] tracking-[0.14em] text-slate-400">PAGE {block.page}</p>
+                  <p className="select-text whitespace-pre-wrap text-[15px] leading-[1.75] text-slate-800">
+                    {segments.map((part) => {
+                      if (part.type === "text") return <span key={part.key}>{part.value}</span>;
+                      const active = part.draftId === (activeId || "focus");
+                      return (
+                        <mark
+                          key={part.key}
+                          id={active || part.draftId ? `source-hit-${part.draftId}` : undefined}
+                          data-verify-quote={part.draftId}
+                          onClick={() => onSelectAnchor?.(part.draftId)}
+                          className={active ? MARK_ACTIVE : MARK}
+                        >
+                          {part.value}
+                        </mark>
+                      );
+                    })}
+                  </p>
+                </article>
+              );
+            })}
+          </div>
         ) : kind === "image" && imageSrc ? (
           <div className="flex flex-col items-center p-4">
             {onImageRegionSelect && (

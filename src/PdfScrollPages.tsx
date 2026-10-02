@@ -6,7 +6,7 @@ import type { SourceCitation } from "./types";
 type QuoteAnchor = { id: string; quote: string; pageNumber?: number; title?: string };
 
 const MARK_CLS = "extract-hit bg-amber-400/25 border-b-2 border-amber-400 rounded px-0.5";
-const MARK_ACTIVE_CLS = `${MARK_CLS} extract-hit-active`;
+const MARK_ACTIVE_CLS = "extract-hit extract-hit-active bg-amber-300 text-slate-900 ring-2 ring-amber-500 shadow-md transition-all duration-300 rounded px-0.5";
 
 function paintMarks(
   layerEl: HTMLDivElement,
@@ -145,6 +145,10 @@ function PdfPage({
       const active = id === (activeId || "focus");
       mark.className = active ? MARK_ACTIVE_CLS : MARK_CLS;
     });
+    if (activeId) {
+      layerEl.querySelector<HTMLElement>(`#source-hit-${CSS.escape(activeId)}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
   }, [activeId, visible, quoteKey]);
 
   return (
@@ -152,6 +156,7 @@ function PdfPage({
       ref={wrapRef}
       id={`pdf-page-${pageNumber}`}
       data-pdf-page={pageNumber}
+      data-page-number={pageNumber}
       className="relative w-full max-w-[920px] overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm"
       style={{ minHeight: size.h || 720 }}
     >
@@ -233,7 +238,7 @@ export default function PdfScrollPages({
           pageNumber={n}
           zoom={zoom}
           hostWidth={hostWidth}
-          quotes={quotes}
+          quotes={quotes.filter((quote) => !quote.pageNumber || quote.pageNumber === n)}
           activeId={activeId}
           onSelectAnchor={onSelectAnchor}
           onVisiblePage={onVisiblePage}
