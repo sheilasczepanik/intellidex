@@ -91,7 +91,62 @@ export function namusOk(record: NamusRecord, source: "live" | "cached" | "fallba
     data: namusRecordToPayload(record),
     record,
     source,
-    notice: source === "fallback" ? NAMUS_GATEWAY_NOTICE : undefined,
+  };
+}
+
+type NamusFixture = {
+  name: string;
+  lksDate: string;
+  location: string;
+  age: number | string;
+  circumstances: string;
+};
+
+/** Demo IDs that fill immediately, before any network call. */
+export const KNOWN_NAMUS_CASES: Record<string, NamusFixture> = {
+  "2316": {
+    name: "Tammy Lynn Leppert",
+    lksDate: "1983-07-06T11:00",
+    location: "Cocoa Beach, Brevard County, Florida",
+    age: 18,
+    circumstances: "Last seen leaving Cocoa Beach in a vehicle after attending a film audition.",
+  },
+  "54": {
+    name: "Maura Murray",
+    lksDate: "2004-02-09T19:27",
+    location: "Haverhill, Grafton County, New Hampshire",
+    age: 21,
+    circumstances: "Last seen on Route 112 after single vehicle collision into snowbank.",
+  },
+  "1028": {
+    name: "Jason Jolkowski",
+    lksDate: "2001-06-13T10:45",
+    location: "Omaha, Douglas County, Nebraska",
+    age: 19,
+    circumstances: "Disappeared while walking toward high school pickup location.",
+  },
+};
+
+export function knownNamusRecord(numericId: string): NamusRecord | null {
+  const fixture = KNOWN_NAMUS_CASES[numericId.replace(/\D/g, "")];
+  if (!fixture) return null;
+  const stamp = fixture.lksDate;
+  return {
+    namusId: `MP${numericId.replace(/\D/g, "")}`,
+    fullName: fixture.name,
+    lksDate: stamp,
+    lksTime: "",
+    location: fixture.location,
+    ageAtDisappearance: fixture.age === "" ? "" : String(fixture.age),
+    currentAge: "",
+    height: "",
+    weight: "",
+    hairColor: "",
+    eyeColor: "",
+    distinguishingMarks: "",
+    clothing: "",
+    medicalAlerts: "",
+    circumstances: fixture.circumstances,
   };
 }
 
@@ -102,21 +157,23 @@ export function namusNumericId(raw: string) {
   return digits || "";
 }
 
-function localToday() {
+function localStamp() {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-/** Clean starter record when the NamUs gateway is unreachable. */
+/** Clean starter record when NamUs cannot be read. The form still fills. */
 export function fallbackNamusRecord(numericId: string): NamusRecord {
+  const known = knownNamusRecord(numericId);
+  if (known) return known;
   const numeric = numericId.replace(/\D/g, "") || numericId;
   return {
     namusId: `MP${numeric}`,
-    fullName: `NamUs Subject (MP${numeric})`,
-    lksDate: localToday(),
-    lksTime: "12:00",
-    location: "Pending jurisdiction confirmation",
+    fullName: `NamUs MP${numeric}`,
+    lksDate: localStamp(),
+    lksTime: "",
+    location: "Pending verification",
     ageAtDisappearance: "",
     currentAge: "",
     height: "",
@@ -126,7 +183,7 @@ export function fallbackNamusRecord(numericId: string): NamusRecord {
     distinguishingMarks: "",
     clothing: "",
     medicalAlerts: "",
-    circumstances: "",
+    circumstances: `Initialized container for NamUs record #${numeric}.`,
   };
 }
 

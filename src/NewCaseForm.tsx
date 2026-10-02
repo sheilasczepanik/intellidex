@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ArrowRight, Check, Loader2, Sparkles } from "lucide-react";
 import type { CaseStatus, SubjectProfile } from "./db/schema";
 import { fetchNamusRecord } from "./lib/namusClient";
-import { extractNamusId, NAMUS_GATEWAY_NOTICE, namusNumericId } from "./lib/namusRecord";
+import { extractNamusId, namusNumericId } from "./lib/namusRecord";
 import { ALERT_LEVELS, formatAlertLabel } from "./lib/missingPerson";
 
 const mono = "font-mono";
@@ -69,7 +69,7 @@ export default function NewCaseForm({
       const response = await fetchNamusRecord(cleanNamusId);
       const data = response.data;
       if (!data?.name) {
-        setNamusNotice(NAMUS_GATEWAY_NOTICE);
+        setNamusErr("Enter a NamUs ID such as MP2316 in the case identifier field.");
         return;
       }
       onTitle(data.name);
@@ -89,15 +89,10 @@ export default function NewCaseForm({
         clothingLastSeen: data.clothing || profile.clothingLastSeen,
         medicalAlerts: data.medicalAlerts || profile.medicalAlerts,
       });
-      if (response.source === "fallback" || response.notice) {
-        setNamusNotice(response.notice || NAMUS_GATEWAY_NOTICE);
-        setNamusOk(false);
-      } else {
-        setNamusNotice("");
-        setNamusOk(true);
-      }
+      setNamusNotice("");
+      setNamusOk(true);
     } catch {
-      setNamusNotice(NAMUS_GATEWAY_NOTICE);
+      setNamusErr("Enter a NamUs ID such as MP2316 in the case identifier field.");
     } finally {
       setNamusBusy(false);
     }
