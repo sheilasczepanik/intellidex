@@ -59,7 +59,8 @@ export const structuredExtractSchema = z.object({
     location: z.string().nullable().optional(),
     details: z.string(),
     exactSnippet: z.string(),
-    sourcePage: z.number(),
+    pageNumber: z.number().optional(),
+    sourcePage: z.number().optional(),
     confidence: z.number(),
   })).optional(),
   entities: z.array(z.union([intelExtractCardSchema, structuredEntitySchema])).optional(),
@@ -194,7 +195,7 @@ async function extractWithGpt4o(input: {
       model: "gpt-4o",
       response_format: { type: "json_object" },
       temperature: 0.1,
-      max_tokens: 8000,
+      max_tokens: 16384,
       messages: [
         { role: "system", content: EXTRACT_SYSTEM },
         { role: "user", content: userContent },

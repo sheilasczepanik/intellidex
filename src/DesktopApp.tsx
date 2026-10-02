@@ -6,10 +6,10 @@ import {
   OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveManualEvidence, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
-import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
+import { extractEventsFromImage, extractEvidenceLocally } from "./lib/extractClient";
 import { extractPdfText, documentText } from "./lib/pdfHelpers";
-import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource, MAURA_FALLBACK_ENTITIES } from "./lib/mauraExtractFallback";
-import { isMm1Source, mm1DraftRows, mm1ExtractBundle } from "./data/caseFixtures";
+import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource } from "./lib/mauraExtractFallback";
+import { isMm1Source, mm1ExtractBundle } from "./data/caseFixtures";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
 import { scrapeArticleFromUrl, fallbackArticleFromUrl } from "./lib/scrapeClient";
@@ -62,7 +62,7 @@ import {
 } from "./lib/extractSchema";
 import TimelineGrid from "./TimelineGrid";
 import { useTimelineConflicts } from "./lib/useTimelineConflicts";
-import { collectQuoteSpans, locateAnySnippet, locateSnippet, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
+import { collectQuoteSpans, locateSnippet, sortByNarrativeOrder, splitTextBySpans } from "./lib/quoteAnchors";
 import {
   confidenceTierOf,
   coordinatesForEvent,
@@ -1778,59 +1778,25 @@ export default function DesktopApp() {
       llmStartedAt: isPdf ? null : Date.now(),
     });
     let sourceText = documentText(ev) || ev.rawText || "";
+    const stalePending = (await db.verifyDrafts.where("evidenceId").equals(ev.id).toArray())
+      .filter((draft) => draft.status === "pending" && draft.origin !== "manual" && draft.citation !== "manual-observation")
+      .map((draft) => draft.id);
+    if (stalePending.length) await db.verifyDrafts.bulkDelete(stalePending);
     try {
       const hints = caseEntities.map((e) => ({ id: e.id, name: e.name, type: e.type, role: e.role }));
       const localMaura = isLocalMauraExtractSource(ev.fileName);
 
-      if (localMaura && !isMm1Source(ev.fileName)) {
-        const quotes = MAURA_FALLBACK_ENTITIES.map((row) => row.exactSnippet);
-        const missing = quotes.filter((q) => !locateAnySnippet(sourceText, [q]));
-        if (missing.length) {
-          sourceText = [sourceText.trim(), missing.join("\n")].filter(Boolean).join("\n\n");
-          await db.evidence.update(ev.id, { rawText: sourceText, fullText: sourceText });
-        }
-        setIngestJob((job) => (job && job.evidenceId === ev.id
-          ? { ...job, stage: "events", llmStartedAt: Date.now() }
-          : job));
-      }
-
       let bundle: ExtractBundle;
 
-      if (isMm1Source(ev.fileName)) {
-        bundle = mm1ExtractBundle();
-        setExtractError(null);
-      } else if (localMaura) {
-        bundle = mauraVerifiedBundle();
-        setExtractError(null);
-      } else if (isPdf && ev.fileBase64) {
-        const extracted = await extractPdfText(ev.fileBase64, {
-          onProgress: (current, total) => {
-            setIngestJob((job) => (job && job.evidenceId === ev.id
-              ? { ...job, stage: "pdf", currentPage: current, totalPages: total }
-              : job));
-          },
-        });
-        if (extracted.text.trim()) sourceText = extracted.text;
-        await db.evidence.update(ev.id, {
-          rawText: sourceText,
-          fullText: sourceText,
-          pageCount: extracted.pageCount || ev.pageCount,
-          wordCount: sourceText.split(/\s+/).filter(Boolean).length,
-        });
+      if (isPdf && ev.fileBase64) {
         setIngestJob((job) => (job && job.evidenceId === ev.id
-          ? {
-            ...job,
-            stage: "claude",
-            llmStartedAt: Date.now(),
-            currentPage: extracted.pageCount,
-            totalPages: extracted.pageCount,
-          }
+          ? { ...job, stage: "claude", llmStartedAt: Date.now(), currentPage: ev.pageCount || 1, totalPages: ev.pageCount || 1 }
           : job));
-        bundle = await extractEventsFromText({
-          text: sourceText,
+        bundle = await extractEvidenceLocally({
+          fileBase64: ev.fileBase64,
+          fileType: ev.fileType,
           fileName: ev.fileName,
-          entities: hints,
-          summary: opts?.summary,
+          text: sourceText,
         });
       } else if (ev.imageBase64 || (ev.fileBase64 && (ev.mediaType || "").startsWith("image/"))) {
         setIngestJob((job) => (job && job.evidenceId === ev.id
@@ -1847,11 +1813,10 @@ export default function DesktopApp() {
         setIngestJob((job) => (job && job.evidenceId === ev.id
           ? { ...job, stage: "claude", llmStartedAt: Date.now() }
           : job));
-        bundle = await extractEventsFromText({
-          text: sourceText,
+        bundle = await extractEvidenceLocally({
           fileName: ev.fileName,
-          entities: hints,
-          summary: opts?.summary,
+          fileType: ev.fileType,
+          text: sourceText,
         });
       }
 
@@ -1963,7 +1928,7 @@ export default function DesktopApp() {
       }, 7000);
       if (!events.length) {
         await db.evidence.update(ev.id, {
-          status: bundle.entities.length ? "indexed" : "flagged",
+          status: "indexed",
           lastError: "",
           textClarity: clarity,
         });
@@ -1985,6 +1950,7 @@ export default function DesktopApp() {
       await addVerifyDrafts(events.map((event) => {
         const entityId = matchEntity(event.entityId, event.entityName);
         return {
+          id: event.id,
           caseId,
           evidenceId: ev.id,
           timestamp: parseEventTime(event.timestamp, event.timestampLabel, {
@@ -2011,7 +1977,7 @@ export default function DesktopApp() {
             sourceUrl: ev.sourceUrl,
           },
         };
-      }), { replacePendingForEvidence: ev.id });
+      }));
       setIngestJob((job) => (job && job.evidenceId === ev.id ? { ...job, stage: "done" } : job));
       await new Promise((resolve) => window.setTimeout(resolve, 450));
       setActiveEvidenceId(ev.id);
@@ -2411,26 +2377,18 @@ export default function DesktopApp() {
   };
 
   useEffect(() => {
-    if (!activeCase || !sourceEvidence || !isMm1Source(sourceEvidence.fileName)) return;
-    let cancelled = false;
-    void (async () => {
-      const existing = await db.verifyDrafts.where("evidenceId").equals(sourceEvidence.id).toArray();
-      if (cancelled || existing.some((draft) => draft.citation === "mm1-fixture" || draft.id.startsWith("mm1-"))) return;
-      await addVerifyDrafts(mm1DraftRows(activeCase.id, sourceEvidence.id, sourceEvidence.fileName), {
-        replacePendingForEvidence: sourceEvidence.id,
-      });
-    })();
-    return () => { cancelled = true; };
-  }, [activeCase?.id, sourceEvidence?.id, sourceEvidence?.fileName]);
-
-  useEffect(() => {
     verifyPdfPageRef.current = 1;
     setActiveHoveredCardId(null);
     setEditingDraftId(null);
     setExtractTip(null);
     setLogModal(null);
     setExtractPreview((prev) => (prev && sourceEvidence?.id && prev.evidenceId !== sourceEvidence.id ? null : prev));
-  }, [sourceEvidence?.id]);
+    const scroller = sourcePaneRef.current?.querySelector<HTMLElement>("[data-pdf-scroll]");
+    scroller?.scrollTo({ top: 0 });
+    document.getElementById("pdf-page-1")?.scrollIntoView({ block: "start" });
+    if (screen !== "Verify" || !sourceEvidence) return;
+    void runExtract(sourceEvidence.id, { stayOnWorkspace: true });
+  }, [sourceEvidence?.id, screen]);
 
   useEffect(() => {
     if (screen !== "Verify" || !activeHoveredCardId) return;

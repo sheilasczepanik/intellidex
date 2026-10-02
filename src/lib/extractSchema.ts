@@ -39,6 +39,7 @@ export const VERIFY_CATEGORIES = [
 ] as const;
 
 export type ExtractedEvent = {
+  id?: string;
   timestamp: string | null;
   timestampLabel: string;
   entityId: string | null;
@@ -59,34 +60,39 @@ export type ExtractedEvent = {
   tier?: "primary" | "secondary";
 };
 
-export const EXTRACT_SYSTEM = `You are an expert cold case investigator analyzing official police incident and supplemental reports.
-Extract all actionable investigative intelligence from this document into structured findings.
+export const DYNAMIC_EXTRACTION_PROMPT = `
+You are an expert investigative intelligence parser analyzing official case records, police narratives, witness statements, and dispatch logs.
 
-Do NOT just return isolated names or keyword tags. Every item must have context, exact timestamps (if noted), locations, and the surrounding circumstance.
+TASK:
+Exhaustively extract EVERY actionable investigative item present in the provided text.
+There is NO maximum limit. If there are 3 items, extract 3. If there are 30 items, extract 30.
 
-Extract findings across these categories:
-1. "TIMELINE_EVENT": Any specific movement, sighting, dispatch call, phone call, or accident (with exact or approximate timestamp).
-2. "WITNESS_STATEMENT": Statements, quotes, and interviews with friends, family, coworkers, or witnesses.
-3. "OFFICIAL_ACTION": Actions taken by police (well-being checks, forensic searches, searches of dorm room, tow logs, computer subpoenas).
-4. "PHYSICAL_EVIDENCE": Physical objects found (rag in tailpipe, alcohol containers, packed dorm boxes, ATM receipts, computer hard drive).
-5. "PERSON": Named individuals (detectives, witnesses, supervisors, family members) with their specific role.
+CATEGORIES TO EXTRACT:
+- "TIMELINE_EVENT": Movements, arrivals, departures, accidents, 911 calls, ATM runs, sightings.
+- "WITNESS_STATEMENT": Direct quotes, interview summaries, coworker/family accounts.
+- "OFFICIAL_ACTION": Searches, canine deployments, subpoenas, welfare checks, forensic hard drive exams, canvas results.
+- "PHYSICAL_EVIDENCE": Vehicles, containers, items recovered, clothing, notes, physical objects.
+- "PERSON": Named individuals (detectives, witnesses, POIs, reporting parties) with their explicit role.
 
-For each finding, return a JSON object with:
+CRITICAL INSTRUCTIONS:
+1. Do not summarize multiple events into one generic tag. Keep every specific timestamp, statement, and action separate.
+2. Every item must have:
+   - "title": Concise, specific label (e.g., "Sgt. Smith Arrives at Weathered Barn Scene" or "ATM $280 Withdrawal at 195 University Dr")
+   - "category": One of the 5 categories above
+   - "timestamp": ISO string, approximate string, or null
+   - "location": Specific location name or coordinates if mentioned
+   - "details": Comprehensive narrative describing the event, questions asked, or observations recorded
+   - "exactSnippet": Verbatim text passage from the document (used to anchor the yellow PDF highlight)
+   - "pageNumber": Page number where this fact appears
+   - "confidence": Float between 0.85 and 0.99
+
+Output strictly valid JSON format:
 {
-  "id": string,
-  "category": "TIMELINE_EVENT" | "WITNESS_STATEMENT" | "OFFICIAL_ACTION" | "PHYSICAL_EVIDENCE" | "PERSON",
-  "title": string,
-  "timestamp": string | null,
-  "location": string | null,
-  "details": string,
-  "exactSnippet": string,
-  "sourcePage": number,
-  "confidence": number
+  "findings": [ ... ]
 }
-exactSnippet must be a contiguous verbatim string from the document for yellow highlight anchoring. Do not paraphrase it.
-If this excerpt is the full document, return 20 to 40 findings covering the entire narrative arc.
-If this excerpt is one page slice, return every distinct finding in that slice. Do not invent filler to hit a count.
-Return strictly valid JSON as {"findings":[ ... ]}.`;
+`;
+
+export const EXTRACT_SYSTEM = DYNAMIC_EXTRACTION_PROMPT.trim();
 
 export function unwrapModelJson(raw: string) {
   let s = raw.trim();
@@ -690,11 +696,9 @@ export function userExtractPrompt(
     `Source file: ${fileName}`,
     "Return JSON { \"findings\": [ ... ] } covering TIMELINE_EVENT, WITNESS_STATEMENT, OFFICIAL_ACTION, PHYSICAL_EVIDENCE, and PERSON.",
     "Each finding needs exactSnippet copied EXACTLY as a contiguous string visible on the page for highlighting. Do not paraphrase the snippet.",
-    "Cover the whole excerpt, including later pages. Include timestamps, locations, and the surrounding circumstance.",
+    "Include pageNumber, timestamp, location, and the surrounding circumstance.",
     "OCR cleanup: correct obvious scanning typos, expand garbled place names, and keep incident dates separate from report dates.",
-    opts?.summary
-      ? "Mode: condensed summary of this excerpt only. Prefer fewer, high-confidence cards with verbatim quotes."
-      : "Mode: 20 to 40 findings across the narrative arc of this excerpt.",
+    "There is no maximum count. Extract every actionable item in this excerpt, including later pages.",
     "Known case entities (match names when possible; still emit a card even if unmatched):",
     JSON.stringify(entities, null, 2),
     "",

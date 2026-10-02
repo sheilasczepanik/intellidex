@@ -1,16 +1,151 @@
 import { getLocalApiKey, getLocalProvider } from "./settings";
 import type { ExtractedEvent, ExtractBundle, ExtractEntityHint, ScoutedEntity } from "./extractSchema";
 import {
-  EXTRACT_PAGES_PER_CHUNK,
   EXTRACT_SERVICE_UNAVAILABLE,
   coerceExtractBundle,
-  mergeExtractBundles,
   sanitizeExtractText,
-  splitPageChunks,
 } from "./extractSchema";
 import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource } from "./mauraExtractFallback";
 import { isMm1Source, mm1ExtractBundle } from "../data/caseFixtures";
 import { locateSnippet } from "./quoteAnchors";
+import { pdfBytesFromBase64, pdfjsLib } from "./pdfjsSetup";
+
+export type ClientFinding = {
+  id: string;
+  category: "OFFICIAL_ACTION" | "WITNESS_STATEMENT" | "TIMELINE_EVENT" | "EVIDENCE";
+  title: string;
+  details: string;
+  exactSnippet: string;
+  pageNumber: number;
+  timestamp: string | null;
+  confidence: number;
+  status: "UNRESOLVED";
+};
+
+const CLIENT_TIME_RE = /(?:(?:19|20)\d{2}[-/.]\d{2}[-/.]\d{2}|\d{1,2}:\d{2}(?:\s?[AP]M)?|\b\d{4}\s*hrs\b)/gi;
+
+/** Classify one page of police narrative into investigative cards. No item cap. */
+export function findingsFromPageText(pageText: string, pageNumber: number): ClientFinding[] {
+  if (!pageText || pageText.trim().length < 30) return [];
+  const timeMatches = pageText.match(CLIENT_TIME_RE) || [];
+  const lines = pageText.split(/(?<=[.!?])\s+/);
+  const findings: ClientFinding[] = [];
+  lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+    if (trimmed.length < 25) return;
+    let category: ClientFinding["category"] | null = null;
+    let title = "";
+    if (/officer|trooper|detective|sgt|patrol|investigat/i.test(trimmed)) {
+      category = "OFFICIAL_ACTION";
+      title = "Official Law Enforcement Action";
+    } else if (/stated|interview|advised|witness|reported that/i.test(trimmed)) {
+      category = "WITNESS_STATEMENT";
+      title = "Witness / Investigative Account";
+    } else if (/saturn|vehicle|car|collision|crash|tailpipe|towed/i.test(trimmed)) {
+      category = "TIMELINE_EVENT";
+      title = "Vehicle / Incident Movement";
+    } else if (/atm|withdrawal|receipt|computer|hard drive|cash/i.test(trimmed)) {
+      category = "EVIDENCE";
+      title = "Evidentiary Record";
+    }
+    if (!category) return;
+    findings.push({
+      id: `ext-${pageNumber}-${idx}`,
+      category,
+      title: title || "Investigative Detail",
+      details: trimmed,
+      exactSnippet: trimmed.slice(0, 100),
+      pageNumber,
+      timestamp: timeMatches[0] || null,
+      confidence: 0.96,
+      status: "UNRESOLVED",
+    });
+  });
+  return findings;
+}
+
+export function findingsFromDocumentText(text: string): ClientFinding[] {
+  const parts = text.split(/(?=---\s*PAGE\s+\d+\s*---)/i).map((part) => part.trim()).filter(Boolean);
+  if (parts.length <= 1) return findingsFromPageText(text, 1);
+  const findings: ClientFinding[] = [];
+  for (const part of parts) {
+    const match = part.match(/---\s*PAGE\s+(\d+)\s*---/i);
+    const page = match ? Number(match[1]) : 1;
+    const body = part.replace(/---\s*PAGE\s+\d+\s*---/i, " ").trim();
+    findings.push(...findingsFromPageText(body, page));
+  }
+  return findings;
+}
+
+type PdfTextDoc = {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<{ getTextContent: () => Promise<{ items: Array<{ str?: string }> }> }>;
+  cleanup?: () => Promise<void>;
+};
+
+/** Scan every page with pdf.js. Does not call /api/extract. */
+export async function runClientExtraction(pdfDoc: PdfTextDoc): Promise<ClientFinding[]> {
+  const findings: ClientFinding[] = [];
+  const totalPages = pdfDoc.numPages;
+  for (let p = 1; p <= totalPages; p += 1) {
+    const page = await pdfDoc.getPage(p);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items.map((item) => item.str || "").join(" ");
+    findings.push(...findingsFromPageText(pageText, p));
+  }
+  return findings;
+}
+
+function clientFindingsToBundle(findings: ClientFinding[]): ExtractBundle {
+  return {
+    events: findings.map((finding) => ({
+      id: finding.id,
+      timestamp: finding.timestamp,
+      timestampLabel: finding.timestamp || "Unknown",
+      entityId: null,
+      entityName: "",
+      entityType: finding.category === "EVIDENCE" ? "exhibit" as const : "person" as const,
+      suggestNewEntity: false,
+      newEntityType: null,
+      category: finding.category === "EVIDENCE"
+        ? "evidence" as const
+        : finding.category === "TIMELINE_EVENT"
+          ? "time" as const
+          : "communication" as const,
+      title: finding.title,
+      snippet: finding.exactSnippet,
+      rawQuote: finding.exactSnippet,
+      details: finding.details,
+      confidence: finding.confidence,
+      citation: "client-extract",
+      pageNumber: finding.pageNumber,
+      exactQuote: finding.exactSnippet,
+      tier: "primary" as const,
+    })),
+    entities: [],
+    relationships: [],
+  };
+}
+
+/** Instant local parse: pdf.js text layer when bytes exist, otherwise the stored transcript. */
+export async function extractEvidenceLocally(input: {
+  fileBase64?: string;
+  fileType?: string;
+  fileName?: string;
+  text?: string;
+}): Promise<ExtractBundle> {
+  const looksPdf = (input.fileType || "").toLowerCase() === "pdf"
+    || (input.fileName || "").toLowerCase().endsWith(".pdf");
+  if (looksPdf && input.fileBase64) {
+    const pdf = await pdfjsLib.getDocument({ data: pdfBytesFromBase64(input.fileBase64) }).promise;
+    try {
+      return clientFindingsToBundle(await runClientExtraction(pdf));
+    } finally {
+      await pdf.cleanup();
+    }
+  }
+  return clientFindingsToBundle(findingsFromDocumentText(input.text || ""));
+}
 
 export type { ExtractedEvent, ExtractEntityHint, ScoutedEntity };
 
@@ -69,10 +204,6 @@ function bundleFromResponse(json: Record<string, unknown>, fallbackText: string,
 }
 
 async function postExtract(body: object, fallbackText: string, fileName: string): Promise<ExtractBundle> {
-  if (isMm1Source(fileName)) return mm1ExtractBundle();
-  if (isLocalMauraExtractSource(fileName)) {
-    return mauraVerifiedBundle();
-  }
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), EXTRACT_TIMEOUT_MS);
   try {
@@ -112,23 +243,6 @@ async function postExtract(body: object, fallbackText: string, fileName: string)
   }
 }
 
-async function extractOneTextChunk(input: {
-  text: string;
-  fileName: string;
-  entities: ExtractEntityHint[];
-  summary?: boolean;
-}): Promise<ExtractBundle> {
-  const text = sanitizeExtractText(input.text, Math.max(input.text.length, 1));
-  return postExtract({
-    type: "text",
-    text,
-    fileName: input.fileName,
-    entities: input.entities,
-    summary: input.summary,
-    maxChars: text.length,
-  }, text, input.fileName);
-}
-
 export async function extractEventsFromText(input: {
   text: string;
   fileName: string;
@@ -139,22 +253,11 @@ export async function extractEventsFromText(input: {
 }): Promise<ExtractBundle> {
   void input.maxPages;
   void input.maxChars;
-  if (isMm1Source(input.fileName)) return mm1ExtractBundle();
-  if (isLocalMauraExtractSource(input.fileName)) return mauraVerifiedBundle();
-  const chunks = splitPageChunks(input.text, EXTRACT_PAGES_PER_CHUNK);
-  const selected = input.summary ? chunks.slice(0, 1) : chunks;
-  console.log("[Extraction] Ingested text length:", input.text.length, "page chunks:", selected.length);
-  const parts: ExtractBundle[] = [];
-  for (const chunk of selected) {
-    parts.push(await extractOneTextChunk({
-      text: chunk,
-      fileName: input.fileName,
-      entities: input.entities,
-      summary: input.summary,
-    }));
-  }
-  const bundle = mergeExtractBundles(parts);
-  console.log("[Extraction] Parsed items count:", bundle.events.length);
+  void input.entities;
+  void input.summary;
+  void input.fileName;
+  const bundle = clientFindingsToBundle(findingsFromDocumentText(input.text));
+  console.log("[Extraction] Client findings:", bundle.events.length);
   return bundle;
 }
 
@@ -163,8 +266,6 @@ export async function extractEventsFromRenderedPages(input: {
   pages: { pageNumber: number; imageBase64: string }[];
   entities: ExtractEntityHint[];
 }): Promise<ExtractBundle> {
-  if (isMm1Source(input.fileName)) return mm1ExtractBundle();
-  if (isLocalMauraExtractSource(input.fileName)) return mauraVerifiedBundle();
   const bundle = await postExtract({
     type: "rendered_pages",
     filename: input.fileName,

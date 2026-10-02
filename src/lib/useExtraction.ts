@@ -9,6 +9,9 @@ export {
   extractEventsFromRenderedPages,
   extractEventsFromImage,
   extractEventsFromText,
+  extractEvidenceLocally,
+  findingsFromDocumentText,
+  runClientExtraction,
 } from "./extractClient";
 export {
   isLocalMauraExtractSource,
@@ -16,5 +19,5 @@ export {
   MAURA_FALLBACK_ENTITIES,
 } from "./mauraExtractFallback";
 export { renderPdfPagesToJpeg } from "./pdfHelpers";
-export { EXTRACT_PAGES_PER_CHUNK, splitPageChunks } from "./extractSchema";
+export { DYNAMIC_EXTRACTION_PROMPT, EXTRACT_PAGES_PER_CHUNK, splitPageChunks } from "./extractSchema";
 export { MM_1_EXTRACTIONS, isMm1Source, mm1ExtractBundle, mm1ReportText } from "../data/caseFixtures";

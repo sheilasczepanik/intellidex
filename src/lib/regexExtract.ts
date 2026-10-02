@@ -68,7 +68,7 @@ export function regexExtractFromText(text: string, fileName: string): ExtractBun
     events.push(eventFrom(`Facts indexed from ${fileName}`, entities[0].name, "", source.slice(0, 180), "evidence"));
   }
 
-  return { events: events.slice(0, 20), entities: entities.slice(0, 24), relationships: [] };
+  return { events, entities, relationships: [] };
 }
 
 /** Guaranteed cards so Verify is usable when the extract API is down. */
