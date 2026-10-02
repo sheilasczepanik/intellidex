@@ -17,9 +17,9 @@ import {
 } from "./types";
 
 const MARK =
-  "cursor-pointer rounded px-0.5 bg-amber-400/25 border-b-2 border-amber-400 text-inherit box-decoration-clone extract-hit";
+  "extract-hit cursor-pointer rounded px-0.5 bg-yellow-200/70 text-inherit box-decoration-clone transition-colors duration-200 hover:bg-yellow-300";
 const MARK_ACTIVE =
-  "cursor-pointer rounded px-0.5 bg-amber-300 text-slate-900 ring-2 ring-amber-500 shadow-md transition-all duration-300 extract-hit extract-hit-active";
+  "extract-hit extract-hit-active cursor-pointer rounded bg-amber-400 px-0.5 text-slate-900 shadow-md ring-2 ring-amber-600 transition-colors duration-200";
 
 export function CitationPill({
   citation,
@@ -472,8 +472,13 @@ export default function SourceDocumentViewer({
                           key={part.key}
                           id={active || part.draftId ? `source-hit-${part.draftId}` : undefined}
                           data-verify-quote={part.draftId}
-                          onClick={() => onSelectAnchor?.(part.draftId)}
+                          data-finding-id={part.draftId}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onSelectAnchor?.(part.draftId);
+                          }}
                           className={active ? MARK_ACTIVE : MARK}
+                          style={{ pointerEvents: "auto" }}
                         >
                           {part.value}
                         </mark>
@@ -574,8 +579,13 @@ export default function SourceDocumentViewer({
                       key={part.key}
                       id={`source-hit-${part.draftId}`}
                       data-verify-quote={part.draftId}
-                      onClick={() => onSelectAnchor?.(part.draftId)}
-                      className={`rounded border-b-2 border-amber-400 bg-amber-400/25 px-0.5 ${active ? "extract-hit-active" : ""}`}
+                      data-finding-id={part.draftId}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelectAnchor?.(part.draftId);
+                      }}
+                      className={`${active ? MARK_ACTIVE : MARK}`}
+                      style={{ pointerEvents: "auto" }}
                     >
                       {part.value}
                     </mark>
@@ -596,8 +606,13 @@ export default function SourceDocumentViewer({
                     key={part.key}
                     id={`source-hit-${part.draftId}`}
                     data-verify-quote={part.draftId}
-                    onClick={() => onSelectAnchor?.(part.draftId)}
+                    data-finding-id={part.draftId}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onSelectAnchor?.(part.draftId);
+                    }}
                     className={active ? MARK_ACTIVE : MARK}
+                    style={{ pointerEvents: "auto" }}
                   >
                     {part.value}
                   </mark>

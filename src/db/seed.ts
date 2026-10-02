@@ -199,14 +199,14 @@ export async function backfillEvidenceCustody() {
 let mm1Queue: Promise<void> = Promise.resolve();
 
 /** Put MM_1.pdf and the full MM_1_EXTRACTIONS set on the case. A short pending queue is replaced. */
-export function ensureMm1Extractions(opts?: { force?: boolean }) {
+export function ensureMm1Extractions(opts?: { force?: boolean; caseId?: string }) {
   const job = mm1Queue.then(() => writeMm1Extractions(opts));
   mm1Queue = job.then(() => undefined, () => undefined);
   return job;
 }
 
-async function writeMm1Extractions(opts?: { force?: boolean }) {
-  const caseId = "CASE-0041";
+async function writeMm1Extractions(opts?: { force?: boolean; caseId?: string }) {
+  const caseId = opts?.caseId || "CASE-0041";
   const caseRow = await db.cases.get(caseId);
   if (!caseRow) return;
   const evidence = await db.evidence.where("caseId").equals(caseId).toArray();
@@ -256,7 +256,9 @@ async function writeMm1Extractions(opts?: { force?: boolean }) {
   ];
   if (drop.length) await db.verifyDrafts.bulkDelete([...new Set(drop)]);
   const have = new Set((await db.verifyDrafts.where("evidenceId").equals(row.id).toArray()).map((draft) => draft.id));
-  const rows = mm1DraftRows(caseId, row.id, row.fileName).filter((draft) => !have.has(draft.id));
+  const rows = mm1DraftRows(caseId, row.id, row.fileName)
+    .map((draft) => (caseId === "CASE-0041" ? draft : { ...draft, id: `${caseId}__${draft.id}` }))
+    .filter((draft) => !have.has(draft.id));
   if (rows.length) await db.verifyDrafts.bulkAdd(rows);
 }
 

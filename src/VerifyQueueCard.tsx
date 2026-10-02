@@ -106,11 +106,12 @@ export default function VerifyQueueCard({
   const citation = citationFromDraft(d, evidence);
   return (
     <article
-      id={`verify-card-${d.id}`}
+      id={`queue-card-${d.id}`}
+      data-verify-card={d.id}
       onMouseEnter={onHoverStart}
       onMouseLeave={onHoverEnd}
       onClick={onHoverStart}
-      className={`cursor-pointer rounded-[14px] border p-4 transition-all duration-200 ${active ? "border-blue-500 bg-white ring-2 ring-blue-500 shadow-md" : "border-slate-200 bg-white shadow-sm"}`}
+      className={`cursor-pointer rounded-[14px] border p-4 transition-all duration-200 ${active ? "border-blue-500 bg-blue-50/20 ring-2 ring-blue-500 shadow-md" : "border-slate-200 bg-white shadow-sm"}`}
     >
       {editing ? (
         <div className="flex flex-col gap-2.5">

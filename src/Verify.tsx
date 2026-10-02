@@ -68,10 +68,11 @@ export function LogEvidenceModal({
   const [notes, setNotes] = useState("");
   const [page, setPage] = useState(pageNumber ? String(pageNumber) : "");
   return (
-    <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="log-evidence-title">
-      <div className="w-full max-w-md rounded-[16px] border border-slate-200 bg-white p-5 shadow-xl">
-        <h2 id="log-evidence-title" className="text-[16px] font-semibold text-slate-900">Extract Card</h2>
-        <p className="mt-1 text-[12.5px] text-slate-500">Adds an unresolved card to the AI extraction queue. Confirm it later to write it to the chronology.</p>
+    <div className="fixed inset-0 z-[95] flex justify-end bg-slate-950/40" role="dialog" aria-modal="true" aria-labelledby="log-evidence-title">
+      <button type="button" aria-label="Close observation form" className="h-full flex-1" onClick={onDismiss} />
+      <div className="h-full w-full max-w-md overflow-auto border-l border-slate-200 bg-white p-5 shadow-xl">
+        <h2 id="log-evidence-title" className="font-mono text-[13px] font-semibold tracking-wide text-slate-900">[ Create Custom Observation Card ]</h2>
+        <p className="mt-1 text-[12.5px] text-slate-500">The selected passage is filled in below. Saving adds an unresolved card to the extraction queue.</p>
         {previewDataUrl ? (
           <img src={previewDataUrl} alt="" className="mt-3 max-h-28 w-full rounded-md bg-slate-100 object-contain" />
         ) : null}
@@ -136,7 +137,7 @@ export function LogEvidenceModal({
             })}
             className="rounded-lg bg-blue-600 px-3 py-2 text-[13px] font-semibold text-white hover:bg-blue-700"
           >
-            Add to Queue
+            [ Create Custom Observation Card ]
           </button>
         </div>
       </div>

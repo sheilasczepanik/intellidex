@@ -5,8 +5,8 @@ import type { SourceCitation } from "./types";
 
 type QuoteAnchor = { id: string; quote: string; pageNumber?: number; title?: string };
 
-const MARK_CLS = "extract-hit bg-amber-400/25 border-b-2 border-amber-400 rounded px-0.5";
-const MARK_ACTIVE_CLS = "extract-hit extract-hit-active bg-amber-300 text-slate-900 ring-2 ring-amber-500 shadow-md transition-all duration-300 rounded px-0.5";
+const MARK_CLS = "extract-hit cursor-pointer rounded px-0.5 bg-yellow-200/70 transition-colors duration-200 hover:bg-yellow-300";
+const MARK_ACTIVE_CLS = "extract-hit extract-hit-active cursor-pointer rounded bg-amber-400 px-0.5 text-slate-900 shadow-md ring-2 ring-amber-600 transition-colors duration-200";
 
 function paintMarks(
   layerEl: HTMLDivElement,
@@ -34,6 +34,8 @@ function paintMarks(
       const mark = document.createElement("mark");
       mark.className = active ? MARK_ACTIVE_CLS : MARK_CLS;
       mark.setAttribute("data-verify-quote", a.id);
+      mark.setAttribute("data-finding-id", a.id);
+      mark.style.pointerEvents = "auto";
       mark.title = a.title || a.quote;
       if (!firstMarked.has(a.id)) {
         mark.id = `source-hit-${a.id}`;

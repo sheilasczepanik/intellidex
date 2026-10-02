@@ -42,7 +42,7 @@ import TimelineToolbar, { TimelineDateStrip, TimelineHoverTip } from "./Timeline
 import TimelineConflictInspector from "./TimelineConflictInspector";
 import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQueueCard";
 import VerifySourceSwitcher from "./VerifySourceSwitcher";
-import { draftsForSource, extractionCacheKey } from "./lib/useExtraction";
+import { draftsForSource, extractionCacheKey, mm1QueueIsStale } from "./lib/useExtraction";
 import WorkspacePreferences from "./WorkspacePreferences";
 import { ExtractSelectionTip, LogEvidenceModal, VERIFY_CATEGORIES, type ManualLogCategoryId } from "./Verify";
 import {
@@ -513,7 +513,7 @@ export default function DesktopApp() {
   const extractChain = useRef(Promise.resolve());
   const [form, setForm] = useState<WizardFormState | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [activeHoveredCardId, setActiveHoveredCardId] = useState<string | null>(null);
+  const [activeCardId, setActiveCardId] = useState<string | null>(null);
   const [timelineInspect, setTimelineInspect] = useState<{ eventId: string; citation: SourceCitation } | null>(null);
   const hoverOriginRef = useRef<"card" | "doc" | null>(null);
   const sourcePaneRef = useRef<HTMLDivElement>(null);
@@ -589,6 +589,7 @@ export default function DesktopApp() {
     sightings: false,
   });
   const [mergedInspectIds, setMergedInspectIds] = useState<string[]>([]);
+  const [primaryCitationId, setPrimaryCitationId] = useState<string | null>(null);
   const [operatorMenu, setOperatorMenu] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [resetPrompt, setResetPrompt] = useState(false);
@@ -1515,6 +1516,7 @@ export default function DesktopApp() {
         ? mergedIds
         : (fromPlot && fromPlot.mergeCount > 1 ? fromPlot.mergedIds : []),
     );
+    setPrimaryCitationId(null);
   };
 
   const persistDrawerStamp = async (date: string, time: string) => {
@@ -2296,13 +2298,22 @@ export default function DesktopApp() {
     [sourcePending, sourceDrafts, sourceEvidence?.rawText, sourceEvidence?.fullText],
   );
 
-  const captureSourceSelection = () => {
+  const captureSourceSelection = (event: React.MouseEvent | React.TouchEvent) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("mark, [data-finding-id], button, a, input, textarea, select")) return;
     const sel = window.getSelection();
     const pane = sourcePaneRef.current;
-    const node = sel?.anchorNode ?? sel?.focusNode;
+    const node = sel?.anchorNode ?? sel?.focusNode ?? target;
     const inPane = Boolean(node && pane && pane.contains(node instanceof Element ? node : node.parentElement));
-    if (!sel || sel.isCollapsed || !pane || !inPane) {
-      setExtractTip(null);
+    if (!pane || !inPane) return;
+    if (!sel || sel.isCollapsed) {
+      const leaf = target?.closest("span");
+      const leafText = leaf?.textContent?.replace(/\s+/g, " ").trim() || "";
+      const pageEl = leaf?.closest("[data-page-number], [data-pdf-page]");
+      const pageNumber = Number(pageEl?.getAttribute("data-page-number") || pageEl?.getAttribute("data-pdf-page"));
+      if (leafText.length >= 2) {
+        openObservationForm(leafText, Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : undefined);
+      }
       return;
     }
     const text = sel.toString().replace(/\s+/g, " ").trim();
@@ -2314,15 +2325,31 @@ export default function DesktopApp() {
       const blob = `${draft.snippet} ${draft.sourceCitation?.exactQuote || ""}`;
       return Boolean(locateSnippet(blob, text) || locateSnippet(text, draft.snippet));
     });
+    const el = node instanceof Element ? node : node?.parentElement;
+    const pageEl = el?.closest("[data-page-number], [data-pdf-page]");
+    const pageNumber = Number(pageEl?.getAttribute("data-page-number") || pageEl?.getAttribute("data-pdf-page"));
+    const page = Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : undefined;
     if (matched) {
       setExtractTip(null);
       setHoveredCard(matched.id, "doc");
       return;
     }
-    const el = node instanceof Element ? node : node?.parentElement;
-    const pageEl = el?.closest("[data-pdf-page]");
-    const pageNumber = Number(pageEl?.getAttribute("data-pdf-page"));
-    void logCustomObservation(text, Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : undefined);
+    openObservationForm(text, page);
+  };
+
+  const openObservationForm = (quote: string, pageNumber?: number) => {
+    const text = quote.replace(/\s+/g, " ").trim();
+    if (text.length < 2 || /^page\s+\d+$/i.test(text)) return;
+    const matched = sourceDrafts.find((draft) => {
+      const blob = `${draft.snippet} ${draft.sourceCitation?.exactQuote || ""} ${draft.title}`;
+      return Boolean(locateSnippet(blob, text) || locateSnippet(text, draft.snippet));
+    });
+    if (matched) {
+      setHoveredCard(matched.id, "doc");
+      return;
+    }
+    setExtractTip(null);
+    setLogModal({ quote: text, pageNumber });
   };
 
   const persistLoggedEvidence = async (input: {
@@ -2370,7 +2397,7 @@ export default function DesktopApp() {
     await logCustomObservation(extractTip.text, extractTip.pageNumber);
   };
 
-  const logCustomObservation = async (quote: string, pageNumber?: number) => {
+  const logCustomObservation = async (quote: string, pageNumber?: number, title?: string) => {
     if (!sourceEvidence || !activeCase) return;
     const text = quote.replace(/\s+/g, " ").trim();
     if (text.length < 2) return;
@@ -2384,7 +2411,7 @@ export default function DesktopApp() {
       suggestNewEntity: true,
       newEntityType: "",
       category: "evidence",
-      title: "Custom Extracted Observation",
+      title: title?.trim() || "Custom Extracted Observation",
       snippet: text,
       details: "",
       confidence: 1,
@@ -2410,7 +2437,7 @@ export default function DesktopApp() {
 
   const setHoveredCard = (id: string | null, origin: "card" | "doc") => {
     hoverOriginRef.current = id ? origin : null;
-    setActiveHoveredCardId(id);
+    setActiveCardId(id);
   };
 
   const syncQueueToSourceScroll = () => {
@@ -2431,7 +2458,8 @@ export default function DesktopApp() {
     }
     const target = lead ?? marks[0];
     const draftId = target.getAttribute("data-verify-quote") || target.id.replace(/^(source-hit-|verify-quote-)/, "");
-    const card = document.getElementById(`verify-card-${draftId}`);
+    const card = document.getElementById(`queue-card-${draftId}`)
+      ?? document.getElementById(`verify-card-${draftId}`);
     if (!card || !queue.contains(card)) return;
     const qBox = queue.getBoundingClientRect();
     const cBox = card.getBoundingClientRect();
@@ -2443,7 +2471,7 @@ export default function DesktopApp() {
 
   useEffect(() => {
     verifyPdfPageRef.current = 1;
-    setActiveHoveredCardId(null);
+    setActiveCardId(null);
     setEditingDraftId(null);
     setExtractTip(null);
     setLogModal(null);
@@ -2460,8 +2488,9 @@ export default function DesktopApp() {
         let cached = false;
         try { cached = Boolean(localStorage.getItem(key)); } catch { cached = false; }
         const pending = await db.verifyDrafts.where("evidenceId").equals(evidenceId).filter((draft) => draft.status === "pending").count();
-        if (!cached || pending < 5) {
-          await ensureMm1Extractions({ force: !cached || pending < 5 });
+        if (!cached || mm1QueueIsStale(pending)) {
+          try { localStorage.removeItem(key); } catch { /* private mode */ }
+          await ensureMm1Extractions({ force: true, caseId });
           try { localStorage.setItem(key, JSON.stringify({ version: 3, sourceId: evidenceId })); } catch { /* private mode */ }
         }
       })();
@@ -2471,31 +2500,37 @@ export default function DesktopApp() {
   }, [sourceEvidence?.id, screen]);
 
   useEffect(() => {
-    if (screen !== "Verify" || !activeHoveredCardId) return;
+    if (screen !== "Verify" || !activeCardId) return;
     const origin = hoverOriginRef.current;
     const timer = window.setTimeout(() => {
-      const card = document.getElementById(`verify-card-${activeHoveredCardId}`);
-      const quote = document.getElementById(`source-hit-${activeHoveredCardId}`)
-        ?? document.getElementById(`verify-quote-${activeHoveredCardId}`);
+      const card = document.getElementById(`queue-card-${activeCardId}`)
+        ?? document.getElementById(`verify-card-${activeCardId}`);
+      const quote = document.getElementById(`source-hit-${activeCardId}`)
+        ?? document.querySelector<HTMLElement>(`[data-finding-id="${CSS.escape(activeCardId)}"]`)
+        ?? document.getElementById(`verify-quote-${activeCardId}`);
       if (origin === "doc") {
         card?.scrollIntoView({ behavior: "smooth", block: "center" });
         return;
       }
-      const pageNumber = sourceDrafts.find((row) => row.id === activeHoveredCardId)?.sourceCitation?.pageNumber;
+      const pageNumber = sourceDrafts.find((row) => row.id === activeCardId)?.sourceCitation?.pageNumber;
       const pageEl = pageNumber
         ? sourcePaneRef.current?.querySelector<HTMLElement>(`[data-page-number="${pageNumber}"]`)
         : null;
+      pageEl?.scrollIntoView({ behavior: "smooth", block: "start" });
       const scroller = sourcePaneRef.current?.querySelector<HTMLElement>("[data-pdf-scroll]");
       if (quote && scroller) {
         const top = quote.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 120;
         scroller.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
-        return;
+      } else {
+        quote?.scrollIntoView({ behavior: "smooth", block: "center" });
       }
-      pageEl?.scrollIntoView({ behavior: "smooth", block: "center" });
-      quote?.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (quote) {
+        quote.classList.add("animate-pulse");
+        window.setTimeout(() => quote.classList.remove("animate-pulse"), 1500);
+      }
     }, 40);
     return () => window.clearTimeout(timer);
-  }, [activeHoveredCardId, screen, sourceEvidence?.id, sourceQuoteSegments.length, sourceDrafts]);
+  }, [activeCardId, screen, sourceEvidence?.id, sourceQuoteSegments.length, sourceDrafts]);
 
   /* ---------------------------------------------------------------- */
 
@@ -3193,8 +3228,8 @@ export default function DesktopApp() {
                       <SourceDocumentViewer
                         evidence={sourceEvidence}
                         citation={(() => {
-                          const d = narrativeQueue.find((row) => row.id === activeHoveredCardId)
-                            ?? sourceDrafts.find((row) => row.id === activeHoveredCardId)
+                          const d = narrativeQueue.find((row) => row.id === activeCardId)
+                            ?? sourceDrafts.find((row) => row.id === activeCardId)
                             ?? null;
                           return d ? citationFromDraft(d, sourceEvidence) : null;
                         })()}
@@ -3217,7 +3252,7 @@ export default function DesktopApp() {
                           });
                           void runExtract(sourceEvidence.id, { stayOnWorkspace: true });
                         }}
-                        activeId={activeHoveredCardId}
+                        activeId={activeCardId}
                         showClose={false}
                         onSelectAnchor={(id) => {
                           const known = sourceDrafts.some((row) => row.id === id);
@@ -3253,7 +3288,10 @@ export default function DesktopApp() {
                         pageNumber={logModal.pageNumber}
                         previewDataUrl={logModal.previewDataUrl}
                         onDismiss={() => setLogModal(null)}
-                        onSave={(input) => void persistLoggedEvidence(input)}
+                        onSave={(input) => {
+                          if (logModal.previewDataUrl || logModal.box) void persistLoggedEvidence(input);
+                          else void logCustomObservation(input.quote, input.pageNumber, input.title);
+                        }}
                       />
                     )}
                   </div>
@@ -3276,7 +3314,7 @@ export default function DesktopApp() {
                         draft={d}
                         evidence={caseEvidence.find((e) => e.id === d.evidenceId)}
                         entity={caseEntities.find((e) => e.id === d.entityId)}
-                        active={activeHoveredCardId === d.id}
+                        active={activeCardId === d.id}
                         editing={editingDraftId === d.id}
                         inputCls={inputCls}
                         categories={VERIFY_CATEGORIES}
@@ -3285,7 +3323,7 @@ export default function DesktopApp() {
                         onHoverStart={() => {
                           setHoveredCard(d.id, "card");
                         }}
-                        onHoverEnd={() => setHoveredCard(null, "card")}
+                        onHoverEnd={() => { /* Click pins the active card so the highlight stays inspectable. */ }}
                         onOpenCitation={(citation) => {
                           if (d.evidenceId) setActiveEvidenceId(d.evidenceId);
                           setHoveredCard(d.id, "card");
@@ -3887,38 +3925,79 @@ export default function DesktopApp() {
                       );
                     })()}
                   </div>
-                  {mergedInspectIds.length > 1 ? (
+                  {mergedInspectIds.length > 1 ? (() => {
+                    const citationRows = mergedInspectIds.flatMap((id) => {
+                      const rec = timelineFeed.find((row) => row.id === id) ?? caseEvents.find((row) => row.id === id);
+                      if (!rec) return [];
+                      const src = caseEvidence.find((row) => row.id === rec.sourceDocId);
+                      const fileName = src?.originalFileName || src?.fileName || rec.sourceCitation?.sourceName || "";
+                      const documentId = rec.sourceDocId || rec.sourceCitation?.sourceId || "";
+                      return [{
+                        id: documentId || fileName || id,
+                        fileName,
+                        sourceDoc: fileName,
+                        documentId,
+                        title: rec.title,
+                        pageNumber: rec.sourceCitation?.pageNumber,
+                        isPrimary: rec.tier === "primary",
+                      }];
+                    });
+                    const uniqueCitations = Array.from(
+                      citationRows.reduce((map, citation) => {
+                        const key = citation.fileName || citation.sourceDoc || citation.documentId || citation.title;
+                        const prev = map.get(key);
+                        if (!prev || citation.isPrimary) map.set(key, citation);
+                        return map;
+                      }, new Map<string, typeof citationRows[number]>()).values(),
+                    );
+                    const fallbackPrimaryId = uniqueCitations.find((citation) => citation.isPrimary)?.id ?? uniqueCitations[0]?.id ?? null;
+                    const activePrimaryId = primaryCitationId ?? fallbackPrimaryId;
+                    return (
                     <div>
                       <div className={`mb-1 ${mono} text-[10.5px] tracking-[0.12em] text-slate-500`}>MERGED CITATIONS</div>
-                      <p className="mb-2 text-[12px] text-slate-500">Corroborating Citations ({Math.max(0, mergedInspectIds.length - 1)})</p>
+                      <p className="mb-2 text-[12px] text-slate-500">Corroborating Citations ({Math.max(0, uniqueCitations.length - 1)})</p>
                       <div className="flex flex-col gap-1.5">
-                        {mergedInspectIds.map((id) => {
-                          const rec = caseEvents.find((row) => row.id === id);
-                          const src = rec ? caseEvidence.find((row) => row.id === rec.sourceDocId) : undefined;
-                          const label = src?.originalFileName || src?.fileName || rec?.sourceCitation?.sourceName || rec?.title || id;
-                          const markedPrimary = mergedInspectIds.some((rowId) => caseEvents.find((row) => row.id === rowId)?.tier === "primary");
-                          const primary = markedPrimary ? rec?.tier === "primary" : id === drawerEvent.id;
+                        {uniqueCitations.map((citation, index) => {
+                          const isPrimary = activePrimaryId ? citation.id === activePrimaryId : index === 0;
+                          const fileLabel = citation.fileName || citation.sourceDoc;
                           return (
                             <button
-                              key={id}
+                              key={citation.id || index}
                               type="button"
                               onClick={() => {
-                                void Promise.all(mergedInspectIds.map((rowId) => updateTimelineEvent(rowId, { tier: rowId === id ? "primary" : "secondary" })));
-                                openEventDrawer(id, mergedInspectIds);
+                                setPrimaryCitationId(citation.id);
+                                const selectedKey = citation.fileName || citation.sourceDoc || citation.documentId || citation.title;
+                                void Promise.all(mergedInspectIds.map((rowId) => {
+                                  const rec = timelineFeed.find((row) => row.id === rowId) ?? caseEvents.find((row) => row.id === rowId);
+                                  if (!rec || rowId.startsWith("draft-")) return Promise.resolve();
+                                  const src = caseEvidence.find((row) => row.id === rec.sourceDocId);
+                                  const fileName = src?.originalFileName || src?.fileName || rec.sourceCitation?.sourceName || "";
+                                  const documentId = rec.sourceDocId || rec.sourceCitation?.sourceId || "";
+                                  const key = fileName || documentId || rec.title;
+                                  return updateTimelineEvent(rowId, { tier: key === selectedKey ? "primary" : "secondary" });
+                                }));
                               }}
-                              className={`rounded-lg border px-2.5 py-2 text-left text-[12.5px] ${primary ? "border-blue-300 bg-blue-50 text-blue-900" : "border-slate-200 text-slate-700 hover:border-slate-300"}`}
+                              className={`cursor-pointer rounded-lg border p-3 text-left transition-all ${isPrimary ? "border-blue-500 bg-blue-50/40 text-slate-900 dark:border-blue-500 dark:bg-blue-950/20" : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 dark:border-zinc-800 dark:bg-zinc-900"}`}
                             >
                               <span className="flex items-center justify-between gap-2">
-                                <span className="block font-medium break-words">{rec?.title || "Event"}</span>
-                                {primary ? <span className="shrink-0 rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-600">Primary Source ✓</span> : null}
+                                <span className="block text-sm font-medium break-words">{citation.title || drawerEvent.title}</span>
+                                {isPrimary ? (
+                                  <span className="shrink-0 rounded border border-blue-200 bg-blue-100 px-2 py-0.5 font-mono text-[11px] font-medium text-blue-700 dark:border-blue-800 dark:bg-blue-900/40 dark:text-blue-300">Primary Source ✓</span>
+                                ) : (
+                                  <span className="shrink-0 font-mono text-[11px] text-slate-400 hover:text-slate-600 dark:text-zinc-400">Set as Primary</span>
+                                )}
                               </span>
-                              <span className="mt-0.5 block max-w-full break-words text-[11px] text-slate-500">{label}</span>
+                              <span className="mt-1 block max-w-full break-words text-xs text-slate-500 dark:text-zinc-400">
+                                {fileLabel}
+                                {citation.pageNumber ? ` · Page ${citation.pageNumber}` : ""}
+                              </span>
                             </button>
                           );
                         })}
                       </div>
                     </div>
-                  ) : null}
+                    );
+                  })() : null}
                 </>
               )}
             </div>
