@@ -91,7 +91,46 @@ function parseClock(source: string): Clock | null {
   const mer = (clock[3] ?? "").toLowerCase();
   if (mer.startsWith("p") && hours < 12) hours += 12;
   if (mer.startsWith("a") && hours === 12) hours = 0;
+  if (hours > 23 || minutes > 59) return null;
   return { hours, minutes };
+}
+
+/** Clock written in the narrative, such as `15:15 EST` or `1930 hrs`. */
+export function explicitNarrativeClock(source: string): Clock | null {
+  const zoned = /\b(\d{1,2}):(\d{2})\s*(?:EST|EDT|CST|PST|UTC)\b/i.exec(source);
+  if (zoned) {
+    const hours = Number(zoned[1]);
+    const minutes = Number(zoned[2]);
+    if (hours <= 23 && minutes <= 59) return { hours, minutes };
+  }
+  const hrs = /\b([01]\d|2[0-3])(\d{2})\s*hrs\b/i.exec(source);
+  if (hrs) return { hours: Number(hrs[1]), minutes: Number(hrs[2]) };
+  return null;
+}
+
+function ymdFromMs(ms: number): Ymd {
+  const date = new Date(ms);
+  return { y: date.getFullYear(), m: date.getMonth(), d: date.getDate() };
+}
+
+/** Use a clock written in the text instead of a stored 19:27 last-known-sighting fallback. */
+export function preferNarrativeTimestamp(storedMs: number, text: string): number {
+  if (!Number.isFinite(storedMs)) return storedMs;
+  const narrative = text || "";
+  const explicit = explicitNarrativeClock(narrative);
+  const date = parseCalendarDate(narrative, storedMs);
+  const stored = new Date(storedMs);
+  const blanket = stored.getHours() === 19 && stored.getMinutes() === 27;
+  if (explicit) {
+    return applyParts(date ?? ymdFromMs(storedMs), explicit);
+  }
+  if (!blanket) return storedMs;
+  const clock = parseClock(narrative);
+  if (clock && !(clock.hours === 19 && clock.minutes === 27)) {
+    return applyParts(date ?? ymdFromMs(storedMs), clock);
+  }
+  if (date) return applyParts(date, { hours: stored.getHours(), minutes: stored.getMinutes() });
+  return storedMs;
 }
 
 function applyParts(date: Ymd, clock: Clock | null) {
@@ -103,8 +142,16 @@ function applyParts(date: Ymd, clock: Clock | null) {
 /** Parse an extracted clock/date into a millisecond timestamp. Never defaults to Feb 14. */
 export function parseEventTime(iso: string | null, label: string, opts: ParseEventTimeOpts = {}) {
   const extra = opts.extraText ?? "";
-  const source = `${iso ?? ""} ${label} ${extra}`;
+  const narrative = `${label} ${extra}`.trim();
+  const explicit = explicitNarrativeClock(narrative);
   const isoTrim = (iso ?? "").trim();
+  if (explicit) {
+    const date = parseCalendarDate(isoTrim, opts.anchorMs)
+      || parseCalendarDate(narrative, opts.anchorMs)
+      || (opts.anchorMs != null ? ymdFromMs(opts.anchorMs) : null);
+    if (date) return applyParts(date, explicit);
+  }
+  const source = `${iso ?? ""} ${label} ${extra}`;
   if (/^\d{4}-\d{2}-\d{2}/.test(isoTrim)) {
     const fromIso = Date.parse(isoTrim.length === 10 ? `${isoTrim}T12:00:00` : isoTrim);
     if (!Number.isNaN(fromIso)) {

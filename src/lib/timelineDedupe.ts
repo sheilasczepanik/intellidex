@@ -25,7 +25,7 @@ export function sourceRefKey(event: TimelineEventRecord) {
 
 export function duplicateEventKey(event: { id?: string; entityId?: string; title: string; timestamp: number }) {
   const entity = (event.entityId || event.title.toLowerCase().trim());
-  return `${entity}-${event.timestamp}-${event.entityId || ""}`;
+  return `${entity}-${event.timestamp}-${normalizeIntelText(event.title)}`;
 }
 
 export function clusterMergeableEvents(events: TimelineEventRecord[]) {

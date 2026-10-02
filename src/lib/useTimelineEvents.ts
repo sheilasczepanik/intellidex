@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { swimlaneGroupFor, type SwimlaneGroupId } from "../types/timeline";
 
 export type TimelineLaneLike = {
-  def: { id?: string; name: string; role?: string; type?: string; note?: string };
+  def: { id?: string; name: string; role?: string; type?: string; note?: string; group?: SwimlaneGroupId };
   count: number;
   placed?: { e?: { title?: string; sub?: string; verified?: boolean; sighting?: boolean } }[];
 };
@@ -12,6 +12,7 @@ export function categorizeTimelineLane(lane: TimelineLaneLike, subjectName?: str
   const events = (lane.placed ?? [])
     .map((row) => `${row.e?.title || ""} ${row.e?.sub || ""} ${row.e?.sighting ? "sighting tip" : ""}`)
     .join(" ");
+  if (lane.def.group) return lane.def.group;
   const verifiedVehicle = lane.def.type === "vehicle" && (lane.placed ?? []).some((row) => row.e?.verified !== false);
   return swimlaneGroupFor({
     name: lane.def.name,

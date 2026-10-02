@@ -30,6 +30,7 @@ import {
 import PinPersonButton from "./PinPersonButton";
 import SubjectProfile from "./SubjectProfile";
 import TimelineSnapshot from "./TimelineSnapshot";
+import { draftsAsTimelineEvents, prepareEventsForTimeline } from "./lib/timelineSync";
 import { isSecondaryEvidence, sourceClassLabel } from "./lib/sourceTier";
 import { hasContactFragment, isSearchNetworkPerson, looksLikeIndividualName } from "./lib/personDirectory";
 
@@ -200,7 +201,18 @@ export default function CaseOverview({
 }) {
   const [ingestBusy, setIngestBusy] = useState(false);
 
-  const verifiedSightings = events.filter((e) => isVerifiedSighting(e));
+  const pendingFindings = useLiveQuery(
+    () => (activeCase
+      ? db.verifyDrafts.where("caseId").equals(activeCase.id).filter((draft) => draft.status === "pending").toArray()
+      : Promise.resolve([] as VerifyDraftRecord[])),
+    [activeCase?.id],
+  ) ?? [];
+  const chronology = useMemo(() => {
+    const existing = new Set(events.map((event) => event.id));
+    const fromDrafts = draftsAsTimelineEvents(pendingFindings).filter((event) => !existing.has(event.id.replace(/^draft-/, "")));
+    return prepareEventsForTimeline([...events, ...fromDrafts], entities);
+  }, [events, entities, pendingFindings]);
+  const verifiedSightings = chronology.filter((e) => isVerifiedSighting(e));
   const openTips = events.filter((e) => isOpenTip(e)).length + pendingCount;
   const searchZones = useMemo(
     () => entities.filter((e) => e.type === "place" || e.type === "location"),
@@ -779,7 +791,7 @@ export default function CaseOverview({
 
       <TimelineSnapshot
         activeCase={activeCase}
-        events={events}
+        events={chronology}
         evidence={evidence}
         onOpenTimeline={onOpenTimeline}
       />

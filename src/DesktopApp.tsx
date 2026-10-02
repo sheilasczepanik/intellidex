@@ -74,6 +74,7 @@ import {
 } from "./types/timeline";
 import { applyDupDecision, evidenceToSide, eventToSide, findDuplicateEvidence, findDuplicateEvent, hashNormalizedText, type DupDecision, type DupMatch } from "./lib/duplicates";
 import { clusterMergeableEvents, detectLocationConflicts } from "./lib/timelineDedupe";
+import { draftsAsTimelineEvents, findingsLanePresentation, isFindingsLane, prepareEventsForTimeline } from "./lib/timelineSync";
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
 import { joinLocalDateTime, localDayKey, namesLooselyMatch, splitLocalDateTime } from "./lib/eventTime";
 import {
@@ -783,17 +784,26 @@ export default function DesktopApp() {
   };
 
   const timelineConflicts = useTimelineConflicts(caseEvents, caseEntities);
+  const timelineFeed = useMemo(() => {
+    const existing = new Set(caseEvents.map((event) => event.id));
+    const fromDrafts = draftsAsTimelineEvents(pendingDrafts).filter((event) => {
+      const sourceId = event.id.replace(/^draft-/, "");
+      return !existing.has(event.id) && !existing.has(sourceId);
+    });
+    return [...caseEvents, ...fromDrafts].sort((a, b) => a.timestamp - b.timestamp);
+  }, [caseEvents, pendingDrafts]);
 
   const chrono = useMemo(() => {
     const entityMap = new Map(caseEntities.map((e) => [e.id, e]));
     const places = caseEntities.filter((e) => e.type === "place" || e.type === "location");
-    const dayKeys = uniqueDayKeys(caseEvents.map((e) => e.timestamp));
+    const timelineEvents = prepareEventsForTimeline(timelineFeed, caseEntities);
+    const dayKeys = uniqueDayKeys(timelineEvents.map((e) => e.timestamp));
     const dayCounts: Record<string, number> = {};
-    for (const e of caseEvents) {
+    for (const e of timelineEvents) {
       const key = localDayKey(e.timestamp);
       dayCounts[key] = (dayCounts[key] ?? 0) + 1;
     }
-    const dayStamps = caseEvents.map((e) => e.timestamp);
+    const dayStamps = timelineEvents.map((e) => e.timestamp);
     const busiest = busiestDayKey(dayStamps);
     const earliest = earliestDayKey(dayStamps);
     const activeDay = viewDay || earliest || busiest;
@@ -801,7 +811,7 @@ export default function DesktopApp() {
     const span = new Set(spanKeys);
     const { startH, endH } = windowHours(timeWindow, customStart, customEnd);
 
-    let scoped = showInactiveLanes ? caseEvents : caseEvents.filter((event) => !event.flaggedNoise);
+    let scoped = showInactiveLanes ? timelineEvents : timelineEvents.filter((event) => !event.flaggedNoise);
     if (span.size) {
       scoped = scoped.filter((e) => span.has(localDayKey(e.timestamp)));
     }
@@ -881,7 +891,7 @@ export default function DesktopApp() {
     const plotEvents = conflictsOnly ? scoped.filter((event) => conflictIds.has(event.id)) : scoped;
     const plotted = clusterMergeableEvents(plotEvents).map((group) => {
       const e = group[0];
-      const laneId = entityMap.has(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID;
+      const laneId = entityMap.has(e.entityId) || isFindingsLane(e.entityId) ? e.entityId : UNASSIGNED_LANE_ID;
       const ent = entityMap.get(e.entityId);
       const src = evidenceMap.get(e.sourceDocId);
       const secondary = e.tier === "secondary" || Boolean(src && isSecondaryEvidence(src));
@@ -919,7 +929,7 @@ export default function DesktopApp() {
         secondary,
         citeUrl,
         sourceName: sourceNames.join(" · ") || e.sourceCitation?.sourceName || src?.originalFileName || src?.fileName || "",
-        entityName: ent?.name || "Unassigned",
+        entityName: ent?.name || findingsLanePresentation(laneId)?.name || "Investigative Findings & Notes",
         mergeCount,
         mergedIds,
         semantic,
@@ -940,6 +950,12 @@ export default function DesktopApp() {
     let top = RULER_H;
     const lanes = laneIds.map((id) => {
       const ent = entityMap.get(id);
+      const findings = findingsLanePresentation(id);
+      const laneBlob = `${ent?.name ?? ""} ${ent?.role ?? ""} ${(byEntity.get(id) ?? []).map((event) => `${event.title} ${event.description}`).join(" ")}`;
+      const forcedGroup = findings?.group
+        ?? (/smith|monaghan|police|officer|trooper|detective|oravec|davies|thrasher|dispatch|cjis|\bofc\b|chief williams/i.test(laneBlob) ? "official" as const
+          : /atwood|westman|mayotte|alfieri|classmate|supervisor/i.test(laneBlob) ? "sightings" as const
+          : undefined);
       const semantic = resolveSemanticCategory({
         entityType: ent?.type ?? (id === UNASSIGNED_LANE_ID ? "" : "person"),
         role: ent?.role,
@@ -948,10 +964,13 @@ export default function DesktopApp() {
       });
       const def = {
         id,
-        name: id === UNASSIGNED_LANE_ID ? "Unassigned" : (ent?.name ?? "Unknown entity"),
-        role: ent?.role ?? "",
-        note: ent?.notes ?? "",
-        type: (ent?.type ?? "person") as EntityType,
+        name: findings?.name ?? (id === UNASSIGNED_LANE_ID ? "Unassigned" : (ent?.name ?? "Unknown entity")),
+        role: findings
+          ? (findings.group === "official" ? "law enforcement" : findings.group === "sightings" ? "witness" : "finding")
+          : (ent?.role ?? ""),
+        note: findings?.name ?? ent?.notes ?? "",
+        type: (findings?.type ?? ent?.type ?? "person") as EntityType,
+        group: forcedGroup,
         category: { entityType: ent?.type, role: ent?.role, name: ent?.name, text: ent?.notes, category: ent?.classification },
         dot: getCategoryColor(semantic, "dot"),
         border: getCategoryColor(semantic, "border"),
@@ -1043,7 +1062,7 @@ export default function DesktopApp() {
       mergedLaneIds: plotted.filter((row) => row.mergeCount > 1).map((row) => row.entityId),
       timeLabel: formatClockRange(start, end),
     };
-  }, [activeCase?.subjectName, activeCase?.title, caseEvents, caseEntities, caseEvidence, viewDay, viewAllDates, dayScope, showInactiveLanes, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit, conflictsOnly, timelineConflicts]);
+  }, [activeCase?.subjectName, activeCase?.title, timelineFeed, caseEntities, caseEvidence, viewDay, viewAllDates, dayScope, showInactiveLanes, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit, conflictsOnly, timelineConflicts]);
 
   useEffect(() => {
     setViewDay("");
@@ -1063,13 +1082,13 @@ export default function DesktopApp() {
   }, [screen, activeCase]);
 
   useEffect(() => {
-    if (screen !== "Timeline" || !viewportFit || !caseEvents.length) return;
-    const active = viewDay || earliestDayKey(caseEvents.map((e) => e.timestamp)) || busiestDayKey(caseEvents.map((e) => e.timestamp));
+    if (screen !== "Timeline" || !viewportFit || !timelineFeed.length) return;
+    const active = viewDay || earliestDayKey(timelineFeed.map((e) => e.timestamp)) || busiestDayKey(timelineFeed.map((e) => e.timestamp));
     const span = new Set(viewAllDates || !active ? [] : spanDayKeys(active, dayScope));
     const pool = span.size
-      ? caseEvents.filter((e) => span.has(localDayKey(e.timestamp)))
-      : caseEvents;
-    const times = (pool.length ? pool : caseEvents).flatMap((e) => {
+      ? timelineFeed.filter((e) => span.has(localDayKey(e.timestamp)))
+      : timelineFeed;
+    const times = (pool.length ? pool : timelineFeed).flatMap((e) => {
       const endMs = parseTimeEnd(e.timeEnd, e.timestamp);
       return endMs && endMs > e.timestamp ? [e.timestamp, endMs] : [e.timestamp];
     });
@@ -1097,17 +1116,17 @@ export default function DesktopApp() {
       window.cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [screen, viewportFit, resolvedCaseId, caseEvents, viewDay, viewAllDates, dayScope, timeWindow]);
+  }, [screen, viewportFit, resolvedCaseId, timelineFeed, viewDay, viewAllDates, dayScope, timeWindow]);
 
   const fitToEvents = () => {
     setViewportFit(true);
     setTimeWindow("full");
-    const active = viewDay || earliestDayKey(caseEvents.map((e) => e.timestamp)) || busiestDayKey(caseEvents.map((e) => e.timestamp));
+    const active = viewDay || earliestDayKey(timelineFeed.map((e) => e.timestamp)) || busiestDayKey(timelineFeed.map((e) => e.timestamp));
     const span = new Set(viewAllDates || !active ? [] : spanDayKeys(active, dayScope));
     const pool = span.size
-      ? caseEvents.filter((e) => span.has(localDayKey(e.timestamp)))
-      : caseEvents;
-    const times = (pool.length ? pool : caseEvents).flatMap((e) => {
+      ? timelineFeed.filter((e) => span.has(localDayKey(e.timestamp)))
+      : timelineFeed;
+    const times = (pool.length ? pool : timelineFeed).flatMap((e) => {
       const endMs = parseTimeEnd(e.timeEnd, e.timestamp);
       return endMs && endMs > e.timestamp ? [e.timestamp, endMs] : [e.timestamp];
     });
@@ -1460,7 +1479,7 @@ export default function DesktopApp() {
   };
 
   const openEventDrawer = (id: string, mergedIds?: string[]) => {
-    const ev = caseEvents.find((e) => e.id === id);
+    const ev = timelineFeed.find((e) => e.id === id);
     if (!ev) return;
     setDrawerEventId(id);
     setDrawerEdit(false);
@@ -1477,7 +1496,7 @@ export default function DesktopApp() {
   };
 
   const persistDrawerStamp = async (date: string, time: string) => {
-    if (!drawerEventId) return;
+    if (!drawerEventId || drawerEventId.startsWith("draft-")) return;
     const ts = joinLocalDateTime(date, time);
     if (ts == null) return;
     setDrawerWhen(toDatetimeLocal(ts));
@@ -1485,7 +1504,7 @@ export default function DesktopApp() {
   };
 
   const saveEventDrawer = async () => {
-    if (!drawerEventId || !drawerTitle.trim() || !drawerWhen || savingDrawer) return;
+    if (!drawerEventId || drawerEventId.startsWith("draft-") || !drawerTitle.trim() || !drawerWhen || savingDrawer) return;
     setSavingDrawer(true);
     try {
       await updateTimelineEvent(drawerEventId, {
@@ -1501,7 +1520,7 @@ export default function DesktopApp() {
   };
 
   const deleteEventFromTimeline = async () => {
-    if (!drawerEventId) return;
+    if (!drawerEventId || drawerEventId.startsWith("draft-")) return;
     await deleteTimelineEvent(drawerEventId);
     setDrawerEventId(null);
     setDrawerEdit(false);
@@ -3552,7 +3571,7 @@ export default function DesktopApp() {
                                   title="Open source citation"
                                   onClick={(ev) => {
                                     ev.stopPropagation();
-                                    const rec = caseEvents.find((row) => row.id === e.id);
+                                    const rec = timelineFeed.find((row) => row.id === e.id);
                                     const src = rec ? caseEvidence.find((x) => x.id === rec.sourceDocId) : undefined;
                                     if (!rec) return;
                                     setTimelineInspect({ eventId: rec.id, citation: citationFromEvent(rec, src) });
