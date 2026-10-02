@@ -79,15 +79,15 @@ export default function NewCaseForm({
       if (data.circumstances) onSummary(String(data.circumstances));
       onProfile({
         ...profile,
-        ageAtDisappearance: data.ageAtDisappearance != null && String(data.ageAtDisappearance) !== "0" ? String(data.ageAtDisappearance) : profile.ageAtDisappearance,
-        currentEstimatedAge: data.currentAge != null && String(data.currentAge) !== "0" ? String(data.currentAge) : profile.currentEstimatedAge,
-        height: data.height || profile.height,
-        weight: data.weight || profile.weight,
-        hair: data.hair || profile.hair,
-        eyes: data.eyes || profile.eyes,
-        distinguishingMarks: data.marks || profile.distinguishingMarks,
-        clothingLastSeen: data.clothing || profile.clothingLastSeen,
-        medicalAlerts: data.medicalAlerts || profile.medicalAlerts,
+        ageAtDisappearance: data.ageAtDisappearance != null && String(data.ageAtDisappearance) !== "0" ? String(data.ageAtDisappearance) : "",
+        currentEstimatedAge: data.currentAge != null && String(data.currentAge) !== "0" ? String(data.currentAge) : "",
+        height: data.height || "",
+        weight: data.weight || "",
+        hair: data.hair || "",
+        eyes: data.eyes || "",
+        distinguishingMarks: data.distinguishingMarks || data.marks || "",
+        clothingLastSeen: data.clothing || "",
+        medicalAlerts: data.medicalAlerts || "",
       });
       setNamusNotice("");
       setNamusOk(true);

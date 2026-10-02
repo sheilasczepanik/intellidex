@@ -29,6 +29,7 @@ export type NamusFormPayload = {
   hair: string;
   eyes: string;
   marks: string;
+  distinguishingMarks: string;
   clothing: string;
   medicalAlerts: string;
   circumstances: string;
@@ -79,6 +80,7 @@ export function namusRecordToPayload(record: NamusRecord): NamusFormPayload {
     hair: record.hairColor,
     eyes: record.eyeColor,
     marks: record.distinguishingMarks,
+    distinguishingMarks: record.distinguishingMarks,
     clothing: record.clothing,
     medicalAlerts: record.medicalAlerts,
     circumstances: record.circumstances,
@@ -98,31 +100,63 @@ type NamusFixture = {
   name: string;
   lksDate: string;
   location: string;
-  age: number | string;
+  ageAtDisappearance: number | string;
+  currentAge: number | string;
+  height: string;
+  weight: string;
+  hair: string;
+  eyes: string;
+  distinguishingMarks: string;
+  clothing: string;
+  medicalAlerts: string;
   circumstances: string;
 };
 
 /** Demo IDs that fill immediately, before any network call. */
 export const KNOWN_NAMUS_CASES: Record<string, NamusFixture> = {
-  "2316": {
-    name: "Tammy Lynn Leppert",
-    lksDate: "1983-07-06T11:00",
-    location: "Cocoa Beach, Brevard County, Florida",
-    age: 18,
-    circumstances: "Last seen leaving Cocoa Beach in a vehicle after attending a film audition.",
-  },
   "54": {
     name: "Maura Murray",
     lksDate: "2004-02-09T19:27",
     location: "Haverhill, Grafton County, New Hampshire",
-    age: 21,
+    ageAtDisappearance: 21,
+    currentAge: 43,
+    height: "5'7\"",
+    weight: "120 lbs",
+    hair: "Light Brown",
+    eyes: "Hazel",
+    distinguishingMarks: "Dimple on right cheek. No known tattoos.",
+    clothing: "Dark jacket, jeans, running shoes, dark backpack.",
+    medicalAlerts: "None reported. Potential trauma from vehicle collision.",
     circumstances: "Last seen on Route 112 after single vehicle collision into snowbank.",
+  },
+  "2316": {
+    name: "Tammy Lynn Leppert",
+    lksDate: "1983-07-06T11:00",
+    location: "Cocoa Beach, Brevard County, Florida",
+    ageAtDisappearance: 18,
+    currentAge: 61,
+    height: "5'5\"",
+    weight: "105 lbs",
+    hair: "Blonde",
+    eyes: "Hazel",
+    distinguishingMarks: "Small mole under right eye; faint scar on left knee.",
+    clothing: "Blue denim skirt, blue pullover shirt with floral print.",
+    medicalAlerts: "Reported severe anxiety and paranoia prior to disappearance.",
+    circumstances: "Last seen leaving Cocoa Beach in a vehicle after attending a film audition.",
   },
   "1028": {
     name: "Jason Jolkowski",
     lksDate: "2001-06-13T10:45",
     location: "Omaha, Douglas County, Nebraska",
-    age: 19,
+    ageAtDisappearance: 19,
+    currentAge: 44,
+    height: "6'1\"",
+    weight: "165 lbs",
+    hair: "Brown",
+    eyes: "Brown",
+    distinguishingMarks: "Mild learning disability with speech impairment.",
+    clothing: "White Chicago Cubs t-shirt, blue athletic shorts, black shoes, Chicago Cubs baseball cap.",
+    medicalAlerts: "Speech/language processing impairment; mild cognitive disability.",
     circumstances: "Disappeared while walking toward high school pickup location.",
   },
 };
@@ -137,15 +171,15 @@ export function knownNamusRecord(numericId: string): NamusRecord | null {
     lksDate: stamp,
     lksTime: "",
     location: fixture.location,
-    ageAtDisappearance: fixture.age === "" ? "" : String(fixture.age),
-    currentAge: "",
-    height: "",
-    weight: "",
-    hairColor: "",
-    eyeColor: "",
-    distinguishingMarks: "",
-    clothing: "",
-    medicalAlerts: "",
+    ageAtDisappearance: fixture.ageAtDisappearance === "" ? "" : String(fixture.ageAtDisappearance),
+    currentAge: fixture.currentAge === "" ? "" : String(fixture.currentAge),
+    height: fixture.height,
+    weight: fixture.weight,
+    hairColor: fixture.hair,
+    eyeColor: fixture.eyes,
+    distinguishingMarks: fixture.distinguishingMarks,
+    clothing: fixture.clothing,
+    medicalAlerts: fixture.medicalAlerts,
     circumstances: fixture.circumstances,
   };
 }

@@ -27,6 +27,9 @@ function mapNamusJson(data: unknown, mp: string): NamusRecord | null {
   const idn = obj(root.subjectIdentification);
   const sight = obj(root.sighting);
   const desc = obj(root.subjectDescription);
+  const physical = obj(root.physicalDescription);
+  const clothes = obj(root.clothingAndAccessories);
+  const medical = obj(root.medicalInformation);
   const state = obj(sight?.state);
   const first = str(idn?.firstName);
   const last = str(idn?.lastName);
@@ -48,9 +51,9 @@ function mapNamusJson(data: unknown, mp: string): NamusRecord | null {
     weight: str(desc?.weight),
     hairColor: str(desc?.hairColor) || str(obj(desc?.hair)?.name),
     eyeColor: str(desc?.eyeColor) || str(obj(desc?.eyes)?.name),
-    distinguishingMarks: str(desc?.scarsAndMarks) || str(desc?.distinguishingMarks),
-    clothing: str(desc?.clothing) || str(desc?.clothingAndAccessories),
-    medicalAlerts: str(desc?.medical) || str(desc?.medicalConditions),
+    distinguishingMarks: str(physical?.distinguishingMarks) || str(physical?.tattoos) || str(desc?.scarsAndMarks) || str(desc?.distinguishingMarks),
+    clothing: str(clothes?.clothing) || str(sight?.clothingDescription) || str(desc?.clothing) || str(desc?.clothingAndAccessories),
+    medicalAlerts: str(medical?.conditions) || str(physical?.medical) || str(desc?.medical) || str(desc?.medicalConditions) || "None recorded",
     circumstances: str(root.circumstances) || str(sight?.circumstances),
   };
 }
