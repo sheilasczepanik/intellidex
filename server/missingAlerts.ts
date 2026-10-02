@@ -250,29 +250,61 @@ function fetchSignal() {
   return ac.signal;
 }
 
+function looksLikeFeed(text: string) {
+  return /<rss[\s>]|<feed[\s>]|<item[\s>]|<entry[\s>]|<alert[\s>]/i.test(text);
+}
+
+function proxyUrlsFor(target: string) {
+  const encoded = encodeURIComponent(target);
+  return [
+    `https://api.allorigins.win/raw?url=${encoded}`,
+    `https://r.jina.ai/${target}`,
+  ];
+}
+
+async function fetchOnce(url: string) {
+  const parsed = assertPublicHttpUrl(url);
+  const res = await fetch(parsed.toString(), {
+    signal: fetchSignal(),
+    headers: {
+      Accept: "application/rss+xml, application/xml, text/xml, text/plain, */*",
+      "User-Agent": BROWSER_UA,
+    },
+    redirect: "follow",
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new ScrapeHttpError(res.status, `Feed returned HTTP ${res.status}`);
+  }
+  return { url: parsed.toString(), text, contentType: res.headers.get("content-type") || "" };
+}
+
 async function fetchText(url: string) {
   const parsed = assertPublicHttpUrl(url);
+  const target = parsed.toString();
+  let directError = "Feed fetch failed.";
   try {
-    const res = await fetch(parsed.toString(), {
-      signal: fetchSignal(),
-      headers: {
-        Accept: "application/rss+xml, application/xml, text/xml, */*",
-        "User-Agent": BROWSER_UA,
-      },
-      redirect: "follow",
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      console.error(`[alerts] NCMEC fetch HTTP ${res.status} for ${parsed.toString()}`);
-      throw new ScrapeHttpError(res.status, `Feed returned HTTP ${res.status}`);
-    }
-    return { url: parsed.toString(), text, contentType: res.headers.get("content-type") || "" };
+    const direct = await fetchOnce(target);
+    if (looksLikeFeed(direct.text)) return direct;
+    directError = "Direct response was not an alert feed.";
+    console.error("[alerts] Direct NCMEC response was not RSS", target);
   } catch (err) {
-    if (err instanceof ScrapeHttpError) throw err;
-    const message = err instanceof Error ? err.message : "Feed fetch failed.";
-    console.error("[alerts] NCMEC fetch failed", message);
-    throw new ScrapeHttpError(502, message);
+    directError = err instanceof Error ? err.message : directError;
+    console.error("[alerts] Direct NCMEC fetch failed", target, directError);
   }
+
+  for (const proxy of proxyUrlsFor(target)) {
+    try {
+      const via = await fetchOnce(proxy);
+      if (!looksLikeFeed(via.text)) continue;
+      return { url: target, text: via.text, contentType: via.contentType };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Proxy fetch failed.";
+      console.error("[alerts] CORS proxy failed", proxy, message);
+    }
+  }
+
+  throw new ScrapeHttpError(502, directError);
 }
 
 function extraFeedsFromEnv(env: Record<string, string | undefined>) {

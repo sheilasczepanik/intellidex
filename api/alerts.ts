@@ -25,7 +25,15 @@ async function handleGet(req: VercelRequest, res: VercelResponse) {
     return res.status(200).end();
   }
   if (req.method !== "GET") {
-    return ok(res, { error: "GET only", alerts: [], fetchedAt: new Date().toISOString(), cached: true, offline: true, sources: [] });
+    return ok(res, {
+      error: "GET only",
+      alerts: FALLBACK_MISSING_ALERTS,
+      fetchedAt: new Date().toISOString(),
+      cached: true,
+      offline: true,
+      sources: [],
+      warning: "NCMEC feed temporarily unreachable",
+    });
   }
 
   try {

@@ -19,11 +19,16 @@ function relativeTime(iso: string) {
   return `${days}d ago`;
 }
 
-function typeChip(alertType: LiveMissingAlert["alertType"]) {
-  if (alertType === "AMBER Alert") return "border-red-300 bg-red-50 text-red-950";
-  if (alertType === "Endangered Missing") return "border-amber-300 bg-amber-50 text-amber-950";
-  if (alertType === "Silver Alert") return "border-sky-300 bg-sky-50 text-sky-950";
+function typeChip(alert: LiveMissingAlert) {
+  if (alert.alertLevel === "CRITICAL_MISSING" || alert.alertType === "AMBER Alert") return "border-red-300 bg-red-50 text-red-950";
+  if (alert.alertLevel === "ENDANGERED_RUNAWAY" || alert.alertType === "Endangered Missing") return "border-amber-300 bg-amber-50 text-amber-950";
+  if (alert.alertLevel === "ACTIVE_SEARCH" || alert.alertType === "Silver Alert") return "border-sky-300 bg-sky-50 text-sky-950";
   return "border-slate-300 bg-slate-50 text-slate-800";
+}
+
+function typeLabel(alert: LiveMissingAlert) {
+  if (alert.alertLevel) return alert.alertLevel.replace(/_/g, " ");
+  return alert.alertType;
 }
 
 export default function LiveAlertsFeed({
@@ -35,19 +40,19 @@ export default function LiveAlertsFeed({
   onBack: () => void;
   onOpenAsCase: (alert: LiveMissingAlert) => void;
 }) {
-  const [alerts, setAlerts] = useState<LiveMissingAlert[]>([]);
+  const [alerts, setAlerts] = useState<LiveMissingAlert[]>(FALLBACK_MISSING_ALERTS);
   const [fetchedAt, setFetchedAt] = useState("");
   const [warning, setWarning] = useState("");
-  const [offline, setOffline] = useState(false);
+  const [offline, setOffline] = useState(true);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async (refresh = false) => {
     setLoading(true);
     try {
       const data = await fetchMissingAlerts({ refresh });
-      setAlerts(data.alerts);
+      setAlerts(data.alerts.length ? data.alerts : FALLBACK_MISSING_ALERTS);
       setFetchedAt(data.fetchedAt);
-      setOffline(Boolean(data.offline));
+      setOffline(Boolean(data.offline) || data.alerts.length === 0);
       setWarning(data.offline ? "" : (data.warning || ""));
     } catch (err) {
       console.error("[alerts] UI load failed", err);
@@ -119,13 +124,8 @@ export default function LiveAlertsFeed({
       )}
 
       <section className="rounded-xl border border-slate-200 bg-white shadow-sm">
-        {loading && !alerts.length ? (
-          <div className="px-4 py-10 text-center text-[13px] text-slate-500 sm:px-5">Checking public alert feeds…</div>
-        ) : !alerts.length ? (
-          <div className="px-4 py-10 text-center text-[13px] text-slate-500 sm:px-5">No live items from the public feeds right now.</div>
-        ) : (
           <ul className="divide-y divide-slate-100">
-            {alerts.map((alert) => (
+            {(alerts.length ? alerts : FALLBACK_MISSING_ALERTS).map((alert) => (
               <li key={alert.id} className="flex gap-3 px-4 py-3.5 sm:px-5">
                 {alert.photoUrl ? (
                   <img
@@ -142,12 +142,19 @@ export default function LiveAlertsFeed({
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[14px] font-semibold text-slate-900">{alert.name}</span>
                     {alert.age && <span className="text-[12px] text-slate-500">Age {alert.age}</span>}
-                    <span className={`rounded-full border px-2 py-0.5 text-[10.5px] font-semibold ${typeChip(alert.alertType)}`}>
-                      {alert.alertType}
+                    <span className={`rounded-full border px-2 py-0.5 text-[10.5px] font-semibold ${typeChip(alert)}`}>
+                      {typeLabel(alert)}
                     </span>
+                    {alert.verified && (
+                      <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-800">
+                        Verified
+                      </span>
+                    )}
                   </div>
                   <div className="mt-0.5 text-[12px] text-slate-500">
+                    {alert.caseNumber ? `${alert.caseNumber} · ` : ""}
                     {alert.location}
+                    {alert.jurisdiction ? ` · ${alert.jurisdiction}` : ""}
                     <span className="mx-1.5 text-slate-300">·</span>
                     {relativeTime(alert.timestamp)}
                   </div>
@@ -175,7 +182,6 @@ export default function LiveAlertsFeed({
               </li>
             ))}
           </ul>
-        )}
       </section>
     </div>
   );

@@ -1286,7 +1286,7 @@ export default function DesktopApp() {
     setActiveCaseId("");
     setDraftTitle(alert.name);
     setDraftSummary(alert.summary);
-    setDraftJurisdiction(alert.location);
+    setDraftJurisdiction(alert.jurisdiction || alert.location);
     setDraftIncidentStart(lksAt ? lksAt.slice(0, 10) : "");
     setDraftIncidentEnd("");
     setDraftFileId(alert.id);
