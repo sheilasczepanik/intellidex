@@ -1,15 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
-  addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent, ensureLastKnownSighting, ensureMauraChronology, ensureMm1Extractions,
+  addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent, ensureLastKnownSighting, ensureMauraChronology,
   db, DEFAULT_OPERATOR, deleteEntity, deleteEvidence, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isIntakeCompleteStatus, isLocatedCase, isPendingIntakeEvidence, isVisibleInStagingQueue, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft, togglePinnedPerson,
   OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveManualEvidence, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
-import { extractEventsFromImage, extractEvidenceLocally } from "./lib/extractClient";
 import { extractPdfText, documentText } from "./lib/pdfHelpers";
-import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource } from "./lib/mauraExtractFallback";
-import { isMm1Source, mm1ExtractBundle } from "./data/caseFixtures";
+import { isMm1Source } from "./data/caseFixtures";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
 import { scrapeArticleFromUrl, fallbackArticleFromUrl } from "./lib/scrapeClient";
@@ -42,7 +40,7 @@ import TimelineToolbar, { TimelineDateStrip, TimelineHoverTip } from "./Timeline
 import TimelineConflictInspector from "./TimelineConflictInspector";
 import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQueueCard";
 import VerifySourceSwitcher from "./VerifySourceSwitcher";
-import { draftsForSource, extractionCacheKey, mm1QueueIsStale } from "./lib/useExtraction";
+import { cacheScanFindings, draftsForSource, runDynamicDocumentScan, scanFindingsToEvents } from "./lib/useExtraction";
 import WorkspacePreferences from "./WorkspacePreferences";
 import { ExtractSelectionTip, LogEvidenceModal, VERIFY_CATEGORIES, type ManualLogCategoryId } from "./Verify";
 import {
@@ -545,6 +543,9 @@ export default function DesktopApp() {
   const [savingEvent, setSavingEvent] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [extracting, setExtracting] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanProgress, setScanProgress] = useState("");
+  const scanGen = useRef(0);
   const [ingestJob, setIngestJob] = useState<IngestJob | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [extractError, setExtractError] = useState<string | null>(null);
@@ -1812,7 +1813,15 @@ export default function DesktopApp() {
   }) => {
     const stayOnWorkspace = opts?.stayOnWorkspace ?? screen !== "Intake";
     const deferApply = opts?.deferApply ?? false;
+    const gen = ++scanGen.current;
+    const still = () => scanGen.current === gen;
+    setIsScanning(true);
+    setScanProgress("Scanning document...");
+    setExtracting(true);
+    setExtractError(null);
+    try {
     const caseId = resolvedCaseId ?? await ensureActiveCase();
+    if (!still()) return;
     if (!caseId) {
       setExtractError("Create or open a case first.");
       return;
@@ -1820,16 +1829,15 @@ export default function DesktopApp() {
     const targetId = evidenceId ?? activeEvidenceId ?? caseEvidence[0]?.id;
     const ev = (targetId ? await db.evidence.get(targetId) : undefined)
       ?? caseEvidence.find((e) => e.id === targetId);
+    if (!still()) return;
     if (!ev) {
       setExtractError("Add or paste source text before extracting.");
       return;
     }
     const isPdf = (ev.fileType === "pdf" || ev.mediaType === "application/pdf") && Boolean(ev.fileBase64);
-    const canVision = Boolean(ev.fileBase64 || ev.imageBase64);
-    if (!canVision) logExtractedText(ev.rawText, ev.fileName);
+    const isImage = Boolean(ev.imageBase64) || (ev.mediaType || "").startsWith("image/") || (ev.fileType || "").startsWith("image/");
+    if (!ev.fileBase64 && !ev.imageBase64) logExtractedText(ev.rawText, ev.fileName);
     const startedAt = opts?.startedAt ?? Date.now();
-    setExtracting(true);
-    setExtractError(null);
     await db.evidence.update(ev.id, { status: "ingesting", lastError: "" });
     setActiveEvidenceId(ev.id);
     pushDrawerStaged([ev.id]);
@@ -1846,49 +1854,28 @@ export default function DesktopApp() {
       .filter((draft) => draft.status === "pending" && draft.origin !== "manual" && draft.citation !== "manual-observation")
       .map((draft) => draft.id);
     if (stalePending.length) await db.verifyDrafts.bulkDelete(stalePending);
-    try {
-      const hints = caseEntities.map((e) => ({ id: e.id, name: e.name, type: e.type, role: e.role }));
-      const localMaura = isLocalMauraExtractSource(ev.fileName);
-
-      let bundle: ExtractBundle;
-
-      if (isPdf && ev.fileBase64) {
-        setIngestJob((job) => (job && job.evidenceId === ev.id
-          ? { ...job, stage: "claude", llmStartedAt: Date.now(), currentPage: ev.pageCount || 1, totalPages: ev.pageCount || 1 }
-          : job));
-        bundle = await extractEvidenceLocally({
-          fileBase64: ev.fileBase64,
-          fileType: ev.fileType,
-          fileName: ev.fileName,
-          text: sourceText,
-        });
-      } else if (ev.imageBase64 || (ev.fileBase64 && (ev.mediaType || "").startsWith("image/"))) {
-        setIngestJob((job) => (job && job.evidenceId === ev.id
-          ? { ...job, stage: "claude", llmStartedAt: Date.now() }
-          : job));
-        bundle = await extractEventsFromImage({
-          imageBase64: ev.imageBase64,
-          fileBase64: ev.fileBase64 || ev.imageBase64,
-          mediaType: ev.mediaType || "image/jpeg",
-          fileName: ev.fileName,
-          entities: hints,
-        });
-      } else {
-        setIngestJob((job) => (job && job.evidenceId === ev.id
-          ? { ...job, stage: "claude", llmStartedAt: Date.now() }
-          : job));
-        bundle = await extractEvidenceLocally({
-          fileName: ev.fileName,
-          fileType: ev.fileType,
-          text: sourceText,
-        });
-      }
-
-      if (!bundle.events.length && isMm1Source(ev.fileName)) {
-        bundle = mm1ExtractBundle();
-      } else if (!bundle.events.length && localMaura) {
-        bundle = mauraVerifiedBundle();
-      }
+    if (!still()) return;
+      setIngestJob((job) => (job && job.evidenceId === ev.id
+        ? { ...job, stage: "claude", llmStartedAt: Date.now(), currentPage: ev.pageCount || 1, totalPages: ev.pageCount || 1 }
+        : job));
+      const findings = await runDynamicDocumentScan({
+        fileBase64: isPdf ? ev.fileBase64 : undefined,
+        imageBase64: isImage ? (ev.imageBase64 || ev.fileBase64) : undefined,
+        fileType: ev.fileType,
+        mediaType: ev.mediaType,
+        fileName: ev.fileName,
+        text: sourceText,
+      }, ev.fileName);
+      if (!still()) return;
+      cacheScanFindings(ev.sha256Hash || ev.fileName || ev.id, findings);
+      const bundle: ExtractBundle = {
+        events: scanFindingsToEvents(findings).map((event) => ({
+          ...event,
+          id: `${ev.id}__${event.id}`,
+        })),
+        entities: [],
+        relationships: [],
+      };
       setExtractError(null);
 
       const events = bundle.events;
@@ -1943,10 +1930,10 @@ export default function DesktopApp() {
                 sourceUrl: ev.sourceUrl,
               },
             };
-          }), { replacePendingForEvidence: ev.id });
-          if (!localMaura) {
+          }));
+          if (still()) {
             const drafts = await db.verifyDrafts.where("evidenceId").equals(ev.id).toArray();
-            for (const draft of drafts.filter((d) => d.status === "pending")) {
+            for (const draft of drafts.filter((row) => row.status === "pending" && row.origin !== "manual" && row.citation !== "manual-observation")) {
               await confirmVerifyDraft(draft.id);
             }
           }
@@ -2011,6 +1998,7 @@ export default function DesktopApp() {
           })?.id
           ?? "";
       };
+      if (!still()) return;
       await addVerifyDrafts(events.map((event) => {
         const entityId = matchEntity(event.entityId, event.entityName);
         return {
@@ -2048,75 +2036,15 @@ export default function DesktopApp() {
       if (!stayOnWorkspace) goTo("Verify", caseId);
       setIngestJob(null);
     } catch (err) {
+      if (!still()) return;
       setIngestJob(null);
-      const fallback = mauraFallbackBundle();
-      try {
-        await applyExtractedGraph({
-          caseId,
-          evidenceId: ev.id,
-          entities: fallback.entities,
-          relationships: fallback.relationships,
-          bundle: fallback,
-        });
-        await ensureContactsForPeople(caseId);
-        const roster = await db.entities.where("caseId").equals(caseId).toArray();
-        const matchEntity = (id: string | null, name: string) => {
-          if (id && roster.some((e) => e.id === id)) return id;
-          const needle = name.trim().toLowerCase();
-          if (!needle) return "";
-          return roster.find((e) => e.name.trim().toLowerCase() === needle)?.id
-            ?? roster.find((e) => namesLooselyMatch(e.name, name))?.id
-            ?? "";
-        };
-        if (fallback.events.length) {
-          await addVerifyDrafts(fallback.events.map((event) => {
-            const entityId = matchEntity(event.entityId, event.entityName);
-            return {
-              caseId,
-              evidenceId: ev.id,
-              timestamp: parseEventTime(event.timestamp, event.timestampLabel, {
-                extraText: `${event.details} ${event.rawQuote} ${event.citation} ${sourceText.slice(0, 2500)}`,
-              }),
-              timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
-              entityId,
-              entityName: event.entityName,
-              suggestNewEntity: event.suggestNewEntity && !entityId,
-              newEntityType: event.suggestNewEntity ? (event.newEntityType ?? event.entityType ?? "") : "",
-              category: event.category,
-              title: event.title,
-              snippet: event.rawQuote || event.snippet,
-              details: event.details,
-              confidence: event.confidence,
-              citation: event.citation,
-              sourceCitation: {
-                sourceId: ev.id,
-                sourceName: ev.fileName,
-                sourceType: inferSourceType(ev),
-                pageNumber: event.pageNumber,
-                exactQuote: event.exactQuote || event.rawQuote || event.snippet,
-                boundingBox: event.boundingBox,
-                sourceUrl: ev.sourceUrl,
-              },
-            };
-          }), { replacePendingForEvidence: ev.id });
-        }
-        await db.evidence.update(ev.id, {
-          status: "indexed",
-          lastError: "",
-        });
-        setExtractError(null);
-        if (!stayOnWorkspace) goTo("Verify", caseId);
-      } catch {
-        const message = err instanceof Error ? err.message : "Extraction failed";
-        await db.evidence.update(ev.id, {
-          status: "indexed",
-          lastError: "",
-        });
-        setExtractError(null);
-        void message;
-      }
+      setExtractError(err instanceof Error ? err.message : "Extraction failed");
     } finally {
-      setExtracting(false);
+      if (still()) {
+        setExtracting(false);
+        setIsScanning(false);
+        setScanProgress("");
+      }
     }
   };
 
@@ -2477,22 +2405,8 @@ export default function DesktopApp() {
     scroller?.scrollTo({ top: 0 });
     document.getElementById("pdf-page-1")?.scrollIntoView({ block: "start" });
     if (screen !== "Verify" || !sourceEvidence) return;
-    if (isMm1Source(sourceEvidence.fileName, sourceEvidence.id)) {
-      const evidenceId = sourceEvidence.id;
-      const caseId = sourceEvidence.caseId;
-      void (async () => {
-        const key = extractionCacheKey(caseId, evidenceId);
-        let cached = false;
-        try { cached = Boolean(localStorage.getItem(key)); } catch { cached = false; }
-        const pending = await db.verifyDrafts.where("evidenceId").equals(evidenceId).filter((draft) => draft.status === "pending").count();
-        if (!cached || mm1QueueIsStale(pending)) {
-          try { localStorage.removeItem(key); } catch { /* private mode */ }
-          await ensureMm1Extractions({ force: true, caseId });
-          try { localStorage.setItem(key, JSON.stringify({ version: 3, sourceId: evidenceId })); } catch { /* private mode */ }
-        }
-      })();
-      return;
-    }
+    setIsScanning(true);
+    setScanProgress("Scanning document...");
     void runExtract(sourceEvidence.id, { stayOnWorkspace: true });
   }, [sourceEvidence?.id, screen]);
 
@@ -3300,12 +3214,19 @@ export default function DesktopApp() {
                       <Inbox className="h-3.5 w-3.5 shrink-0" />AI EXTRACTION QUEUE
                     </div>
                     <span className={`shrink-0 whitespace-nowrap ${mono} text-[11px] text-slate-500`}>
-                      {sourcePending.length} UNRESOLVED
+                      {isScanning ? scanProgress || "Scanning document..." : `${sourcePending.length} UNRESOLVED`}
                     </span>
                   </div>
 
                   <div ref={queuePaneRef} className="flex flex-1 flex-col gap-3 overflow-auto px-3 pb-6 pt-5 sm:px-6">
-                    {narrativeQueue.map((d) => (
+                    {isScanning && (
+                      <div className="flex flex-col items-center gap-3 rounded-[14px] border border-dashed border-blue-300 bg-blue-50/60 px-5 py-10 text-center">
+                        <RefreshCw className="h-4 w-4 animate-spin text-blue-600" />
+                        <div className="text-[16px] font-semibold text-slate-800">{scanProgress || "Scanning document..."}</div>
+                        <p className="max-w-[36ch] text-[12.5px] text-slate-500">Reading the file in the browser and rebuilding the queue from this document.</p>
+                      </div>
+                    )}
+                    {!isScanning && narrativeQueue.map((d) => (
                       <VerifyQueueCard
                         key={d.id}
                         draft={d}
@@ -3336,7 +3257,7 @@ export default function DesktopApp() {
                       />
                     ))}
 
-                    {sourcePending.length === 0 && narrativeQueue.length === 0 && (
+                    {!isScanning && sourcePending.length === 0 && narrativeQueue.length === 0 && (
                       <div className="flex flex-col items-center gap-4 rounded-[14px] border border-dashed border-slate-300 px-5 py-10 text-center">
                         <CheckCheck className="h-[18px] w-[18px] text-blue-600" />
                         <div className="text-[20px] font-semibold">
@@ -3358,7 +3279,7 @@ export default function DesktopApp() {
                         />
                       </div>
                     )}
-                    {sourcePending.length === 0 && narrativeQueue.length > 0 && (
+                    {!isScanning && sourcePending.length === 0 && narrativeQueue.length > 0 && (
                       <VerifyIngestDropzone
                         busy={busy || extracting}
                         indexedFiles={intakeIndexedFiles}
