@@ -784,7 +784,7 @@ export default function DesktopApp() {
     setForm(null);
   };
 
-  const timelineConflicts = useTimelineConflicts(caseEvents, caseEntities);
+  const timelineConflicts = useTimelineConflicts(caseEvents, resolvedCaseId);
   const timelineFeed = useMemo(() => {
     const existing = new Set(caseEvents.map((event) => event.id));
     const fromDrafts = draftsAsTimelineEvents(pendingDrafts).filter((event) => {
@@ -889,9 +889,6 @@ export default function DesktopApp() {
         const mins = Math.round(dt / 60000);
         addPair(a.id, b.id, "Impossible transit", `${mins} min between ${pa[0].name} and ${pb[0].name}.`);
       }
-    }
-    if (scopedIds.has("te-a1") && scopedIds.has("te-t2")) {
-      addPair("te-a1", "te-t2", "Impossible transit", "The motel alibi cannot coexist with the Gate 4 toll exit.");
     }
 
     const evidenceMap = new Map(caseEvidence.map((row) => [row.id, row]));

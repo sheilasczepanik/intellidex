@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { EntityRecord, TimelineEventRecord } from "../db";
+import { actionableCaseConflicts, detectCaseConflicts } from "./conflictDetection";
 import { eventRange } from "../types/timeline";
 
 export type TimelineConflict = {
@@ -63,6 +64,19 @@ export function findTimelineConflicts(events: TimelineEventRecord[], entities: E
   return pairs;
 }
 
-export function useTimelineConflicts(events: TimelineEventRecord[], entities: EntityRecord[]) {
-  return useMemo(() => findTimelineConflicts(events, entities), [events, entities]);
+export function useTimelineConflicts(events: TimelineEventRecord[], caseId?: string | null) {
+  return useMemo(() => {
+    const scoped = events.filter((event) => !caseId || event.caseId === caseId);
+    return actionableCaseConflicts(detectCaseConflicts(scoped)).flatMap((conflict) => {
+      const [first, ...rest] = conflict.eventIds;
+      if (!first) return [];
+      return rest.map((other) => ({
+        aId: first,
+        bId: other,
+        entityId: "",
+        label: conflict.title,
+        detail: conflict.description,
+      }));
+    });
+  }, [events, caseId]);
 }

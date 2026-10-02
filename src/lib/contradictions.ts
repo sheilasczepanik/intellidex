@@ -1,4 +1,5 @@
 import type { EntityRecord, TimelineEventRecord } from "../db/schema";
+import { actionableCaseConflicts, detectCaseConflicts } from "./conflictDetection";
 
 const TRANSIT_CONFLICT_MS = 50 * 60 * 1000;
 
@@ -23,8 +24,10 @@ export function detectTimelineConflicts(
     pairs.push({ aId, bId, label, detail });
   };
 
-  if (events.some((e) => e.id === "te-a1") && events.some((e) => e.id === "te-t2")) {
-    addPair("te-a1", "te-t2", "Impossible transit", "The motel alibi cannot coexist with the Gate 4 toll exit.");
+  const scoped = events.filter((event) => event.caseId === events[0]?.caseId);
+  for (const conflict of actionableCaseConflicts(detectCaseConflicts(scoped))) {
+    const [first, ...rest] = conflict.eventIds;
+    rest.forEach((other) => addPair(first, other, conflict.title, conflict.description));
   }
 
   const mentionsPlace = (blob: string, place: EntityRecord) =>
