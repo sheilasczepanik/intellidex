@@ -7,7 +7,7 @@ import {
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
 import { extractEventsFromText, extractEventsFromImage, extractEventsFromRenderedPages } from "./lib/extractClient";
-import { extractPdfText, renderPdfPagesToJpeg, documentText } from "./lib/pdfHelpers";
+import { extractPdfText, documentText } from "./lib/pdfHelpers";
 import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource, MAURA_FALLBACK_ENTITIES } from "./lib/mauraExtractFallback";
 import type { ExtractPreview } from "./IngestDrawer";
 import { calculateSHA256, calculateSHA256FromText } from "./lib/cryptoUtils";
@@ -55,9 +55,7 @@ import { isSecondaryEvidence, isUncorroboratedEntity } from "./lib/sourceTier";
 import MediaProvenanceBadge from "./MediaProvenanceBadge";
 import {
   CLAUDE_MAX_CHARS,
-  CLAUDE_MAX_PAGES,
   CLAUDE_RETRY_PAGES,
-  windowSourceText,
   type ExtractBundle,
   type ExtractedEvent,
 } from "./lib/extractSchema";
@@ -1774,7 +1772,7 @@ export default function DesktopApp() {
       evidenceId: ev.id,
       stage: isPdf ? "pdf" : "claude",
       currentPage: 0,
-      totalPages: Math.min(opts?.maxPages ?? CLAUDE_RETRY_PAGES, ev.pageCount || CLAUDE_RETRY_PAGES),
+      totalPages: ev.pageCount || 0,
       startedAt,
       llmStartedAt: isPdf ? null : Date.now(),
     });
@@ -1801,33 +1799,35 @@ export default function DesktopApp() {
         bundle = mauraVerifiedBundle();
         setExtractError(null);
       } else if (isPdf && ev.fileBase64) {
-        const pageNumber = Math.max(1, verifyPdfPageRef.current || 1);
-        const rendered = await renderPdfPagesToJpeg(ev.fileBase64, {
-          maxPages: 1,
-          pageNumbers: [pageNumber],
-          scale: 1.5,
-          quality: 0.82,
+        const extracted = await extractPdfText(ev.fileBase64, {
           onProgress: (current, total) => {
             setIngestJob((job) => (job && job.evidenceId === ev.id
-              ? { ...job, stage: "render", currentPage: current, totalPages: total }
+              ? { ...job, stage: "pdf", currentPage: current, totalPages: total }
               : job));
           },
         });
-        if (rendered.pageCount && rendered.pageCount !== ev.pageCount) {
-          await db.evidence.update(ev.id, { pageCount: rendered.pageCount });
-        }
-        setIngestJob((job) => (job && job.evidenceId === ev.id
-          ? { ...job, stage: "claude", llmStartedAt: Date.now(), currentPage: 1, totalPages: 1 }
-          : job));
-        bundle = await extractEventsFromRenderedPages({
-          fileName: ev.fileName,
-          pages: rendered.pages,
-          entities: hints,
+        if (extracted.text.trim()) sourceText = extracted.text;
+        await db.evidence.update(ev.id, {
+          rawText: sourceText,
+          fullText: sourceText,
+          pageCount: extracted.pageCount || ev.pageCount,
+          wordCount: sourceText.split(/\s+/).filter(Boolean).length,
         });
-        bundle = {
-          ...bundle,
-          events: bundle.events.map((event) => ({ ...event, pageNumber: event.pageNumber || pageNumber })),
-        };
+        setIngestJob((job) => (job && job.evidenceId === ev.id
+          ? {
+            ...job,
+            stage: "claude",
+            llmStartedAt: Date.now(),
+            currentPage: extracted.pageCount,
+            totalPages: extracted.pageCount,
+          }
+          : job));
+        bundle = await extractEventsFromText({
+          text: sourceText,
+          fileName: ev.fileName,
+          entities: hints,
+          summary: opts?.summary,
+        });
       } else if (ev.imageBase64 || (ev.fileBase64 && (ev.mediaType || "").startsWith("image/"))) {
         setIngestJob((job) => (job && job.evidenceId === ev.id
           ? { ...job, stage: "claude", llmStartedAt: Date.now() }
@@ -1844,15 +1844,10 @@ export default function DesktopApp() {
           ? { ...job, stage: "claude", llmStartedAt: Date.now() }
           : job));
         bundle = await extractEventsFromText({
-          text: windowSourceText(sourceText, {
-            maxPages: opts?.maxPages ?? CLAUDE_MAX_PAGES,
-            maxChars: opts?.maxChars ?? CLAUDE_MAX_CHARS,
-          }),
+          text: sourceText,
           fileName: ev.fileName,
           entities: hints,
           summary: opts?.summary,
-          maxPages: opts?.maxPages ?? CLAUDE_MAX_PAGES,
-          maxChars: opts?.maxChars ?? CLAUDE_MAX_CHARS,
         });
       }
 
@@ -1895,8 +1890,8 @@ export default function DesktopApp() {
               timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
               entityId,
               entityName: event.entityName,
-              suggestNewEntity: !entityId,
-              newEntityType: event.newEntityType ?? event.entityType ?? "",
+              suggestNewEntity: event.suggestNewEntity && !entityId,
+              newEntityType: event.suggestNewEntity ? (event.newEntityType ?? event.entityType ?? "") : "",
               category: event.category,
               title: event.title,
               snippet: event.rawQuote || event.snippet,
@@ -1992,8 +1987,8 @@ export default function DesktopApp() {
           timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
           entityId,
           entityName: event.entityName,
-          suggestNewEntity: !entityId,
-          newEntityType: event.newEntityType ?? event.entityType ?? "",
+          suggestNewEntity: event.suggestNewEntity && !entityId,
+          newEntityType: event.suggestNewEntity ? (event.newEntityType ?? event.entityType ?? "") : "",
           category: event.category,
           title: event.title,
           snippet: event.rawQuote || event.snippet,
@@ -2049,8 +2044,8 @@ export default function DesktopApp() {
               timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
               entityId,
               entityName: event.entityName,
-              suggestNewEntity: !entityId,
-              newEntityType: event.newEntityType ?? event.entityType ?? "",
+              suggestNewEntity: event.suggestNewEntity && !entityId,
+              newEntityType: event.suggestNewEntity ? (event.newEntityType ?? event.entityType ?? "") : "",
               category: event.category,
               title: event.title,
               snippet: event.rawQuote || event.snippet,
@@ -2136,8 +2131,8 @@ export default function DesktopApp() {
           timestampLabel: event.timestampLabel || event.timestamp || "Unknown",
           entityId,
           entityName: event.entityName,
-          suggestNewEntity: !entityId,
-          newEntityType: event.newEntityType ?? event.entityType ?? "",
+          suggestNewEntity: event.suggestNewEntity && !entityId,
+          newEntityType: event.suggestNewEntity ? (event.newEntityType ?? event.entityType ?? "") : "",
           category: event.category,
           title: event.title,
           snippet: event.rawQuote || event.snippet,

@@ -1,19 +1,19 @@
 import { getLocalApiKey, getLocalProvider } from "./settings";
 import type { ExtractedEvent, ExtractBundle, ExtractEntityHint, ScoutedEntity } from "./extractSchema";
 import {
-  EXTRACT_CORE_PAGES,
-  EXTRACT_MODEL_MAX_CHARS,
+  EXTRACT_PAGES_PER_CHUNK,
   EXTRACT_SERVICE_UNAVAILABLE,
   coerceExtractBundle,
+  mergeExtractBundles,
   sanitizeExtractText,
-  windowSourceText,
+  splitPageChunks,
 } from "./extractSchema";
 import { mauraFallbackBundle, mauraVerifiedBundle, isLocalMauraExtractSource } from "./mauraExtractFallback";
 import { locateSnippet } from "./quoteAnchors";
 
 export type { ExtractedEvent, ExtractEntityHint, ScoutedEntity };
 
-const EXTRACT_TIMEOUT_MS = 180_000;
+const EXTRACT_TIMEOUT_MS = 420_000;
 
 function clipBody(text: string, max = 800) {
   return text.replace(/\s+/g, " ").trim().slice(0, max);
@@ -112,15 +112,16 @@ async function extractOneTextChunk(input: {
   fileName: string;
   entities: ExtractEntityHint[];
   summary?: boolean;
-  maxPages?: number;
-  maxChars?: number;
 }): Promise<ExtractBundle> {
-  const cap = Math.min(input.maxChars ?? EXTRACT_MODEL_MAX_CHARS, EXTRACT_MODEL_MAX_CHARS);
-  const text = windowSourceText(sanitizeExtractText(input.text, 250_000), {
-    maxPages: input.maxPages ?? EXTRACT_CORE_PAGES,
-    maxChars: cap,
-  });
-  return postExtract({ type: "text", ...input, text, maxChars: cap }, text, input.fileName);
+  const text = sanitizeExtractText(input.text, Math.max(input.text.length, 1));
+  return postExtract({
+    type: "text",
+    text,
+    fileName: input.fileName,
+    entities: input.entities,
+    summary: input.summary,
+    maxChars: text.length,
+  }, text, input.fileName);
 }
 
 export async function extractEventsFromText(input: {
@@ -131,9 +132,22 @@ export async function extractEventsFromText(input: {
   maxPages?: number;
   maxChars?: number;
 }): Promise<ExtractBundle> {
+  void input.maxPages;
+  void input.maxChars;
   if (isLocalMauraExtractSource(input.fileName)) return mauraVerifiedBundle();
-  console.log("[Extraction] Ingested text length:", input.text.length);
-  let bundle = await extractOneTextChunk({ ...input, maxChars: EXTRACT_MODEL_MAX_CHARS });
+  const chunks = splitPageChunks(input.text, EXTRACT_PAGES_PER_CHUNK);
+  const selected = input.summary ? chunks.slice(0, 1) : chunks;
+  console.log("[Extraction] Ingested text length:", input.text.length, "page chunks:", selected.length);
+  const parts: ExtractBundle[] = [];
+  for (const chunk of selected) {
+    parts.push(await extractOneTextChunk({
+      text: chunk,
+      fileName: input.fileName,
+      entities: input.entities,
+      summary: input.summary,
+    }));
+  }
+  const bundle = mergeExtractBundles(parts);
   console.log("[Extraction] Parsed items count:", bundle.events.length);
   return bundle;
 }
@@ -148,7 +162,7 @@ export async function extractEventsFromRenderedPages(input: {
     type: "rendered_pages",
     filename: input.fileName,
     fileName: input.fileName,
-    pages: input.pages.slice(0, 1),
+    pages: input.pages.slice(0, 4),
     entities: input.entities,
   }, input.fileName, input.fileName);
   console.log("[Extraction] Rendered-page items count:", bundle.events.length);

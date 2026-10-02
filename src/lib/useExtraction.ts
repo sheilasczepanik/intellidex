@@ -16,3 +16,4 @@ export {
   MAURA_FALLBACK_ENTITIES,
 } from "./mauraExtractFallback";
 export { renderPdfPagesToJpeg } from "./pdfHelpers";
+export { EXTRACT_PAGES_PER_CHUNK, splitPageChunks } from "./extractSchema";

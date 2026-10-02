@@ -59,48 +59,62 @@ export type ExtractedEvent = {
   tier?: "primary" | "secondary";
 };
 
-export const EXTRACT_SYSTEM = `You are an expert cold case investigator analyzing law enforcement reports.
-Extract every single actionable investigative fact from this document.
-Do not just extract high-level tags. Extract specific actions, officer statements, witness responses, vehicle descriptions, dispatch calls, and physical observations.
-Cover:
-- Persons and roles: full names, agency titles, badge numbers.
-- Physical attributes and demographics: ages, gender, clothing, behaviors.
-- Locations and perimeters: exact routes, junctions, landmarks.
-- Timestamps and durations: precise hours and dispatch times.
-- Vehicles and evidence: makes, models, colors, condition.
-- Actions, inquiries, and responses: what was done, what was asked, and what the witness answered.
-Return strictly valid JSON:
+export const EXTRACT_SYSTEM = `You are an expert cold case investigator analyzing official police incident and supplemental reports.
+Extract all actionable investigative intelligence from this document into structured findings.
+
+Do NOT just return isolated names or keyword tags. Every item must have context, exact timestamps (if noted), locations, and the surrounding circumstance.
+
+Extract findings across these categories:
+1. "TIMELINE_EVENT": Any specific movement, sighting, dispatch call, phone call, or accident (with exact or approximate timestamp).
+2. "WITNESS_STATEMENT": Statements, quotes, and interviews with friends, family, coworkers, or witnesses.
+3. "OFFICIAL_ACTION": Actions taken by police (well-being checks, forensic searches, searches of dorm room, tow logs, computer subpoenas).
+4. "PHYSICAL_EVIDENCE": Physical objects found (rag in tailpipe, alcohol containers, packed dorm boxes, ATM receipts, computer hard drive).
+5. "PERSON": Named individuals (detectives, witnesses, supervisors, family members) with their specific role.
+
+For each finding, return a JSON object with:
 {
-  "entities": [
-    {
-      "type": "Person" | "Location" | "Vehicle" | "Timestamp" | "Action_Taken" | "Witness_Statement" | "Physical_Observation",
-      "title": "Concise label, e.g. Spotlight Search on Route 112",
-      "details": "Detailed context of what occurred, questions asked, or statements made",
-      "exactSnippet": "Contiguous verbatim string copied from the document for exact highlighting",
-      "confidence": 0.9
-    }
-  ]
+  "id": string,
+  "category": "TIMELINE_EVENT" | "WITNESS_STATEMENT" | "OFFICIAL_ACTION" | "PHYSICAL_EVIDENCE" | "PERSON",
+  "title": string,
+  "timestamp": string | null,
+  "location": string | null,
+  "details": string,
+  "exactSnippet": string,
+  "sourcePage": number,
+  "confidence": number
 }
-exactSnippet must be copied character-for-character from the source, including the original spelling. Do not paraphrase it.`;
+exactSnippet must be a contiguous verbatim string from the document for yellow highlight anchoring. Do not paraphrase it.
+If this excerpt is the full document, return 20 to 40 findings covering the entire narrative arc.
+If this excerpt is one page slice, return every distinct finding in that slice. Do not invent filler to hit a count.
+Return strictly valid JSON as {"findings":[ ... ]}.`;
 
 export function unwrapModelJson(raw: string) {
   let s = raw.trim();
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(s);
   if (fenced) s = fenced[1].trim();
   else s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
-  const start = s.indexOf("{");
+  const objStart = s.indexOf("{");
+  const arrStart = s.indexOf("[");
+  if (arrStart >= 0 && (objStart < 0 || arrStart < objStart)) {
+    const end = s.lastIndexOf("]");
+    if (end > arrStart) return s.slice(arrStart, end + 1);
+  }
   const end = s.lastIndexOf("}");
-  if (start < 0 || end < 0 || end <= start) {
+  if (objStart < 0 || end < 0 || end <= objStart) {
     throw new Error("Model did not return JSON.");
   }
-  return s.slice(start, end + 1);
+  return s.slice(objStart, end + 1);
 }
 
 export function parseExtractedEvents(raw: string): ExtractedEvent[] {
   try {
-    const parsed = JSON.parse(unwrapModelJson(raw)) as { items?: unknown; events?: unknown; entities?: unknown };
+    const parsed = JSON.parse(unwrapModelJson(raw)) as { items?: unknown; events?: unknown; entities?: unknown; findings?: unknown } | unknown[];
+    if (Array.isArray(parsed)) {
+      return parsed.map(normalizeEvent).filter((e) => e.title.trim() || e.rawQuote.trim() || e.entityName.trim());
+    }
     const fromCards = Array.isArray(parsed.entities) ? parsed.entities.filter(isIntelExtractCard) : [];
     const rows = [
+      ...(Array.isArray(parsed.findings) ? parsed.findings : []),
       ...(Array.isArray(parsed.items) ? parsed.items : []),
       ...(Array.isArray(parsed.events) ? parsed.events : []),
       ...fromCards,
@@ -115,8 +129,8 @@ export function parseExtractedEvents(raw: string): ExtractedEvent[] {
 export function isIntelExtractCard(row: unknown): boolean {
   if (!row || typeof row !== "object") return false;
   const r = row as Record<string, unknown>;
-  const t = String(r.type ?? "").toLowerCase().replace(/[\s-]+/g, "_");
-  if (!/^(person|location|timestamp|timeline_event|timeline|vehicle|evidence|exhibit|action_taken|witness_statement|physical_observation)$/.test(t)) return false;
+  const t = String(r.category ?? r.type ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  if (!/^(person|location|timestamp|timeline_event|timeline|vehicle|evidence|exhibit|action_taken|witness_statement|physical_observation|official_action|physical_evidence)$/.test(t)) return false;
   return Boolean(
     String(r.title ?? r.name ?? "").trim()
     || String(r.exactSnippet ?? r.quote ?? r.details ?? "").trim(),
@@ -125,6 +139,10 @@ export function isIntelExtractCard(row: unknown): boolean {
 
 function normalizeCategory(value: unknown): ExtractCategory {
   const s = String(value ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  if (s.includes("official_action")) return "communication";
+  if (s.includes("physical_evidence")) return "evidence";
+  if (s.includes("timeline_event")) return "time";
+  if (s.includes("witness_statement")) return "communication";
   if (s.includes("action_taken") || s.includes("action") || s.includes("inquiry") || s.includes("response")) return "communication";
   if (s.includes("witness_statement") || s.includes("witness") || s.includes("statement")) return "communication";
   if (s.includes("physical_observation") || s.includes("physical") || s.includes("demographic") || s.includes("clothing")) return "physical_description";
@@ -171,22 +189,29 @@ function normalizeEvent(row: unknown): ExtractedEvent {
   const ts = r.timestamp === null || r.timestamp === undefined ? composedTs : String(r.timestamp).trim();
   const timestampLabel = String(r.timestampLabel ?? (composedTs || ts || "Unknown")).trim() || "Unknown";
   const title = String(r.title ?? r.name ?? "Untitled fact").trim() || "Untitled fact";
-  const entityName = String(r.entityName ?? r.name ?? title.replace(/\s*\([^)]*\)\s*$/, "").trim() ?? "Unknown").trim() || "Unknown";
+  const location = r.location == null ? "" : String(r.location).trim();
+  const linksRoster = category === "person" || category === "evidence" || category === "vehicle" || category === "location";
+  const entityName = linksRoster
+    ? (String(r.entityName ?? r.name ?? title).trim() || title)
+    : location;
   const entityId = typeof r.entityId === "string" && r.entityId.trim() ? r.entityId.trim() : null;
   const confRaw = Number(r.confidence);
   const confidence = Number.isFinite(confRaw)
     ? Math.min(0.99, Math.max(0.8, confRaw > 1 ? confRaw / 100 : confRaw))
     : 0.88;
-  const pageNumber = parsePageNumber(r.pageNumber ?? r.page);
+  const pageNumber = parsePageNumber(r.pageNumber ?? r.sourcePage ?? r.page);
   const boundingBox = normalizeBoundingBox(r.boundingBox ?? r.bbox);
-  const details = String(r.details ?? r.summary ?? "").trim();
+  const body = String(r.details ?? r.summary ?? "").trim();
+  const details = location && !body.toLowerCase().includes(location.toLowerCase())
+    ? `${body}${body ? " " : ""}Location: ${location}`.trim()
+    : body;
   return {
     timestamp: ts || null,
     timestampLabel,
     entityId,
     entityName,
     entityType,
-    suggestNewEntity: r.suggestNewEntity == null ? !entityId : Boolean(r.suggestNewEntity),
+    suggestNewEntity: r.suggestNewEntity == null ? linksRoster && !entityId : Boolean(r.suggestNewEntity),
     newEntityType: entityType,
     category,
     title,
@@ -493,12 +518,13 @@ export function parseExtractBundle(raw: string): ExtractBundle {
 }
 
 export const EXTRACT_MAX_CHARS = 60_000;
-/** ~4k tokens — first 4–5 pages so GPT-4o returns in a few seconds. */
-export const EXTRACT_MODEL_MAX_CHARS = 16_000;
+/** Room for a four-page police narrative without dropping later pages. */
+export const EXTRACT_MODEL_MAX_CHARS = 48_000;
 export const CLAUDE_MAX_CHARS = EXTRACT_MODEL_MAX_CHARS;
+export const EXTRACT_PAGES_PER_CHUNK = 4;
 export const EXTRACT_SERVICE_UNAVAILABLE =
   "Extraction service unavailable (verify API key or document size)";
-export const EXTRACT_CORE_PAGES = 1;
+export const EXTRACT_CORE_PAGES = EXTRACT_PAGES_PER_CHUNK;
 export const CLAUDE_MAX_PAGES = EXTRACT_CORE_PAGES;
 export const CLAUDE_RETRY_PAGES = EXTRACT_CORE_PAGES;
 export const EXTRACT_CHUNK_TRIGGER = EXTRACT_MAX_CHARS;
@@ -615,11 +641,25 @@ export function sanitizeExtractText(text: string, maxChars = CLAUDE_MAX_CHARS) {
   return `${cleaned.slice(0, maxChars)}\n\n[Truncated for model window.]`;
 }
 
+/** Group a full police report into 4-page windows. Every page is kept. */
+export function splitPageChunks(text: string, pagesPerChunk = EXTRACT_PAGES_PER_CHUNK) {
+  const parts = text.split(/(?=---\s*PAGE\s+\d+\s*---)/i).map((part) => part.trim()).filter(Boolean);
+  if (parts.length <= 1) return [text];
+  const size = Math.max(1, pagesPerChunk);
+  const chunks: string[] = [];
+  for (let i = 0; i < parts.length; i += size) {
+    chunks.push(parts.slice(i, i + size).join("\n\n"));
+  }
+  return chunks;
+}
+
 export function windowSourceText(text: string, opts?: { maxPages?: number; maxChars?: number }) {
-  const maxPages = opts?.maxPages ?? CLAUDE_MAX_PAGES;
-  const maxChars = opts?.maxChars ?? CLAUDE_MAX_CHARS;
-  const chunks = text.split(/(?=--- Page \d+ ---)/).map((part) => part.trim()).filter(Boolean);
-  const paged = chunks.length > 1 ? chunks.slice(0, Math.max(1, maxPages)).join("\n\n") : text;
+  const maxPages = opts?.maxPages;
+  const maxChars = opts?.maxChars ?? Number.MAX_SAFE_INTEGER;
+  const chunks = text.split(/(?=---\s*PAGE\s+\d+\s*---)/i).map((part) => part.trim()).filter(Boolean);
+  const paged = chunks.length > 1 && maxPages != null
+    ? chunks.slice(0, Math.max(1, maxPages)).join("\n\n")
+    : text;
   return sanitizeExtractText(paged, maxChars);
 }
 
@@ -645,16 +685,16 @@ export function userExtractPrompt(
   entities: ExtractEntityHint[],
   opts?: { summary?: boolean; maxPages?: number; maxChars?: number },
 ) {
-  const excerpt = prioritizeLegalFacts(text, opts?.maxChars ?? EXTRACT_MODEL_MAX_CHARS);
+  const excerpt = opts?.maxChars ? prioritizeLegalFacts(text, opts.maxChars) : text;
   return [
     `Source file: ${fileName}`,
-    "Return JSON { \"entities\": [ ... ] } covering Person, Location, Vehicle, Timestamp, Action_Taken, Witness_Statement, and Physical_Observation.",
-    "Each card needs exactSnippet copied EXACTLY as a contiguous string visible on the page for highlighting. Do not paraphrase the snippet.",
-    "Extract actionable facts: officer names and badge numbers, clothing and behavior, routes and landmarks, dispatch times, vehicle descriptions, actions taken, and questions with the witness's answer.",
+    "Return JSON { \"findings\": [ ... ] } covering TIMELINE_EVENT, WITNESS_STATEMENT, OFFICIAL_ACTION, PHYSICAL_EVIDENCE, and PERSON.",
+    "Each finding needs exactSnippet copied EXACTLY as a contiguous string visible on the page for highlighting. Do not paraphrase the snippet.",
+    "Cover the whole excerpt, including later pages. Include timestamps, locations, and the surrounding circumstance.",
     "OCR cleanup: correct obvious scanning typos, expand garbled place names, and keep incident dates separate from report dates.",
     opts?.summary
       ? "Mode: condensed summary of this excerpt only. Prefer fewer, high-confidence cards with verbatim quotes."
-      : "Mode: exhaustive extraction of every actionable investigative fact in this excerpt — people and roles, physical observations, locations, timestamps, vehicles, actions taken, and witness answers.",
+      : "Mode: 20 to 40 findings across the narrative arc of this excerpt.",
     "Known case entities (match names when possible; still emit a card even if unmatched):",
     JSON.stringify(entities, null, 2),
     "",

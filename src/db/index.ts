@@ -961,7 +961,7 @@ export async function confirmVerifyDraft(id: string) {
   const roster = await db.entities.where("caseId").equals(draft.caseId).toArray();
 
   let entityId = draft.entityId && roster.some((e) => e.id === draft.entityId) ? draft.entityId : "";
-  if (!entityId && needle) {
+  if (!entityId && draft.suggestNewEntity && needle) {
     const exact = roster.find((e) => e.name.trim().toLowerCase() === needle && (!wantedType || e.type === wantedType));
     const loose = roster.find((e) => {
       if (namesLooselyMatch(e.name, draft.entityName)) return true;
@@ -977,7 +977,7 @@ export async function confirmVerifyDraft(id: string) {
     || source?.sourceClass === "press_release"
     || source?.sourceType === "web_article";
 
-  if (!entityId) {
+  if (!entityId && draft.suggestNewEntity) {
     const created = await createEntity({
       caseId: draft.caseId,
       name: draft.entityName || "Unnamed",

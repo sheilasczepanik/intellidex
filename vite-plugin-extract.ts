@@ -46,7 +46,12 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
         payload = { text: rawBody };
       }
       if (typeof payload.text === "string") {
-        payload = { ...payload, text: prioritizeLegalFacts(payload.text, EXTRACT_MODEL_MAX_CHARS) };
+        const text = payload.text;
+        const paged = /---\s*PAGE\s+\d+\s*---/i.test(text);
+        payload = {
+          ...payload,
+          text: paged ? text : prioritizeLegalFacts(text, EXTRACT_MODEL_MAX_CHARS),
+        };
       }
 
       const headerKey = req.headers["x-dossier-key"];

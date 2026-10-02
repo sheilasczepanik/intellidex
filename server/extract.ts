@@ -81,7 +81,7 @@ export async function runRenderedPagesExtraction(input: {
   const images = input.pages.flatMap((p) => {
     const data = stripImage(p.imageBase64);
     return data ? [{ mimeType: "image/jpeg" as const, data }] : [];
-    }).slice(0, 1);
+    }).slice(0, 4);
   if (!images.length) return structuredToBundle({ entities: [], events: [] });
   const pageNumber = input.pages[0]?.pageNumber || 1;
   const { bundle } = await runStructuredExtraction({
@@ -166,7 +166,7 @@ export async function dispatchExtract(input: {
 
     if (kind === "rendered_pages" || pages.length) {
       bundle = await runRenderedPagesExtraction({
-        pages: pages.slice(0, 1).map((p, i) => ({ pageNumber: p.pageNumber || i + 1, imageBase64: p.imageBase64 || "" })),
+        pages: pages.slice(0, 4).map((p, i) => ({ pageNumber: p.pageNumber || i + 1, imageBase64: p.imageBase64 || "" })),
         fileName,
         apiKey: resolved.apiKey,
         model: resolved.model,
@@ -187,7 +187,7 @@ export async function dispatchExtract(input: {
         text,
         fileName,
         entities,
-        maxChars: EXTRACT_MODEL_MAX_CHARS,
+        maxChars: Math.min(Math.max(Number(payload.maxChars) || text.length || EXTRACT_MODEL_MAX_CHARS, 1), 80_000),
         summary: Boolean(payload.summary),
       })).bundle;
     }

@@ -2,10 +2,10 @@ import OpenAI from "openai";
 import { z } from "zod";
 import {
   EXTRACT_MODEL_MAX_CHARS,
+  EXTRACT_PAGES_PER_CHUNK,
   EXTRACT_SERVICE_UNAVAILABLE,
   EXTRACT_SYSTEM,
   coerceExtractBundle,
-  prioritizeLegalFacts,
   userExtractPrompt,
   type ExtractBundle,
   type ExtractEntityHint,
@@ -51,6 +51,17 @@ export const structuredEventSchema = z.object({
 });
 
 export const structuredExtractSchema = z.object({
+  findings: z.array(z.object({
+    id: z.string().optional(),
+    category: z.enum(["TIMELINE_EVENT", "WITNESS_STATEMENT", "OFFICIAL_ACTION", "PHYSICAL_EVIDENCE", "PERSON"]),
+    title: z.string(),
+    timestamp: z.string().nullable().optional(),
+    location: z.string().nullable().optional(),
+    details: z.string(),
+    exactSnippet: z.string(),
+    sourcePage: z.number(),
+    confidence: z.number(),
+  })).optional(),
   entities: z.array(z.union([intelExtractCardSchema, structuredEntitySchema])).optional(),
   events: z.array(structuredEventSchema).optional(),
   subject: z.object({
@@ -144,13 +155,13 @@ export async function runStructuredExtraction(input: {
   images?: MediaPart[];
 }): Promise<{ bundle: ExtractBundle; engine: string }> {
   void input.engine;
-  const images = (input.images ?? []).slice(0, 1);
+  const images = (input.images ?? []).slice(0, EXTRACT_PAGES_PER_CHUNK);
   const visionFirst = images.length > 0;
-  const cap = Math.min(input.maxChars ?? EXTRACT_MODEL_MAX_CHARS, EXTRACT_MODEL_MAX_CHARS);
+  const cap = Math.min(input.maxChars ?? EXTRACT_MODEL_MAX_CHARS, 80_000);
   const prompt = visionFirst
     ? `Examine this scanned case document or report image (${input.fileName}). Extract all verified investigative facts and return strictly valid JSON matching the system schema. exactSnippet must be a verbatim contiguous string visible on the page.`
     : userExtractPrompt(
-      prioritizeLegalFacts(input.text || "Extract facts from the source.", cap),
+      input.text || "Extract facts from the source.",
       input.fileName,
       input.entities,
       { summary: input.summary, maxPages: input.maxPages, maxChars: cap },
@@ -183,7 +194,7 @@ async function extractWithGpt4o(input: {
       model: "gpt-4o",
       response_format: { type: "json_object" },
       temperature: 0.1,
-      max_tokens: 1500,
+      max_tokens: 8000,
       messages: [
         { role: "system", content: EXTRACT_SYSTEM },
         { role: "user", content: userContent },
