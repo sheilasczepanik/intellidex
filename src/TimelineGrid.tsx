@@ -43,12 +43,14 @@ export default function TimelineGrid<T extends TimelineGridLane>({
   collapsed,
   onToggle,
   renderLane,
+  showInactiveLanes = false,
 }: {
   lanes: T[];
   subjectName?: string;
   collapsed: Record<SwimlaneGroupId, boolean>;
   onToggle: (id: SwimlaneGroupId) => void;
   renderLane: (lane: T, groupId: SwimlaneGroupId) => ReactNode;
+  showInactiveLanes?: boolean;
 }) {
   const groups = useTimelineEvents(lanes, subjectName);
 
@@ -59,9 +61,13 @@ export default function TimelineGrid<T extends TimelineGridLane>({
         const Icon = chrome.Icon;
         const closed = collapsed[group.id];
         const title = chrome.title(subjectName);
-        const activeLanes = group.rows.filter((row) => (row.placed?.length ?? row.count) > 0).length;
+        const rows = showInactiveLanes
+          ? group.rows
+          : group.rows.filter((row) => (row.placed?.length ?? row.count) > 0);
+        const activeLanes = rows.filter((row) => (row.placed?.length ?? row.count) > 0).length;
+        if (!showInactiveLanes && rows.length === 0) return null;
         return (
-          <section key={group.id} className="w-full">
+          <section key={group.id} className="min-w-full w-full">
             <div className={`relative w-full ${GROUP_WASH[group.id]}`}>
               <button
                 type="button"
@@ -85,8 +91,8 @@ export default function TimelineGrid<T extends TimelineGridLane>({
               className={`grid transition-[grid-template-rows] duration-200 ease-out ${closed ? "grid-rows-[0fr]" : "grid-rows-[1fr]"}`}
             >
               <div className="overflow-hidden">
-                {group.rows.length === 0 ? (
-                  <div className="flex min-h-9 items-center border-b border-slate-100 bg-slate-50/60">
+                {rows.length === 0 ? (
+                  <div className="flex min-h-9 w-full min-w-full items-center border-b border-slate-100 bg-slate-50/60">
                     <div
                       className="sticky left-0 flex min-h-9 items-center bg-slate-50/90 px-5 text-[12px] text-slate-400"
                       style={{ width: LANE_PAD }}
@@ -94,7 +100,7 @@ export default function TimelineGrid<T extends TimelineGridLane>({
                       No recorded movements for this date
                     </div>
                   </div>
-                ) : group.rows.map((lane) => renderLane(lane, group.id))}
+                ) : rows.map((lane) => renderLane(lane, group.id))}
               </div>
             </div>
           </section>

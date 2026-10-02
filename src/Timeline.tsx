@@ -119,7 +119,7 @@ export function TimelineDateStrip({
 }) {
   if (!dayKeys.length) return null;
   return (
-    <div className="flex shrink-0 gap-1.5 overflow-x-auto border-b border-slate-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950">
+    <div className="flex w-full min-w-0 shrink-0 gap-1.5 overflow-x-auto border-b border-slate-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950">
       {dayKeys.map((day) => {
         const count = dayCounts[day] ?? 0;
         const active = spanKeys.includes(day);
@@ -166,7 +166,7 @@ export default function TimelineToolbar({
   onTickPreset,
 }: Props) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
+    <div className="flex w-full min-w-0 flex-wrap items-center gap-1.5">
       <div className="inline-flex h-8 items-center rounded-lg border border-slate-200 bg-white p-0.5 dark:border-zinc-700 dark:bg-zinc-900" role="group" aria-label="View scope">
         {([1, 2] as DayScope[]).map((scope) => (
           <button

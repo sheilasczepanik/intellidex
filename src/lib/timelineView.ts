@@ -167,8 +167,37 @@ export function midnightsInRange(start: number, end: number) {
   return marks;
 }
 
+/** Midnight-to-midnight bounds for the selected day pills, so a single cluster cannot collapse the scale. */
+export function calendarSpanBounds(dayKeys: string[]) {
+  if (!dayKeys.length) return null;
+  const minTime = Date.parse(`${dayKeys[0]}T00:00:00`);
+  const last = dayKeys[dayKeys.length - 1];
+  const maxTime = Date.parse(`${shiftDayKey(last, 1)}T00:00:00`);
+  if (!Number.isFinite(minTime) || !Number.isFinite(maxTime) || maxTime <= minTime) return null;
+  return { minTime, maxTime };
+}
+
+export function resolveAxisBounds(opts: {
+  timestamps: number[];
+  fallbackStart: number;
+  dayKeys: string[];
+  fullDay: boolean;
+}) {
+  if (opts.fullDay && opts.dayKeys.length) {
+    const cal = calendarSpanBounds(opts.dayKeys);
+    if (cal) return cal;
+  }
+  const bounds = eventAxisBounds(opts.timestamps, opts.fallbackStart);
+  const span = bounds.maxTime - bounds.minTime;
+  if (span < 6 * HOUR_MS) {
+    const mid = bounds.minTime + span / 2;
+    return { minTime: mid - 3 * HOUR_MS, maxTime: mid + 3 * HOUR_MS };
+  }
+  return bounds;
+}
+
 export function fitPxPerHour(spanMs: number, viewportWidth: number) {
-  const hours = Math.max(2, spanMs / HOUR_MS);
-  const avail = Math.max(280, viewportWidth - LANE_PAD - 280);
-  return Math.max(22, Math.min(180, avail / hours));
+  const hours = Math.max(1, spanMs / HOUR_MS);
+  const avail = Math.max(320, viewportWidth - LANE_PAD);
+  return Math.max(8, avail / hours);
 }

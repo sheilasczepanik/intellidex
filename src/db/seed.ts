@@ -10,7 +10,7 @@ import {
 import type { EntityRelationship } from "../types";
 import { hashStoredEvidenceBytes } from "../lib/cryptoUtils";
 import { PLACEHOLDER_CCTV_STILL } from "../lib/placeholderStills";
-import { isMm1Source, mm1DraftRows, mm1ReportText } from "../data/caseFixtures";
+import { isMm1Source, MM_1_EXTRACTIONS, mm1DraftRows, mm1ReportText } from "../data/caseFixtures";
 
 const hour = 60 * 60 * 1000;
 const day = 24 * hour;
@@ -196,8 +196,16 @@ export async function backfillEvidenceCustody() {
   }
 }
 
-/** Put MM_1.pdf and its seven findings on the Maura Murray case when they are not already stored. */
-export async function ensureMm1Extractions() {
+let mm1Queue: Promise<void> = Promise.resolve();
+
+/** Put MM_1.pdf and the full MM_1_EXTRACTIONS set on the case. A short pending queue is replaced. */
+export function ensureMm1Extractions(opts?: { force?: boolean }) {
+  const job = mm1Queue.then(() => writeMm1Extractions(opts));
+  mm1Queue = job.then(() => undefined, () => undefined);
+  return job;
+}
+
+async function writeMm1Extractions(opts?: { force?: boolean }) {
   const caseId = "CASE-0041";
   const caseRow = await db.cases.get(caseId);
   if (!caseRow) return;
@@ -224,7 +232,7 @@ export async function ensureMm1Extractions() {
       lastError: "",
     };
     await db.evidence.add(row);
-  } else if (!row.fileBase64 && !(row.fullText || row.rawText || "").includes("returned borrowed clothes")) {
+  } else if (!row.fileBase64 && !(row.fullText || row.rawText || "").includes("It's my sister not me")) {
     await db.evidence.update(row.id, {
       rawText: transcript,
       fullText: transcript,
@@ -234,10 +242,22 @@ export async function ensureMm1Extractions() {
     });
   }
   const existing = await db.verifyDrafts.where("evidenceId").equals(row.id).toArray();
-  if (existing.some((draft) => draft.citation === "mm1-fixture" || draft.id.startsWith("mm1-"))) return;
-  const stale = existing.filter((draft) => draft.status === "pending").map((draft) => draft.id);
-  if (stale.length) await db.verifyDrafts.bulkDelete(stale);
-  await db.verifyDrafts.bulkAdd(mm1DraftRows(caseId, row.id, row.fileName));
+  const fixtureIds = new Set(MM_1_EXTRACTIONS.map((item) => item.id));
+  const pending = existing.filter((draft) => draft.status === "pending" && draft.origin !== "manual" && draft.citation !== "manual-observation");
+  const fixturePending = pending.filter((draft) => fixtureIds.has(draft.id) || draft.citation === "mm1-fixture");
+  const stale = pending.filter((draft) => !fixtureIds.has(draft.id) && draft.citation !== "mm1-fixture");
+  const short = fixturePending.length < 5;
+  const storedIds = new Set(existing.map((draft) => draft.id));
+  const missing = MM_1_EXTRACTIONS.some((item) => !storedIds.has(item.id));
+  if (!opts?.force && !short && stale.length === 0 && !missing) return;
+  const drop = [
+    ...stale.map((draft) => draft.id),
+    ...((opts?.force || short) ? fixturePending.map((draft) => draft.id) : []),
+  ];
+  if (drop.length) await db.verifyDrafts.bulkDelete([...new Set(drop)]);
+  const have = new Set((await db.verifyDrafts.where("evidenceId").equals(row.id).toArray()).map((draft) => draft.id));
+  const rows = mm1DraftRows(caseId, row.id, row.fileName).filter((draft) => !have.has(draft.id));
+  if (rows.length) await db.verifyDrafts.bulkAdd(rows);
 }
 
 export async function initDb() {

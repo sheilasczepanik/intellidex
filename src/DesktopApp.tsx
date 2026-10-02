@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
-  addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent, ensureLastKnownSighting,
+  addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent, ensureLastKnownSighting, ensureMm1Extractions,
   db, DEFAULT_OPERATOR, deleteEntity, deleteEvidence, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isIntakeCompleteStatus, isLocatedCase, isPendingIntakeEvidence, isVisibleInStagingQueue, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft, togglePinnedPerson,
   OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveManualEvidence, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
@@ -42,7 +42,7 @@ import TimelineToolbar, { TimelineDateStrip, TimelineHoverTip } from "./Timeline
 import TimelineConflictInspector from "./TimelineConflictInspector";
 import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQueueCard";
 import VerifySourceSwitcher from "./VerifySourceSwitcher";
-import { draftsForSource } from "./lib/useExtraction";
+import { draftsForSource, extractionCacheKey } from "./lib/useExtraction";
 import WorkspacePreferences from "./WorkspacePreferences";
 import { ExtractSelectionTip, LogEvidenceModal, VERIFY_CATEGORIES, type ManualLogCategoryId } from "./Verify";
 import {
@@ -77,8 +77,8 @@ import { clusterMergeableEvents, detectLocationConflicts } from "./lib/timelineD
 import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, type LlmProvider } from "./lib/settings";
 import { joinLocalDateTime, localDayKey, namesLooselyMatch, splitLocalDateTime } from "./lib/eventTime";
 import {
-  HOUR_MS, LANE_PAD, UNASSIGNED_LANE_ID, busiestDayKey, earliestDayKey, eventAxisBounds, eventInHourWindow, fillDayStrip, fitPxPerHour,
-  formatClockRange, midnightsInRange, pxForPreset, spanDayKeys, tickMsFor, uniqueDayKeys,
+  HOUR_MS, LANE_PAD, UNASSIGNED_LANE_ID, busiestDayKey, earliestDayKey, eventInHourWindow, fillDayStrip, fitPxPerHour,
+  formatClockRange, midnightsInRange, pxForPreset, resolveAxisBounds, spanDayKeys, tickMsFor, uniqueDayKeys,
   windowHours, type DayScope, type TickPreset, type TimeWindow,
 } from "./lib/timelineView";
 import { getCategoryColor, resolveSemanticCategory } from "./utils/categoryColors";
@@ -816,17 +816,15 @@ export default function DesktopApp() {
       const endMs = parseTimeEnd(event.timeEnd, event.timestamp);
       return endMs && endMs > event.timestamp ? [event.timestamp, endMs] : [event.timestamp];
     });
-    const bounds = eventAxisBounds(stamps, Number.isNaN(fallbackStart) ? Date.now() : fallbackStart);
+    const bounds = resolveAxisBounds({
+      timestamps: stamps,
+      fallbackStart: Number.isNaN(fallbackStart) ? Date.now() : fallbackStart,
+      dayKeys: spanKeys,
+      fullDay: timeWindow === "full" && !viewAllDates,
+    });
     let start = bounds.minTime;
     let end = bounds.maxTime;
-    if (dayScope === 2 && spanKeys[1]) {
-      const midnight = Date.parse(`${spanKeys[1]}T00:00:00`);
-      if (Number.isFinite(midnight)) {
-        if (midnight < start) start = midnight;
-        if (midnight > end) end = midnight + 30 * 60 * 1000;
-      }
-    }
-    if (end <= start) end = start + 2 * HOUR_MS;
+    if (end <= start) end = start + 24 * HOUR_MS;
 
     const hours = (end - start) / HOUR_MS;
     const tickMs = tickMsFor(tickPreset);
@@ -1024,7 +1022,7 @@ export default function DesktopApp() {
       ticks,
       tickMs,
       pxPerHour,
-      width: LANE_PAD + hours * pxPerHour + CARD_W,
+      width: LANE_PAD + hours * pxPerHour,
       xOf,
       rangeLabel: formatRangeLabel(start, end, viewAllDates || spanKeys.length > 1),
       dayKeys,
@@ -1075,10 +1073,31 @@ export default function DesktopApp() {
       const endMs = parseTimeEnd(e.timeEnd, e.timestamp);
       return endMs && endMs > e.timestamp ? [e.timestamp, endMs] : [e.timestamp];
     });
-    const { minTime, maxTime } = eventAxisBounds(times, Date.now());
-    const width = timelineContainerRef.current?.clientWidth ?? 960;
-    setPxPerHour(fitPxPerHour(maxTime - minTime, width));
-  }, [screen, viewportFit, resolvedCaseId, caseEvents, viewDay, viewAllDates, dayScope]);
+    const axis = resolveAxisBounds({
+      timestamps: times,
+      fallbackStart: Date.now(),
+      dayKeys: span.size ? [...span] : [],
+      fullDay: timeWindow === "full" && !viewAllDates && span.size > 0,
+    });
+    const el = timelineContainerRef.current;
+    const apply = () => {
+      const width = timelineContainerRef.current?.clientWidth ?? 0;
+      if (width < 200) return;
+      const next = fitPxPerHour(axis.maxTime - axis.minTime, width);
+      setPxPerHour((prev) => (Math.abs(prev - next) < 0.5 ? prev : next));
+    };
+    apply();
+    const frame = window.requestAnimationFrame(apply);
+    if (!el || typeof ResizeObserver === "undefined") {
+      return () => window.cancelAnimationFrame(frame);
+    }
+    const observer = new ResizeObserver(apply);
+    observer.observe(el);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [screen, viewportFit, resolvedCaseId, caseEvents, viewDay, viewAllDates, dayScope, timeWindow]);
 
   const fitToEvents = () => {
     setViewportFit(true);
@@ -1092,9 +1111,14 @@ export default function DesktopApp() {
       const endMs = parseTimeEnd(e.timeEnd, e.timestamp);
       return endMs && endMs > e.timestamp ? [e.timestamp, endMs] : [e.timestamp];
     });
-    const { minTime, maxTime } = eventAxisBounds(times, Date.now());
+    const axis = resolveAxisBounds({
+      timestamps: times,
+      fallbackStart: Date.now(),
+      dayKeys: span.size ? [...span] : [],
+      fullDay: true,
+    });
     const el = timelineContainerRef.current;
-    setPxPerHour(fitPxPerHour(maxTime - minTime, el?.clientWidth ?? 960));
+    setPxPerHour(fitPxPerHour(axis.maxTime - axis.minTime, el?.clientWidth ?? 960));
     requestAnimationFrame(() => el?.scrollTo({ left: 0, top: 0, behavior: "smooth" }));
   };
 
@@ -2387,6 +2411,21 @@ export default function DesktopApp() {
     scroller?.scrollTo({ top: 0 });
     document.getElementById("pdf-page-1")?.scrollIntoView({ block: "start" });
     if (screen !== "Verify" || !sourceEvidence) return;
+    if (isMm1Source(sourceEvidence.fileName, sourceEvidence.id)) {
+      const evidenceId = sourceEvidence.id;
+      const caseId = sourceEvidence.caseId;
+      void (async () => {
+        const key = extractionCacheKey(caseId, evidenceId);
+        let cached = false;
+        try { cached = Boolean(localStorage.getItem(key)); } catch { cached = false; }
+        const pending = await db.verifyDrafts.where("evidenceId").equals(evidenceId).filter((draft) => draft.status === "pending").count();
+        if (!cached || pending < 5) {
+          await ensureMm1Extractions({ force: !cached || pending < 5 });
+          try { localStorage.setItem(key, JSON.stringify({ version: 3, sourceId: evidenceId })); } catch { /* private mode */ }
+        }
+      })();
+      return;
+    }
     void runExtract(sourceEvidence.id, { stayOnWorkspace: true });
   }, [sourceEvidence?.id, screen]);
 
@@ -2562,6 +2601,18 @@ export default function DesktopApp() {
               <div className="hidden items-center gap-1.5 rounded-full border border-emerald-200/50 bg-emerald-50/80 px-2.5 py-1 font-mono text-[11px] text-emerald-700 sm:inline-flex">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />SECURE / LOCAL
               </div>
+              {import.meta.env.DEV && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    localStorage.clear();
+                    window.location.reload();
+                  }}
+                  className="inline-flex h-[34px] items-center rounded-[10px] border border-slate-200 bg-white px-2.5 text-[11px] font-semibold text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+                >
+                  [ Clear Cache & Reload ]
+                </button>
+              )}
               <button
                 onClick={() => {
                   setApiKeyDraft(getLocalApiKey());
@@ -3332,7 +3383,7 @@ export default function DesktopApp() {
                       rangeLabel={chrono.rangeLabel}
                       timeLabel={chrono.timeLabel}
                       dayScope={dayScope}
-                      onDayScope={(scope) => { setDayScope(scope); setViewAllDates(false); setViewportFit(true); }}
+                      onDayScope={(scope) => { setDayScope(scope); setViewAllDates(false); setTimeWindow("full"); setViewportFit(true); }}
                       showInactiveLanes={showInactiveLanes}
                       onShowInactiveLanes={setShowInactiveLanes}
                       timeWindow={timeWindow}
@@ -3401,11 +3452,12 @@ export default function DesktopApp() {
                     onSelectDay={(day) => {
                       setViewAllDates(false);
                       setViewDay(day);
+                      setTimeWindow("full");
                       setViewportFit(true);
                     }}
                   />
 
-                  <div ref={timelineContainerRef} className="flex-1 overflow-auto">
+                  <div ref={timelineContainerRef} className="min-w-0 w-full flex-1 overflow-x-auto overflow-y-auto">
                     {chrono.lanes.length === 0 ? (
                       <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
                         <div className="text-[18px] font-semibold">No events plotted</div>
@@ -3416,7 +3468,7 @@ export default function DesktopApp() {
                         </p>
                       </div>
                     ) : (
-                    <div className="relative min-h-full pb-15 pr-12" style={{ width: chrono.width }}>
+                    <div className="relative min-h-full w-full min-w-full pb-15" style={{ width: chrono.width }}>
                       <div className="pointer-events-none absolute inset-y-0 right-0"
                         style={{ left: LANE_PAD, backgroundImage: `repeating-linear-gradient(to right, #f1f5f9 0 1px, transparent 1px ${chrono.pxPerHour * (chrono.tickMs / HOUR_MS)}px)` }} />
 
@@ -3448,6 +3500,7 @@ export default function DesktopApp() {
                       <TimelineGrid
                         lanes={chrono.lanes}
                         subjectName={activeCase?.subjectName || activeCase?.title}
+                        showInactiveLanes={showInactiveLanes}
                         collapsed={collapsedGroups}
                         onToggle={(id) => setCollapsedGroups((curr) => ({ ...curr, [id]: !curr[id] }))}
                         renderLane={({ def, height, placed, tracks, count }, groupId) => {

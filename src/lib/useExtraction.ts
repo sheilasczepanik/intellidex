@@ -1,3 +1,8 @@
+/** Bumped so a previous client-parse queue cannot satisfy Verify. */
+export function extractionCacheKey(caseId: string, sourceId: string) {
+  return `dossier_extractions_v3_${caseId}_${sourceId}`;
+}
+
 /** Drafts that belong to the document currently open in Verify. */
 export function draftsForSource<T extends { evidenceId: string }>(drafts: T[], evidenceId?: string | null) {
   if (!evidenceId) return [];
