@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
-  addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent, ensureLastKnownSighting, ensureMm1Extractions,
+  addEvidence, addCaseMedia, addVerifyDrafts, applyThemePreference, computeAvatarInitials, confirmVerifyDraft, createCase, createEntity, createTimelineEvent, ensureLastKnownSighting, ensureMauraChronology, ensureMm1Extractions,
   db, DEFAULT_OPERATOR, deleteEntity, deleteEvidence, deleteTimelineEvent, ensureContactsForPeople, formatTouched, hydrateUserProfile, isArchivedCase, isIntakeCompleteStatus, isLocatedCase, isPendingIntakeEvidence, isVisibleInStagingQueue, listHubCases, parseEventTime, promoteEntityToVerified, rejectVerifyDraft, togglePinnedPerson,
   OPERATOR_ID, reopenLocatedCase, resetLocalVault, saveManualEvidence, saveOperatorProfile, setCaseArchived, setCaseLocated, statusToTone, updateEntity, updateTimelineEvent, updateVerifyDraft, type CaseStatus, type EntityRecord, type EntityType,
   type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
@@ -79,7 +79,7 @@ import { getLocalApiKey, getLocalProvider, setLocalApiKey, setLocalProvider, typ
 import { joinLocalDateTime, localDayKey, namesLooselyMatch, splitLocalDateTime } from "./lib/eventTime";
 import {
   HOUR_MS, LANE_PAD, UNASSIGNED_LANE_ID, busiestDayKey, earliestDayKey, eventInHourWindow, fillDayStrip, fitPxPerHour,
-  formatClockRange, midnightsInRange, pxForPreset, resolveAxisBounds, spanDayKeys, tickMsFor, uniqueDayKeys,
+  formatClockRange, incidentAnchorDay, incidentStripSourceDays, midnightsInRange, pxForPreset, resolveAxisBounds, spanDayKeys, tickMsFor, uniqueDayKeys,
   windowHours, type DayScope, type TickPreset, type TimeWindow,
 } from "./lib/timelineView";
 import { getCategoryColor, resolveSemanticCategory } from "./utils/categoryColors";
@@ -788,7 +788,8 @@ export default function DesktopApp() {
     const existing = new Set(caseEvents.map((event) => event.id));
     const fromDrafts = draftsAsTimelineEvents(pendingDrafts).filter((event) => {
       const sourceId = event.id.replace(/^draft-/, "");
-      return !existing.has(event.id) && !existing.has(sourceId);
+      if (existing.has(event.id) || existing.has(sourceId)) return false;
+      return !caseEvents.some((row) => row.title === event.title && Math.abs(row.timestamp - event.timestamp) < 60_000);
     });
     return [...caseEvents, ...fromDrafts].sort((a, b) => a.timestamp - b.timestamp);
   }, [caseEvents, pendingDrafts]);
@@ -806,7 +807,12 @@ export default function DesktopApp() {
     const dayStamps = timelineEvents.map((e) => e.timestamp);
     const busiest = busiestDayKey(dayStamps);
     const earliest = earliestDayKey(dayStamps);
-    const activeDay = viewDay || earliest || busiest;
+    const anchor = incidentAnchorDay({
+      timestamps: dayStamps,
+      lksAt: activeCase?.lksAt || activeCase?.incidentStart || "",
+      dateOfBirth: activeCase?.subjectProfile?.dateOfBirth || "",
+    });
+    const activeDay = viewDay || anchor || busiest || earliest;
     const spanKeys = !viewAllDates && activeDay ? spanDayKeys(activeDay, dayScope) : [];
     const span = new Set(spanKeys);
     const { startH, endH } = windowHours(timeWindow, customStart, customEnd);
@@ -1046,7 +1052,7 @@ export default function DesktopApp() {
       rangeLabel: formatRangeLabel(start, end, viewAllDates || spanKeys.length > 1),
       dayKeys,
       dayCounts,
-      stripDays: fillDayStrip(dayKeys),
+      stripDays: fillDayStrip(incidentStripSourceDays(dayKeys, anchor || activeDay)),
       spanKeys: spanKeys.length ? spanKeys : (activeDay ? [activeDay] : []),
       midnights: midnightsInRange(start, end),
       busiest,
@@ -1062,7 +1068,7 @@ export default function DesktopApp() {
       mergedLaneIds: plotted.filter((row) => row.mergeCount > 1).map((row) => row.entityId),
       timeLabel: formatClockRange(start, end),
     };
-  }, [activeCase?.subjectName, activeCase?.title, timelineFeed, caseEntities, caseEvidence, viewDay, viewAllDates, dayScope, showInactiveLanes, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit, conflictsOnly, timelineConflicts]);
+  }, [activeCase?.subjectName, activeCase?.title, activeCase?.lksAt, activeCase?.incidentStart, activeCase?.subjectProfile?.dateOfBirth, timelineFeed, caseEntities, caseEvidence, viewDay, viewAllDates, dayScope, showInactiveLanes, timeWindow, customStart, customEnd, tickPreset, pxPerHour, viewportFit, conflictsOnly, timelineConflicts]);
 
   useEffect(() => {
     setViewDay("");
@@ -1082,8 +1088,19 @@ export default function DesktopApp() {
   }, [screen, activeCase]);
 
   useEffect(() => {
+    if (!activeCase) return;
+    if (!/maura murray/i.test(`${activeCase.subjectName || ""} ${activeCase.title || ""}`)) return;
+    void ensureMauraChronology(activeCase.id);
+  }, [activeCase?.id, activeCase?.subjectName, activeCase?.title]);
+
+  useEffect(() => {
     if (screen !== "Timeline" || !viewportFit || !timelineFeed.length) return;
-    const active = viewDay || earliestDayKey(timelineFeed.map((e) => e.timestamp)) || busiestDayKey(timelineFeed.map((e) => e.timestamp));
+    const stamps = timelineFeed.map((e) => e.timestamp);
+    const active = viewDay || incidentAnchorDay({
+      timestamps: stamps,
+      lksAt: activeCase?.lksAt || activeCase?.incidentStart || "",
+      dateOfBirth: activeCase?.subjectProfile?.dateOfBirth || "",
+    }) || earliestDayKey(stamps) || busiestDayKey(stamps);
     const span = new Set(viewAllDates || !active ? [] : spanDayKeys(active, dayScope));
     const pool = span.size
       ? timelineFeed.filter((e) => span.has(localDayKey(e.timestamp)))
@@ -1116,12 +1133,17 @@ export default function DesktopApp() {
       window.cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [screen, viewportFit, resolvedCaseId, timelineFeed, viewDay, viewAllDates, dayScope, timeWindow]);
+  }, [screen, viewportFit, resolvedCaseId, timelineFeed, viewDay, viewAllDates, dayScope, timeWindow, activeCase?.lksAt, activeCase?.incidentStart, activeCase?.subjectProfile?.dateOfBirth]);
 
   const fitToEvents = () => {
     setViewportFit(true);
     setTimeWindow("full");
-    const active = viewDay || earliestDayKey(timelineFeed.map((e) => e.timestamp)) || busiestDayKey(timelineFeed.map((e) => e.timestamp));
+    const stamps = timelineFeed.map((e) => e.timestamp);
+    const active = viewDay || incidentAnchorDay({
+      timestamps: stamps,
+      lksAt: activeCase?.lksAt || activeCase?.incidentStart || "",
+      dateOfBirth: activeCase?.subjectProfile?.dateOfBirth || "",
+    }) || earliestDayKey(stamps) || busiestDayKey(stamps);
     const span = new Set(viewAllDates || !active ? [] : spanDayKeys(active, dayScope));
     const pool = span.size
       ? timelineFeed.filter((e) => span.has(localDayKey(e.timestamp)))
@@ -1378,16 +1400,16 @@ export default function DesktopApp() {
 
   const openChronology = async () => {
     if (activeCase) await ensureLastKnownSighting(activeCase);
-    const stamps = caseEvents.map((event) => event.timestamp).filter((ts) => Number.isFinite(ts));
+    const stamps = timelineFeed.map((event) => event.timestamp).filter((ts) => Number.isFinite(ts));
     const lksRaw = activeCase?.lksAt || activeCase?.incidentStart || "";
-    const lks = /^\d{4}-\d{2}-\d{2}$/.test(lksRaw) ? Date.parse(`${lksRaw}T12:00:00`) : Date.parse(lksRaw);
-    if (Number.isFinite(lks)) stamps.push(lks);
-    const day = earliestDayKey(stamps);
-    if (day) {
-      setViewDay(day);
-      setViewAllDates(false);
-      setViewportFit(true);
-    }
+    const day = incidentAnchorDay({
+      timestamps: stamps,
+      lksAt: lksRaw,
+      dateOfBirth: activeCase?.subjectProfile?.dateOfBirth || "",
+    });
+    setViewDay(day);
+    setViewAllDates(false);
+    setViewportFit(true);
     goTo("Timeline");
   };
 

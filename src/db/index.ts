@@ -28,7 +28,7 @@ import {
 } from "./schema";
 
 export * from "./schema";
-export { initDb, seedIfEmpty, seedRelationshipsIfEmpty, ensureMm1Extractions } from "./seed";
+export { initDb, seedIfEmpty, seedRelationshipsIfEmpty, ensureMm1Extractions, ensureMauraChronology } from "./seed";
 
 export interface HubCase extends CaseRecord {
   entityCount: number;

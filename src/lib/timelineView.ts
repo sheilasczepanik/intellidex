@@ -58,7 +58,48 @@ export function formatClockRange(start: number, end: number) {
     const d = new Date(ms);
     return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   };
-  return `${t(start)} → ${t(end)}`;
+  const endDate = new Date(end);
+  const exclusiveMidnight = end > start
+    && endDate.getHours() === 0
+    && endDate.getMinutes() === 0
+    && endDate.getSeconds() === 0
+    && endDate.getMilliseconds() === 0;
+  return `${t(start)} → ${exclusiveMidnight ? "23:59" : t(end)}`;
+}
+
+export function caseDayKey(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10);
+  const ms = Date.parse(trimmed);
+  return Number.isFinite(ms) ? localDayKey(ms) : "";
+}
+
+function dayDistance(a: string, b: string) {
+  const [ay, am, ad] = a.split("-").map(Number);
+  const [by, bm, bd] = b.split("-").map(Number);
+  const left = Date.UTC(ay, (am ?? 1) - 1, ad ?? 1);
+  const right = Date.UTC(by, (bm ?? 1) - 1, bd ?? 1);
+  return Math.round((left - right) / (24 * 60 * 60 * 1000));
+}
+
+/** Last-known sighting, otherwise the busiest day that is not the subject's date of birth. */
+export function incidentAnchorDay(opts: { timestamps: number[]; lksAt?: string; dateOfBirth?: string }) {
+  const lks = caseDayKey(opts.lksAt || "");
+  if (lks) return lks;
+  const dob = caseDayKey(opts.dateOfBirth || "");
+  const pool = opts.timestamps.filter((ts) => Number.isFinite(ts) && localDayKey(ts) !== dob);
+  if (!pool.length) return "";
+  return busiestDayKey(pool);
+}
+
+/** Day tabs for the incident cluster. A birth date years away does not open the strip. */
+export function incidentStripSourceDays(eventDays: string[], anchor: string) {
+  if (!anchor) return eventDays;
+  const near = eventDays.filter((day) => Math.abs(dayDistance(day, anchor)) <= 10);
+  const core = new Set(near);
+  core.add(anchor);
+  return [...core].sort();
 }
 
 export function busiestDayKey(timestamps: number[]) {

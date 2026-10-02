@@ -260,6 +260,92 @@ async function writeMm1Extractions(opts?: { force?: boolean }) {
   if (rows.length) await db.verifyDrafts.bulkAdd(rows);
 }
 
+function isMauraMurrayCase(row: { subjectName?: string; title?: string }) {
+  return /maura murray/i.test(`${row.subjectName || ""} ${row.title || ""}`);
+}
+
+function isBiographicalTimelineEvent(event: { title: string; description?: string }) {
+  return /\b(date of birth|birthday|\bdob\b|\bborn\b)/i.test(`${event.title} ${event.description || ""}`);
+}
+
+/** Attach the MM 1 chronology to a Maura Murray case that does not already have one. */
+export async function ensureMauraChronology(caseId?: string) {
+  const cases = caseId
+    ? [await db.cases.get(caseId)].filter((row): row is CaseRecord => Boolean(row))
+    : await db.cases.toArray();
+  for (const row of cases) {
+    if (!isMauraMurrayCase(row)) continue;
+    await writeMauraChronology(row.id);
+  }
+}
+
+async function writeMauraChronology(caseId: string) {
+  const events = await db.timelineEvents.where("caseId").equals(caseId).toArray();
+  const chronology = events.filter((event) => !isBiographicalTimelineEvent(event));
+  if (chronology.length > 1) return;
+
+  const evidence = await db.evidence.where("caseId").equals(caseId).toArray();
+  let doc = evidence.find((item) => isMm1Source(item.fileName, item.id));
+  const transcript = mm1ReportText();
+  if (!doc) {
+    doc = {
+      id: `ev-mm1-${caseId}`,
+      caseId,
+      fileName: "MM_1.pdf",
+      originalFileName: "MM_1.pdf",
+      fileType: "pdf",
+      mediaType: "application/pdf",
+      mimeType: "application/pdf",
+      sourceType: "pdf",
+      sourceClass: "police_report",
+      tier: "primary",
+      rawText: transcript,
+      fullText: transcript,
+      pageCount: 38,
+      wordCount: transcript.split(/\s+/).filter(Boolean).length,
+      status: "indexed",
+      lastError: "",
+    };
+    await db.evidence.add(doc);
+  }
+
+  const titles = new Set(events.map((event) => event.title));
+  const ids = new Set(events.map((event) => event.id));
+  const timelineRows: TimelineEventRecord[] = MM_1_EXTRACTIONS
+    .map((item) => ({
+      id: `${caseId}__${item.id}`,
+      caseId,
+      entityId: "",
+      timestamp: Date.parse(item.timestamp),
+      title: item.title,
+      description: [item.details, item.exactSnippet].filter(Boolean).join("\n"),
+      sourceDocId: doc.id,
+      isVerified: false,
+      origin: "ai" as const,
+      tier: "primary" as const,
+      confidenceTier: "TIER_2_UNVERIFIED" as const,
+      sourceCitation: {
+        sourceId: doc.id,
+        sourceName: doc.fileName,
+        sourceType: "pdf" as const,
+        pageNumber: item.pageNumber,
+        exactQuote: item.exactSnippet,
+      },
+    }))
+    .filter((event) => !ids.has(event.id) && !titles.has(event.title) && Number.isFinite(event.timestamp));
+  if (timelineRows.length) await db.timelineEvents.bulkAdd(timelineRows);
+
+  const drafts = mm1DraftRows(caseId, doc.id, doc.fileName).map((draft) => ({
+    ...draft,
+    id: `${caseId}__${draft.id}`,
+  }));
+  const stored = await db.verifyDrafts.where("caseId").equals(caseId).toArray();
+  const storedIds = new Set(stored.map((draft) => draft.id));
+  const storedTitles = new Set(stored.map((draft) => draft.title));
+  const missingDrafts = drafts.filter((draft) => !storedIds.has(draft.id) && !storedTitles.has(draft.title));
+  if (missingDrafts.length) await db.verifyDrafts.bulkAdd(missingDrafts);
+}
+
 export async function initDb() {
   await db.open();
   await seedIfEmpty();
@@ -275,6 +361,7 @@ export async function initDb() {
   }
   try {
     await ensureMm1Extractions();
+    await ensureMauraChronology();
   } catch (err) {
     console.error("[DB] MM 1 extraction seed failed", err);
   }

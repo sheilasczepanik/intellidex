@@ -209,7 +209,11 @@ export default function CaseOverview({
   ) ?? [];
   const chronology = useMemo(() => {
     const existing = new Set(events.map((event) => event.id));
-    const fromDrafts = draftsAsTimelineEvents(pendingFindings).filter((event) => !existing.has(event.id.replace(/^draft-/, "")));
+    const fromDrafts = draftsAsTimelineEvents(pendingFindings).filter((event) => {
+      const sourceId = event.id.replace(/^draft-/, "");
+      if (existing.has(event.id) || existing.has(sourceId)) return false;
+      return !events.some((row) => row.title === event.title && Math.abs(row.timestamp - event.timestamp) < 60_000);
+    });
     return prepareEventsForTimeline([...events, ...fromDrafts], entities);
   }, [events, entities, pendingFindings]);
   const verifiedSightings = chronology.filter((e) => isVerifiedSighting(e));
