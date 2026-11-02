@@ -1,7 +1,11 @@
 import type { EntityRelationship, SourceCitation, ExternalIntelLead, IntelClaim, IntelClaimCategory } from "../types";
 import { storedEntityType } from "../types";
+import { readCoordinates } from "../data/caseLocations";
 import { namesLooselyMatch, parseEventTime } from "../lib/eventTime";
-import { classifySource } from "../lib/sourceTier";
+import { classifySource, isVerifyingSource } from "../lib/sourceTier";
+import { parseDoeNetworkId } from "../lib/doeNetworkId";
+import { buildPairPacket, pairKey } from "../lib/caseMatch";
+import { lksFromNamusDate, type AssistedNamusRecord } from "../lib/namusPaste";
 import { mapContactAffiliation, normalizeAlertLevel } from "../lib/missingPerson";
 import { isVictimOrDeceased } from "../utils/roleBadge";
 import { isSearchNetworkPerson } from "../lib/personDirectory";
@@ -15,8 +19,10 @@ import {
   type CaseMediaCategory,
   type CaseMediaRecord,
   type CaseMediaType,
+  type CaseMatchLink,
   type CaseRecord,
   type CaseStatus,
+  type MatchLinkStatus,
   type EntityRecord,
   type EntityType,
   type ExtractCategory,
@@ -107,6 +113,7 @@ export async function createCase(input: {
   incidentEnd?: string;
   subjectName?: string;
   fileIdentifier?: string;
+  doeNetworkId?: string;
   lksAt?: string;
   lksLocation?: string;
   lksCircumstances?: string;
@@ -114,6 +121,11 @@ export async function createCase(input: {
 }) {
   const now = Date.now();
   const subjectName = (input.subjectName || input.title).trim();
+  const doeRaw = (input.doeNetworkId || "").trim();
+  const doe = doeRaw ? parseDoeNetworkId(doeRaw) : null;
+  if (doeRaw && !doe) {
+    throw new Error("Doe Network IDs use 4 digits and 4 letters, such as 1187UMFL, or the short form 93DMFL.");
+  }
   const row: CaseRecord = {
     id: await nextCaseId(),
     title: subjectName,
@@ -129,6 +141,7 @@ export async function createCase(input: {
     incidentEnd: input.incidentEnd ?? "",
     subjectName,
     fileIdentifier: (input.fileIdentifier || "").trim(),
+    doeNetworkId: doe?.id || "",
     lksAt: input.lksAt ?? "",
     lksLocation: input.lksLocation ?? input.jurisdiction ?? "",
     lksCircumstances: input.lksCircumstances ?? "",
@@ -236,9 +249,78 @@ export async function ensureLastKnownSighting(caseRec: CaseRecord) {
 
 export async function updateCase(
   id: string,
-  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "locatedAt" | "incidentStart" | "incidentEnd" | "subjectName" | "fileIdentifier" | "lksAt" | "lksLocation" | "lksCircumstances" | "subjectProfile" | "pinnedPersonIds" | "customMediaCategories">>,
+  patch: Partial<Pick<CaseRecord, "title" | "summary" | "status" | "workingNotes" | "jurisdiction" | "isArchived" | "archivedAt" | "locatedAt" | "incidentStart" | "incidentEnd" | "subjectName" | "fileIdentifier" | "doeNetworkId" | "potentialMatch" | "lksAt" | "lksLocation" | "lksCircumstances" | "recoveryAt" | "recoveryLocation" | "subjectProfile" | "pinnedPersonIds" | "customMediaCategories">>,
 ) {
-  await db.cases.update(id, { ...patch, updatedAt: Date.now() });
+  const next = { ...patch };
+  if (typeof next.doeNetworkId === "string") {
+    const raw = next.doeNetworkId.trim();
+    if (!raw) next.doeNetworkId = "";
+    else {
+      const parsed = parseDoeNetworkId(raw);
+      if (!parsed) throw new Error("Doe Network IDs use 4 digits and 4 letters, such as 1187UMFL, or the short form 93DMFL.");
+      next.doeNetworkId = parsed.id;
+    }
+  }
+  await db.cases.update(id, { ...next, updatedAt: Date.now() });
+}
+
+async function refreshMatchLink(link: CaseMatchLink, status: MatchLinkStatus = link.status) {
+  const [a, b] = await Promise.all([db.cases.get(link.caseIdA), db.cases.get(link.caseIdB)]);
+  if (!a || !b) return link;
+  const evidence = await db.evidence.toArray();
+  const packet = buildPairPacket(a, b, evidence, status);
+  const updated: CaseMatchLink = {
+    ...link,
+    status,
+    title: packet.title,
+    body: packet.body,
+    formatted: packet.formatted,
+    updatedAt: new Date().toISOString(),
+  };
+  await db.caseMatchLinks.put(updated);
+  return updated;
+}
+
+export async function linkCasesAsMatch(caseIdA: string, caseIdB: string) {
+  if (!caseIdA || !caseIdB || caseIdA === caseIdB) throw new Error("Choose two different cases.");
+  const [left, right] = [caseIdA, caseIdB].sort();
+  const key = pairKey(left, right);
+  const existing = await db.caseMatchLinks.where("pairKey").equals(key).first();
+  if (existing) return refreshMatchLink(existing);
+  const now = new Date().toISOString();
+  const draft: CaseMatchLink = {
+    id: crypto.randomUUID(),
+    caseIdA: left,
+    caseIdB: right,
+    pairKey: key,
+    status: "under_review",
+    title: "",
+    body: "",
+    formatted: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+  return refreshMatchLink(draft);
+}
+
+export async function setMatchLinkStatus(id: string, status: MatchLinkStatus) {
+  const link = await db.caseMatchLinks.get(id);
+  if (!link) return null;
+  return refreshMatchLink(link, status);
+}
+
+export async function deleteCaseMatchLink(id: string) {
+  await db.caseMatchLinks.delete(id);
+}
+
+export async function setEvidenceLinkedCases(evidenceId: string, caseIds: string[]) {
+  const row = await db.evidence.get(evidenceId);
+  if (!row) return null;
+  const linkedCaseIds = [...new Set(caseIds.map((id) => id.trim()).filter((id) => id && id !== row.caseId))];
+  await db.evidence.update(evidenceId, { linkedCaseIds });
+  await touchCase(row.caseId);
+  for (const id of linkedCaseIds) await touchCase(id);
+  return db.evidence.get(evidenceId);
 }
 
 export async function addCaseCustomMediaCategory(caseId: string, rawLabel: string) {
@@ -563,6 +645,8 @@ export async function createTimelineEvent(input: {
   origin?: "manual" | "ai";
   contentHash?: string;
   mergedFrom?: string[];
+  latitude?: number;
+  longitude?: number;
 }) {
   const row: TimelineEventRecord = {
     id: crypto.randomUUID(),
@@ -578,6 +662,8 @@ export async function createTimelineEvent(input: {
     origin: input.origin,
     contentHash: input.contentHash,
     mergedFrom: input.mergedFrom,
+    latitude: input.latitude,
+    longitude: input.longitude,
   };
   await db.timelineEvents.add(row);
   await touchCase(input.caseId);
@@ -625,6 +711,7 @@ export async function addEvidence(input: {
   fullText?: string;
   fromPaste?: boolean;
   fromEditorial?: boolean;
+  verifyingSourceUrl?: string;
 }) {
   const fileName = input.fileName.trim() || "untitled.txt";
   const now = new Date().toISOString();
@@ -643,6 +730,7 @@ export async function addEvidence(input: {
     fromWeb: input.sourceType === "web_article" || Boolean(input.sourceUrl),
     fromPaste: input.fromPaste,
     fromEditorial: input.fromEditorial,
+    verifyingSourceUrl: input.verifyingSourceUrl,
   });
   const row = {
     id: crypto.randomUUID(),
@@ -666,6 +754,9 @@ export async function addEvidence(input: {
     sourceType: input.sourceType,
     sourceClass: classified.sourceClass,
     tier: classified.tier,
+    authority: classified.authority,
+    acceptance: classified.acceptance,
+    verifyingSourceUrl: input.verifyingSourceUrl,
     sourceUrl: input.sourceUrl,
     publishedDate: input.publishedDate,
     wordCount: input.wordCount,
@@ -674,6 +765,81 @@ export async function addEvidence(input: {
   await db.evidence.add(row);
   await touchCase(input.caseId);
   return row;
+}
+
+export async function setEvidenceVerifyingSource(id: string, url: string) {
+  const row = await db.evidence.get(id);
+  if (!row) return null;
+  const trimmed = url.trim();
+  if (!isVerifyingSource(trimmed)) {
+    throw new Error("Attach a NamUs, agency, or Doe Network link. A Charley Project page cannot verify itself.");
+  }
+  const classified = classifySource({
+    fileName: row.fileName,
+    originalFileName: row.originalFileName,
+    sourceType: row.sourceType,
+    sourceUrl: row.sourceUrl,
+    fileType: row.fileType,
+    verifyingSourceUrl: trimmed,
+  });
+  await db.evidence.update(id, {
+    verifyingSourceUrl: trimmed,
+    authority: classified.authority,
+    acceptance: classified.acceptance,
+    tier: classified.tier,
+    sourceClass: classified.sourceClass,
+  });
+  await touchCase(row.caseId);
+  return db.evidence.get(id);
+}
+
+function keep(current: string | undefined, incoming: string | undefined) {
+  const existing = (current || "").trim();
+  return existing || (incoming || "").trim();
+}
+
+/** Write a pasted NamUs profile onto the local case. Blank fields stay blank. */
+export async function applyAssistedNamus(caseId: string, record: AssistedNamusRecord, source: { rawText: string; url: string }) {
+  const rec = await db.cases.get(caseId);
+  if (!rec) throw new Error("Case not found.");
+  const profile = { ...(rec.subjectProfile || {}) };
+  profile.ageAtDisappearance = keep(profile.ageAtDisappearance, record.ageAtDisappearance);
+  profile.currentEstimatedAge = keep(profile.currentEstimatedAge, record.currentAge);
+  profile.dateOfBirth = keep(profile.dateOfBirth, record.dateOfBirth);
+  profile.height = keep(profile.height, record.height);
+  profile.weight = keep(profile.weight, record.weight);
+  profile.hair = keep(profile.hair, record.hair);
+  profile.eyes = keep(profile.eyes, record.eyes);
+  profile.distinguishingMarks = keep(profile.distinguishingMarks, record.distinguishingMarks);
+  profile.clothingLastSeen = keep(profile.clothingLastSeen, record.clothing);
+  profile.medicalAlerts = keep(profile.medicalAlerts, record.medicalAlerts);
+  const namusLabel = record.namusId ? `MP${record.namusId}` : "";
+  const lksAt = keep(rec.lksAt, lksFromNamusDate(record.dateLastSeen));
+  await updateCase(caseId, {
+    subjectName: keep(rec.subjectName, record.fullName) || rec.subjectName,
+    title: keep(rec.title, record.fullName) || rec.title,
+    fileIdentifier: keep(rec.fileIdentifier, namusLabel),
+    jurisdiction: keep(rec.jurisdiction, record.location),
+    lksLocation: keep(rec.lksLocation, record.location),
+    lksAt,
+    lksCircumstances: keep(rec.lksCircumstances, record.circumstances),
+    summary: keep(rec.summary, record.circumstances || record.caseNotes),
+    subjectProfile: profile,
+  });
+  const fileName = record.namusId ? `NamUs MP${record.namusId}.txt` : "NamUs profile.txt";
+  const evidence = await addEvidence({
+    caseId,
+    fileName,
+    originalFileName: fileName,
+    fileType: "txt",
+    sourceType: "text",
+    sourceUrl: source.url || (record.namusId ? `https://www.namus.gov/MissingPersons/Case#/${record.namusId}` : ""),
+    rawText: source.rawText,
+    fullText: source.rawText,
+    fromPaste: true,
+  });
+  await db.evidence.update(evidence.id, { status: "indexed" });
+  return evidence;
 }
 
 export function formatBytes(bytes?: number) {
@@ -997,6 +1163,7 @@ export async function confirmVerifyDraft(id: string) {
     }
   }
 
+  const placed = readCoordinates(`${draft.details} ${draft.snippet}`);
   await createTimelineEvent({
     caseId: draft.caseId,
     entityId,
@@ -1010,6 +1177,8 @@ export async function confirmVerifyDraft(id: string) {
     isVerified: !secondary,
     sourceCitation: draft.sourceCitation,
     tier: secondary ? "secondary" : "primary",
+    latitude: placed?.lat,
+    longitude: placed?.lng,
   });
   await db.verifyDrafts.update(id, { status: "confirmed", entityId });
 }

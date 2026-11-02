@@ -1,6 +1,7 @@
 import type { TimelineEventRecord, VerifyDraftRecord } from "../db";
 import type { EntityType } from "../types";
 import type { SwimlaneGroupId } from "../types/timeline";
+import { readCoordinates } from "../data/caseLocations";
 import { namesLooselyMatch, preferNarrativeTimestamp } from "./eventTime";
 
 export type TimelineLaneCategory = "SUBJECT" | "LAW_ENFORCEMENT" | "WITNESSES" | "EVIDENCE";
@@ -98,20 +99,26 @@ function entityMentionedIn(blob: string, entities: LaneEntity[]) {
 export function draftsAsTimelineEvents(drafts: VerifyDraftRecord[]): (TimelineEventRecord & { entityHint?: string })[] {
   return drafts
     .filter((draft) => draft.status !== "rejected")
-    .map((draft) => ({
-      id: draft.id.startsWith("draft-") ? draft.id : `draft-${draft.id}`,
-      caseId: draft.caseId,
-      entityId: draft.entityId || "",
-      timestamp: draft.timestamp,
-      title: draft.title,
-      description: [draft.details, draft.snippet, draft.timestampLabel].filter(Boolean).join("\n"),
-      sourceDocId: draft.evidenceId,
-      isVerified: draft.status === "confirmed",
-      sourceCitation: draft.sourceCitation,
-      origin: draft.origin,
-      confidenceTier: draft.status === "confirmed" ? "TIER_1_VERIFIED" : "TIER_2_UNVERIFIED",
-      entityHint: draft.entityName,
-    }));
+    .map((draft) => {
+      const text = [draft.details, draft.snippet, draft.timestampLabel].filter(Boolean).join("\n");
+      const coords = readCoordinates(text);
+      return {
+        id: draft.id.startsWith("draft-") ? draft.id : `draft-${draft.id}`,
+        caseId: draft.caseId,
+        entityId: draft.entityId || "",
+        timestamp: draft.timestamp,
+        title: draft.title,
+        description: text,
+        sourceDocId: draft.evidenceId,
+        isVerified: draft.status === "confirmed",
+        sourceCitation: draft.sourceCitation,
+        origin: draft.origin,
+        confidenceTier: draft.status === "confirmed" ? "TIER_1_VERIFIED" : "TIER_2_UNVERIFIED",
+        entityHint: draft.entityName,
+        latitude: coords?.lat,
+        longitude: coords?.lng,
+      };
+    });
 }
 
 export function prepareEventsForTimeline<T extends { id: string; entityId: string; timestamp: number; title: string; description: string; entityHint?: string }>(

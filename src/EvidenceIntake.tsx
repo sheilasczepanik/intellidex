@@ -12,6 +12,8 @@ import { parseArticleUrl } from "./lib/scrapeClient";
 import { LOW_CLARITY_BADGE } from "./lib/textClarity";
 import { isSecondaryEvidence, MEDIA_CUSTODY_BANNER, sourceClassLabel } from "./lib/sourceTier";
 import { inferSourceType } from "./types";
+import DemoDatasets from "./DemoDatasets";
+import type { DemoDossierId } from "./data/demoDossiers";
 
 const mono = "font-mono";
 const SCAN_NOTE = LOW_CLARITY_BADGE;
@@ -202,6 +204,7 @@ type Props = {
   onImportUrl: (url: string, onProgress: (stage: "scraping" | "staging") => void) => Promise<void>;
   highlightDropzone?: boolean;
   onHighlightConsumed?: () => void;
+  onLoadSample?: (id: DemoDossierId) => void;
 };
 
 export default function EvidenceIntake({
@@ -230,6 +233,7 @@ export default function EvidenceIntake({
   onImportUrl,
   highlightDropzone = false,
   onHighlightConsumed,
+  onLoadSample,
 }: Props) {
   const [articleUrl, setArticleUrl] = useState("");
   const [urlError, setUrlError] = useState<string | null>(null);
@@ -347,6 +351,8 @@ export default function EvidenceIntake({
       )}
 
       {intakeTab === "official" ? (
+      <>
+      {onLoadSample ? <div className="mb-4"><DemoDatasets busy={busy} onLoad={onLoadSample} /></div> : null}
       <div
         id="intake-file-dropzone"
         onDragOver={(e) => { e.preventDefault(); if (!dragging) setDragging(true); }}
@@ -372,6 +378,7 @@ export default function EvidenceIntake({
           ))}
         </div>
       </div>
+      </>
       ) : (
       <div className="rounded-[14px] border border-amber-200 bg-white p-5">
         <div className="mb-1 flex items-center gap-2">

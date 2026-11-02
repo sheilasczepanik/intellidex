@@ -9,6 +9,11 @@ import { getMissingAlerts } from "./server/missingAlerts.ts";
 import { FALLBACK_MISSING_ALERTS } from "./src/lib/liveMissingAlert.ts";
 import { lookupNamus } from "./server/namusLookup.ts";
 import { fallbackNamusRecord, namusNumericId, namusOk } from "./src/lib/namusRecord.ts";
+import { getNewsTriage } from "./server/newsRss.ts";
+import { sampleNewsItems } from "./src/lib/newsTriage.ts";
+import { assistNamusProfile } from "./server/namusAssist.ts";
+import { resolveExtractEngine } from "./server/structuredExtract.ts";
+import { parseNamusPaste, recordHasFacts } from "./src/lib/namusPaste.ts";
 
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -217,6 +222,64 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
     }
   };
 
+  const newsHandler = async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    if (req.method !== "GET" && req.method !== "POST") {
+      send(res, 405, { error: "GET or POST" });
+      return;
+    }
+    try {
+      const payload = req.method === "POST" ? JSON.parse(await readBody(req) || "{}") as { feeds?: unknown } : {};
+      const feeds = Array.isArray(payload.feeds) ? payload.feeds.filter((item): item is string => typeof item === "string") : [];
+      send(res, 200, await getNewsTriage(feeds));
+    } catch (err) {
+      console.error("[news-rss] local handler failed", err);
+      send(res, 200, {
+        items: sampleNewsItems(),
+        fetchedAt: new Date().toISOString(),
+        offline: true,
+        warning: "Louisiana alert feeds are temporarily unreachable",
+        queries: [],
+      });
+    }
+  };
+
+  const namusAssistHandler = async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    if (req.method !== "POST") {
+      send(res, 405, { error: "POST only" });
+      return;
+    }
+    try {
+      const payload = JSON.parse(await readBody(req) || "{}") as { text?: unknown; url?: unknown };
+      const text = typeof payload.text === "string" ? payload.text.trim() : "";
+      const url = typeof payload.url === "string" ? payload.url.trim() : "";
+      if (!text) {
+        send(res, 400, { error: "Paste the NamUs profile text. The public page is rendered in the browser, so a URL alone cannot be read." });
+        return;
+      }
+      const headerKey = String(req.headers["x-dossier-key"] || req.headers["x-api-key"] || "");
+      const resolved = resolveExtractEngine({ headerKey, env });
+      const result = await assistNamusProfile({ text, url, apiKey: resolved.apiKey, model: resolved.model });
+      if (!recordHasFacts(result.record)) {
+        send(res, 200, { ...result, warning: "No demographic fields were found in that paste." });
+        return;
+      }
+      send(res, 200, result);
+    } catch (err) {
+      console.error("[namus-assist] local handler failed", err);
+      send(res, 200, { engine: "local", record: parseNamusPaste("") });
+    }
+  };
+
   const mountApis = (server: { middlewares: { use: (path: string, fn: (req: IncomingMessage, res: ServerResponse) => void) => void } }) => {
     server.middlewares.use("/api/extract", (req, res) => { void handler(req, res); });
     server.middlewares.use("/api/scrape-url", (req, res) => { void scrapeHandler(req, res); });
@@ -225,6 +288,8 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
     server.middlewares.use("/api/parse-intel", (req, res) => { void intelHandler(req, res); });
     server.middlewares.use("/api/alerts/missing", (req, res) => { void alertsHandler(req, res); });
     server.middlewares.use("/api/namus", (req, res) => { void namusHandler(req, res); });
+    server.middlewares.use("/api/news-rss", (req, res) => { void newsHandler(req, res); });
+    server.middlewares.use("/api/namus-assist", (req, res) => { void namusAssistHandler(req, res); });
   };
 
   return {

@@ -8,6 +8,7 @@ import { geocodeQuery, jitterLatLng, metersBetween, parseCoordinates, type LatLn
 import { applyDupDecision, clusterDuplicateLocations, entityToSide, findDuplicateLocation, mergeLocationCluster, type DupDecision, type DupMatch } from "./lib/duplicates";
 import { inferSearchLocationKind, type SearchLocationKind } from "./lib/missingPerson";
 import { useLocations } from "./lib/useLocations";
+import { locationsForCase, type CaseLocationPin } from "./data/caseLocations";
 
 const mono = "font-mono";
 
@@ -163,6 +164,60 @@ function sourceLabel(related: TimelineEventRecord[], activeCase: CaseRecord) {
   return activeCase.fileIdentifier || "—";
 }
 
+function parsePinTime(raw: string) {
+  const match = raw.match(/(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/);
+  if (!match) return NaN;
+  return new Date(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4] || 0),
+    Number(match[5] || 0),
+  ).getTime();
+}
+
+function pinKind(category: CaseLocationPin["category"]): SearchLocationKind {
+  if (category === "EVIDENCE") return "item_recovered";
+  if (category === "WITNESS") return "search_grid";
+  return "last_seen";
+}
+
+function mappedFromPin(pin: CaseLocationPin, caseId: string): MappedPlace {
+  const kind = pinKind(pin.category);
+  return {
+    entity: {
+      id: pin.id,
+      caseId,
+      name: pin.title,
+      type: "place",
+      role: pin.category,
+      notes: pin.description,
+      classification: "VERIFIED",
+      metadata: {
+        coordinates: `${pin.coordinates.lat}, ${pin.coordinates.lng}`,
+        address: pin.description,
+        dateLogged: pin.timestamp || "",
+        locationKind: kind,
+        searchStatus: "Cleared",
+        sourceDoc: pin.sourceDoc || "",
+        hardwired: "1",
+      },
+    },
+    kind,
+    latlng: { lat: pin.coordinates.lat, lng: pin.coordinates.lng },
+    precise: true,
+    address: pin.description,
+    dateLogged: pin.timestamp || "",
+  };
+}
+
+function placeStamp(row: MappedPlace, events: TimelineEventRecord[]) {
+  const linked = linkedEvents(row.entity, events, row.latlng)[0]?.timestamp;
+  if (typeof linked === "number") return linked;
+  const parsed = parsePinTime(row.entity.metadata?.dateLogged || row.dateLogged || "");
+  return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+}
+
 function lastActivity(related: TimelineEventRecord[], dateLogged: string) {
   const last = related[related.length - 1];
   if (!last) return dateLogged || "—";
@@ -222,9 +277,8 @@ function buildStops(rows: MappedPlace[], events: TimelineEventRecord[]): RouteSt
       };
     }
     const raw = row.entity.metadata?.dateLogged || row.dateLogged || "";
-    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-    if (match) {
-      const ts = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime();
+    const ts = parsePinTime(raw);
+    if (Number.isFinite(ts)) {
       return {
         placeId: row.entity.id,
         title: row.entity.name,
@@ -247,7 +301,7 @@ function buildStops(rows: MappedPlace[], events: TimelineEventRecord[]): RouteSt
 
 function sortPlaces(rows: MappedPlace[], sort: SortMode, events: TimelineEventRecord[]) {
   const copy = [...rows];
-  const stamp = (row: MappedPlace) => linkedEvents(row.entity, events, row.latlng)[0]?.timestamp ?? Number.MAX_SAFE_INTEGER;
+  const stamp = (row: MappedPlace) => placeStamp(row, events);
   const verified = (row: MappedPlace) => locationVerified(row.entity, linkedEvents(row.entity, events, row.latlng));
   if (sort === "verified") {
     copy.sort((a, b) => Number(verified(b)) - Number(verified(a)) || stamp(a) - stamp(b));
@@ -272,10 +326,15 @@ function offsetCenter(map: L.Map, latlng: LatLng, zoom: number) {
   return map.unproject(point, zoom);
 }
 
+function coordKey(lat: number, lng: number) {
+  return `${lat.toFixed(3)},${lng.toFixed(3)}`;
+}
+
 export default function LocationsMap({
   activeCase,
   places,
   events,
+  findingPins = [],
   onArbitrate,
   initialSubjectId = "",
   onViewChronology,
@@ -283,6 +342,7 @@ export default function LocationsMap({
   activeCase: CaseRecord;
   places: EntityRecord[];
   events: TimelineEventRecord[];
+  findingPins?: CaseLocationPin[];
   onArbitrate?: (match: DupMatch) => Promise<DupDecision>;
   initialSubjectId?: string;
   onViewChronology?: (placeId: string) => void;
@@ -313,7 +373,21 @@ export default function LocationsMap({
     setSubjectPin(initialSubjectId);
     setSubjectId(initialSubjectId);
   }
-  const [mapped, setMapped] = useState<MappedPlace[]>([]);
+  const fixturePins = useMemo(() => {
+    const curated = locationsForCase(activeCase).map((pin) => mappedFromPin(pin, activeCase.id));
+    const occupied = new Set(curated.map((pin) => coordKey(pin.latlng.lat, pin.latlng.lng)));
+    const fromFindings = findingPins
+      .filter((pin) => !occupied.has(coordKey(pin.coordinates.lat, pin.coordinates.lng)))
+      .map((pin) => mappedFromPin(pin, activeCase.id));
+    return [...curated, ...fromFindings];
+  }, [activeCase, findingPins]);
+  const [geocoded, setGeocoded] = useState<MappedPlace[]>([]);
+  const mapped = useMemo(() => {
+    const pinnedIds = new Set(fixturePins.map((pin) => pin.entity.id));
+    const occupied = new Set(fixturePins.map((pin) => coordKey(pin.latlng.lat, pin.latlng.lng)));
+    const extras = geocoded.filter((row) => row.entity.caseId === activeCase.id && !pinnedIds.has(row.entity.id) && !occupied.has(coordKey(row.latlng.lat, row.latlng.lng)));
+    return [...fixturePins, ...extras];
+  }, [fixturePins, geocoded, activeCase.id]);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [anchor, setAnchor] = useState<{ id: string; x: number; y: number; width: number } | null>(null);
   const [mapReady, setMapReady] = useState(false);
@@ -372,7 +446,7 @@ export default function LocationsMap({
         return { entity, kind, latlng, precise, address, dateLogged };
       }));
       if (!cancelled) {
-        setMapped(next);
+        setGeocoded(next);
         setGeoBusy(false);
       }
     })();
@@ -397,7 +471,7 @@ export default function LocationsMap({
     const explicit = explicitPlaceIds(subject, matched, events, relationships);
     const caseSubject = subject.name.trim().toLowerCase() === (activeCase.subjectName || activeCase.title || "").trim().toLowerCase();
     const ids = explicit.size > 0 || !caseSubject ? explicit : new Set(matched.map((row) => row.entity.id));
-    return matched.filter((row) => ids.has(row.entity.id));
+    return matched.filter((row) => ids.has(row.entity.id) || row.entity.metadata?.hardwired === "1");
   }, [subject, matched, events, relationships, activeCase.subjectName, activeCase.title]);
 
   const listed = useMemo(() => sortPlaces(scoped, sort, events), [scoped, sort, events]);
@@ -789,6 +863,7 @@ export default function LocationsMap({
                         >
                           Focus on Map
                         </button>
+                        {row.entity.metadata?.hardwired === "1" ? null : (
                         <button
                           type="button"
                           aria-label={`Delete ${row.entity.name}`}
@@ -797,6 +872,7 @@ export default function LocationsMap({
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
+                        )}
                       </div>
                     </div>
                   </li>

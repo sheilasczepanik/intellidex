@@ -6,8 +6,8 @@ import {
   MapPin, MoreHorizontal, Pencil, Phone, Plus, Radio, RefreshCw, Trash2, Upload,
 } from "lucide-react";
 import {
-  CONTACT_AFFILIATIONS, createCaseContact, db, deleteCaseContact, deleteEvidence, ensureContactsForPeople, formatBytes,
-  updateCaseContact,
+  CONTACT_AFFILIATIONS, applyAssistedNamus, createCaseContact, db, deleteCaseContact, deleteEvidence, ensureContactsForPeople, formatBytes,
+  setEvidenceVerifyingSource, updateCase, updateCaseContact,
   type CaseContactRecord, type CaseRecord,
   type EntityRecord, type EvidenceRecord, type TimelineEventRecord, type VerifyDraftRecord,
 } from "./db";
@@ -32,6 +32,10 @@ import SubjectProfile from "./SubjectProfile";
 import TimelineSnapshot from "./TimelineSnapshot";
 import { draftsAsTimelineEvents, prepareEventsForTimeline } from "./lib/timelineSync";
 import { isSecondaryEvidence, sourceClassLabel } from "./lib/sourceTier";
+import { doeNetworkHint } from "./lib/doeNetworkId";
+import PotentialMatchFiling from "./PotentialMatchFiling";
+import ConnectedEvidence from "./ConnectedEvidence";
+import AssistedNamusDrawer from "./AssistedNamusDrawer";
 import { hasContactFragment, isSearchNetworkPerson, looksLikeIndividualName } from "./lib/personDirectory";
 
 const mono = "font-mono";
@@ -243,6 +247,15 @@ export default function CaseOverview({
   const [sourceMenuId, setSourceMenuId] = useState<string | null>(null);
   const [sourceMenuRect, setSourceMenuRect] = useState<DOMRect | null>(null);
   const [registryTab, setRegistryTab] = useState<"official" | "news">("official");
+  const [doeDraft, setDoeDraft] = useState(activeCase?.doeNetworkId || "");
+  const [doeError, setDoeError] = useState("");
+  const [assistOpen, setAssistOpen] = useState(false);
+  const [holdLinks, setHoldLinks] = useState<Record<string, string>>({});
+  const [holdError, setHoldError] = useState("");
+  useEffect(() => {
+    setDoeDraft(activeCase?.doeNetworkId || "");
+    setDoeError("");
+  }, [activeCase?.id, activeCase?.doeNetworkId]);
   const [ingestOpen, setIngestOpen] = useState(false);
   const [contactsExpanded, setContactsExpanded] = useState(false);
   const [clock, setClock] = useState(() => Date.now());
@@ -373,7 +386,27 @@ export default function CaseOverview({
       <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <div className={`mb-2.5 ${mono} text-[11px] tracking-[0.14em] text-slate-500`}>
-            {activeCase.fileIdentifier || activeCase.id} / MISSING PERSON SEARCH
+            {(activeCase.doeNetworkId || activeCase.fileIdentifier || activeCase.id)} / MISSING PERSON SEARCH
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-[12px] font-semibold text-slate-600" htmlFor="doe-network-id">Doe Network ID</label>
+            <input
+              id="doe-network-id"
+              value={doeDraft}
+              onChange={(e) => { setDoeDraft(e.target.value.toUpperCase()); setDoeError(""); }}
+              onBlur={() => {
+                const next = doeDraft.trim();
+                if (next === (activeCase.doeNetworkId || "")) return;
+                void updateCase(activeCase.id, { doeNetworkId: next }).catch((err: unknown) => {
+                  setDoeError(err instanceof Error ? err.message : "That Doe Network ID could not be saved.");
+                });
+              }}
+              placeholder="93DMFL"
+              className={`h-8 w-36 rounded-[8px] border border-slate-300 px-2 ${mono} text-[12px] uppercase outline-none focus:border-blue-600`}
+            />
+            <span className={`text-[12px] ${doeError ? "text-rose-700" : "text-slate-500"}`}>
+              {doeError || doeNetworkHint(doeDraft)}
+            </span>
           </div>
         </div>
         <div className="flex flex-wrap gap-2.5">
@@ -389,6 +422,10 @@ export default function CaseOverview({
               <ArchiveRestore className="h-3.5 w-3.5" />Unarchive Case
             </button>
           ) : null}
+          <button type="button" onClick={() => setAssistOpen(true)}
+            className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-slate-300 bg-white px-4 text-[13px] font-semibold text-slate-700 hover:bg-slate-50">
+            Assisted NamUs
+          </button>
           <button type="button" onClick={onAddEvidence}
             className="inline-flex h-10 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-[13px] font-semibold text-white hover:bg-blue-700">
             <Upload className="h-3.5 w-3.5" />Add Evidence
@@ -405,6 +442,15 @@ export default function CaseOverview({
       </div>
 
       <SubjectProfile activeCase={activeCase} clock={clock} />
+      <PotentialMatchFiling activeCase={activeCase} />
+      <ConnectedEvidence activeCase={activeCase} evidence={evidence} />
+      <AssistedNamusDrawer
+        open={assistOpen}
+        onClose={() => setAssistOpen(false)}
+        onApply={async (result) => {
+          await applyAssistedNamus(activeCase.id, result.record, { rawText: result.rawText, url: result.url });
+        }}
+      />
 
       {(ingestJob && ingestJob.stage !== "done") || extractNotice ? (
         <div className="mb-6">
@@ -507,7 +553,19 @@ export default function CaseOverview({
                               {sourceClassLabel(ev.sourceClass)}
                             </span>
                           ) : null}
-                          {isSecondaryEvidence(ev) ? (
+                          {ev.authority === "verified_government" ? (
+                            <span className={`inline-flex items-center gap-1 rounded-md border border-emerald-700 bg-emerald-800 px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] text-white`}>
+                              VERIFIED GOVERNMENT · NAMUS
+                            </span>
+                          ) : ev.acceptance === "held" ? (
+                            <span className={`rounded-md border border-rose-300 bg-rose-50 px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] text-rose-900`}>
+                              HELD · NEEDS VERIFYING SOURCE
+                            </span>
+                          ) : ev.authority === "secondary_media" ? (
+                            <span className={`rounded-md border border-dashed border-amber-400 bg-amber-50 px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] text-amber-950`}>
+                              SECONDARY / MEDIA
+                            </span>
+                          ) : isSecondaryEvidence(ev) ? (
                             <span className={`rounded-md border border-dashed border-amber-400 bg-amber-50 px-1.5 py-0.5 ${mono} text-[10px] tracking-[0.06em] text-amber-950`}>
                               TIER 2 TIP
                             </span>
@@ -532,6 +590,31 @@ export default function CaseOverview({
                             {refs} {refs === 1 ? "reference" : "references"}
                           </span>
                         </div>
+                        {ev.acceptance === "held" && (
+                          <form
+                            className="mt-2 flex flex-wrap items-center gap-2"
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              const url = (holdLinks[ev.id] || "").trim();
+                              void setEvidenceVerifyingSource(ev.id, url).then(() => {
+                                setHoldError("");
+                              }).catch((err: unknown) => {
+                                setHoldError(err instanceof Error ? err.message : "That link cannot verify this source.");
+                              });
+                            }}
+                          >
+                            <input
+                              value={holdLinks[ev.id] || ""}
+                              onChange={(e) => setHoldLinks((prev) => ({ ...prev, [ev.id]: e.target.value }))}
+                              placeholder="https://www.namus.gov/…"
+                              className="h-8 min-w-[220px] flex-1 rounded-[8px] border border-rose-200 px-2 text-[12px] outline-none focus:border-blue-600"
+                            />
+                            <button type="submit" className="h-8 rounded-[8px] bg-slate-900 px-2.5 text-[12px] font-semibold text-white">
+                              Attach verifying source
+                            </button>
+                            {holdError && <span className="text-[12px] text-rose-700">{holdError}</span>}
+                          </form>
+                        )}
                       </div>
                     </div>
                     <div className="flex shrink-0 flex-wrap items-center gap-1.5 sm:justify-end">

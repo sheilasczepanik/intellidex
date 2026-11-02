@@ -35,6 +35,14 @@ export interface SubjectProfile {
   photoDataUrl?: string;
 }
 
+export interface PotentialMatchDraft {
+  title: string;
+  body: string;
+  audience: "state_researcher" | "coordinator";
+  formatted: string;
+  updatedAt: string;
+}
+
 export interface CaseRecord {
   id: string;
   title: string;
@@ -54,9 +62,16 @@ export interface CaseRecord {
   subjectName?: string;
   /** NamUs / agency / MP file number shown in the workspace. */
   fileIdentifier?: string;
+  /** Doe Network ID: 4 digits + 4 letters (1187UMFL) or the short year form (93DMFL). */
+  doeNetworkId?: string;
+  /** Last formatted Potential Match packet for a state researcher or coordinator. */
+  potentialMatch?: PotentialMatchDraft;
   /** Last known sighting as ISO local datetime. */
   lksAt?: string;
   lksLocation?: string;
+  /** Recovery time and place for an unidentified or located comparison. */
+  recoveryAt?: string;
+  recoveryLocation?: string;
   lksCircumstances?: string;
   subjectProfile?: SubjectProfile;
   /** Person entity IDs pinned in the left rail for this case. */
@@ -106,13 +121,49 @@ export interface EvidenceRecord {
   mimeType?: string;
   sourceType?: "pdf" | "image" | "text" | "web_article";
   /** Taxonomy requested as sourceType in the product spec (media format remains pdf|image|text|web_article). */
-  sourceClass?: "affidavit" | "police_report" | "forensic_record" | "news_article" | "press_release" | "note";
+  sourceClass?: "affidavit" | "police_report" | "forensic_record" | "news_article" | "press_release" | "note" | "namus_record";
   tier?: "primary" | "secondary";
+  /** NamUs government record vs supporting media intelligence. */
+  authority?: "verified_government" | "secondary_media";
+  /** Charley Project stays held until a non-Charley verifying link is attached. */
+  acceptance?: "accepted" | "held";
+  verifyingSourceUrl?: string;
   sourceUrl?: string;
   publishedDate?: string;
   wordCount?: number;
   /** When true, the file stays in the case vault but is hidden from the Intake staging list. */
   stagingHidden?: boolean;
+  /** Other cases that should show this article, clip, or clue in their connected evidence drawer. */
+  linkedCaseIds?: string[];
+}
+
+export type MatchLinkStatus = "under_review" | "submitted_area_director" | "ruled_out";
+
+export interface CaseMatchLink {
+  id: string;
+  caseIdA: string;
+  caseIdB: string;
+  pairKey: string;
+  status: MatchLinkStatus;
+  title: string;
+  body: string;
+  formatted: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NewsTriageItem {
+  id: string;
+  query: string;
+  title: string;
+  link: string;
+  source: string;
+  snippet: string;
+  publishedAt: string;
+  ingestedAt: string;
+  status: "new" | "linked" | "dismissed";
+  linkedCaseId?: string;
+  sample?: boolean;
 }
 
 export interface TimelineEventRecord {
@@ -302,6 +353,8 @@ export class DossierDB extends Dexie {
   relationships!: EntityTable<EntityRelationship, "id">;
   externalIntel!: EntityTable<ExternalIntelLead, "id">;
   caseMedia!: EntityTable<CaseMediaRecord, "id">;
+  newsItems!: EntityTable<NewsTriageItem, "id">;
+  caseMatchLinks!: EntityTable<CaseMatchLink, "id">;
 
   constructor() {
     super("DossierDB");
@@ -550,6 +603,51 @@ export class DossierDB extends Dexie {
     }).upgrade(async (tx) => {
       await tx.table("cases").toCollection().modify((row: { customMediaCategories?: string[] }) => {
         if (!Array.isArray(row.customMediaCategories)) row.customMediaCategories = [];
+      });
+    });
+    this.version(23).stores({
+      cases: "id, status, updatedAt, isArchived, doeNetworkId",
+      evidence: "id, caseId, status, fileType, sha256Hash, sourceType, tier, authority",
+      newsItems: "id, link, publishedAt, query, status, linkedCaseId",
+    }).upgrade(async (tx) => {
+      await tx.table("cases").toCollection().modify((row: { doeNetworkId?: string }) => {
+        if (typeof row.doeNetworkId !== "string") row.doeNetworkId = "";
+      });
+      await tx.table("evidence").toCollection().modify((row: {
+        authority?: string;
+        acceptance?: string;
+        sourceUrl?: string;
+        fileName?: string;
+        tier?: string;
+      }) => {
+        const blob = `${row.sourceUrl || ""} ${row.fileName || ""}`.toLowerCase();
+        if (/namus\.gov|namus\.nij/.test(blob)) {
+          row.authority = "verified_government";
+          row.acceptance = "accepted";
+          row.tier = "primary";
+        } else if (/charleyproject/.test(blob)) {
+          row.authority = "secondary_media";
+          row.acceptance = "held";
+          row.tier = "secondary";
+        } else if (row.tier === "secondary") {
+          row.authority = "secondary_media";
+          if (!row.acceptance) row.acceptance = "accepted";
+        } else if (!row.acceptance) {
+          row.acceptance = "accepted";
+        }
+      });
+    });
+    this.version(24).stores({
+      cases: "id, status, updatedAt, isArchived, doeNetworkId",
+      evidence: "id, caseId, status, fileType, sha256Hash, sourceType, tier, authority, *linkedCaseIds",
+      caseMatchLinks: "id, pairKey, caseIdA, caseIdB, status, updatedAt",
+    }).upgrade(async (tx) => {
+      await tx.table("cases").toCollection().modify((row: { recoveryAt?: string; recoveryLocation?: string }) => {
+        if (typeof row.recoveryAt !== "string") row.recoveryAt = "";
+        if (typeof row.recoveryLocation !== "string") row.recoveryLocation = "";
+      });
+      await tx.table("evidence").toCollection().modify((row: { linkedCaseIds?: string[] }) => {
+        if (!Array.isArray(row.linkedCaseIds)) row.linkedCaseIds = [];
       });
     });
   }

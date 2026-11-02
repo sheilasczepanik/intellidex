@@ -41,6 +41,8 @@ import TimelineConflictInspector from "./TimelineConflictInspector";
 import VerifyQueueCard, { citationFromDraft, citationFromEvent } from "./VerifyQueueCard";
 import VerifySourceSwitcher from "./VerifySourceSwitcher";
 import { cacheScanFindings, draftsForSource, runDynamicDocumentScan, scanFindingsToEvents } from "./lib/useExtraction";
+import { demoDossier, type DemoDossierId } from "./data/demoDossiers";
+import { pinsFromFindings } from "./data/caseLocations";
 import WorkspacePreferences from "./WorkspacePreferences";
 import { ExtractSelectionTip, LogEvidenceModal, VERIFY_CATEGORIES, type ManualLogCategoryId } from "./Verify";
 import {
@@ -85,7 +87,10 @@ import { formatRoleLabel, normalizePersonRole, PERSON_ROLE_VALUES, roleDisplayCl
 import type { SearchHit } from "./lib/globalSearch";
 import { formatAlertLabel, ALERT_LEVELS } from "./lib/missingPerson";
 import LiveAlertsFeed from "./LiveAlertsFeed";
+import NewsTriageFeed from "./NewsTriageFeed";
+import CrossReferenceLab from "./CrossReferenceLab";
 import VerifyIngestDropzone from "./VerifyIngestDropzone";
+import DemoDatasets from "./DemoDatasets";
 import CaseSidebarTree from "./CaseSidebarTree";
 import { isSearchNetworkPerson } from "./lib/personDirectory";
 import PersonWorkspace from "./PersonWorkspace";
@@ -94,7 +99,7 @@ import type { SubjectProfile } from "./db/schema";
 import {
   ArrowLeft, ArrowRight, Archive, ArchiveRestore, Check, CheckCheck, Clock, FileDown,
   FileText, FolderPlus, GitCommitHorizontal, HeartHandshake, Inbox, KeyRound, LayoutDashboard,
-  LayoutGrid, Lock, MapPin, Menu, MoreHorizontal, PanelLeftClose,
+  LayoutGrid, Lock, MapPin, Menu, MoreHorizontal, Newspaper, PanelLeftClose, Waypoints,
   PanelLeftOpen, Pencil, Phone, Plus, Radio, RefreshCw, Search, Settings2, ShieldCheck, StickyNote, Trash2, Truck,
   TriangleAlert, User, Users, UserRound, X, Box, Image as ImageIcon,
 } from "lucide-react";
@@ -103,7 +108,7 @@ import {
 /* types                                                               */
 /* ------------------------------------------------------------------ */
 
-export type Screen = "Hub" | "Alerts" | "Setup" | "Overview" | "Intake" | "Media" | "Verify" | "Timeline" | "Locations" | "WorkingTheory" | "Profile" | "Preferences" | "PersonOverview" | "PersonTimeline" | "PersonLocations" | "PersonMedia" | "PersonLinked";
+export type Screen = "Hub" | "Alerts" | "News" | "CrossRef" | "Setup" | "Overview" | "Intake" | "Media" | "Verify" | "Timeline" | "Locations" | "WorkingTheory" | "Profile" | "Preferences" | "PersonOverview" | "PersonTimeline" | "PersonLocations" | "PersonMedia" | "PersonLinked";
 export type Tone = "active" | "review" | "cold" | "ok" | "fail";
 export type EntityKind = "People" | "Places" | "Vehicles" | "Phones" | "Digital" | "Exhibits";
 
@@ -151,6 +156,8 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
   }
   if (path === "/" || path === "/hub") return { screen: "Hub", caseId: null, personId: null };
   if (path === "/hub/alerts" || path === "/alerts") return { screen: "Alerts", caseId: null, personId: null };
+  if (path === "/hub/news" || path === "/news") return { screen: "News", caseId: null, personId: null };
+  if (path === "/hub/cross-ref" || path === "/cross-ref") return { screen: "CrossRef", caseId: null, personId: null };
   if (path === "/setup") return { screen: "Setup", caseId: null, personId: null };
   if (path === "/overview") return { screen: "Overview", caseId: null, personId: null };
   if (path === "/intake") return { screen: "Intake", caseId: null, personId: null };
@@ -168,6 +175,8 @@ function parseAppPath(pathname: string): { screen: Screen; caseId: string | null
 function pathFromScreen(screen: Screen, caseId?: string | null, personId?: string | null) {
   if (screen === "Hub") return "/hub";
   if (screen === "Alerts") return "/hub/alerts";
+  if (screen === "News") return "/hub/news";
+  if (screen === "CrossRef") return "/hub/cross-ref";
   if (screen === "Profile") return "/settings/profile";
   if (screen === "Preferences") return "/settings/workspace";
   if (screen === "Setup") return "/setup";
@@ -457,6 +466,7 @@ export default function DesktopApp() {
   const [draftIncidentEnd, setDraftIncidentEnd] = useState("");
   const [draftStatus, setDraftStatus] = useState<CaseStatus>("ACTIVE_MISSING");
   const [draftFileId, setDraftFileId] = useState("");
+  const [draftDoeId, setDraftDoeId] = useState("");
   const [draftLksAt, setDraftLksAt] = useState("");
   const [draftProfile, setDraftProfile] = useState<SubjectProfile>({});
   const [savingCase, setSavingCase] = useState(false);
@@ -545,7 +555,11 @@ export default function DesktopApp() {
   const [extracting, setExtracting] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState("");
+  const [scanPercent, setScanPercent] = useState(0);
+  const [blankScanId, setBlankScanId] = useState<string | null>(null);
+  const [manualExtractHint, setManualExtractHint] = useState(false);
   const scanGen = useRef(0);
+  const dossierGuard = useRef<string | null>(null);
   const [ingestJob, setIngestJob] = useState<IngestJob | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [extractError, setExtractError] = useState<string | null>(null);
@@ -634,7 +648,7 @@ export default function DesktopApp() {
     setScreen(next);
     setOperatorMenu(false);
     setNavOpen(false);
-    const id = caseId || (next === "Hub" || next === "Alerts" || next === "Setup" || next === "Profile" || next === "Preferences" ? null : resolvedCaseId);
+    const id = caseId || (next === "Hub" || next === "Alerts" || next === "News" || next === "CrossRef" || next === "Setup" || next === "Profile" || next === "Preferences" ? null : resolvedCaseId);
     const pid = PERSON_SCREENS.includes(next) ? (personId ?? workspacePersonId) : null;
     setWorkspacePersonId(pid);
     const path = pathFromScreen(next, id, pid);
@@ -671,7 +685,7 @@ export default function DesktopApp() {
   }, [navOpen]);
 
   useEffect(() => {
-    if (screen === "Hub" || screen === "Alerts" || screen === "Setup" || screen === "Profile" || screen === "Preferences") {
+    if (screen === "Hub" || screen === "Alerts" || screen === "News" || screen === "CrossRef" || screen === "Setup" || screen === "Profile" || screen === "Preferences") {
       const path = pathFromScreen(screen);
       if (window.location.pathname !== path) window.history.replaceState({}, "", path);
       return;
@@ -708,6 +722,8 @@ export default function DesktopApp() {
   const GLOBAL_NAV: { id: Screen; icon: React.ComponentType<{ className?: string }>; label?: string; indent?: boolean }[] = [
     { id: "Hub", icon: LayoutGrid },
     { id: "Alerts", icon: Radio, label: "Live alerts", indent: true },
+    { id: "News", icon: Newspaper, label: "News triage", indent: true },
+    { id: "CrossRef", icon: Waypoints, label: "Cross-reference", indent: true },
   ];
   const intakeNavBadge = caseEvidence.filter(isPendingIntakeEvidence).length || undefined;
   const verifyNavBadge = pendingDrafts.length || undefined;
@@ -724,6 +740,7 @@ export default function DesktopApp() {
       incidentEnd: draftIncidentEnd,
       subjectName: draftTitle,
       fileIdentifier: draftFileId,
+      doeNetworkId: draftDoeId,
       lksAt: draftLksAt,
       lksLocation: draftJurisdiction,
       subjectProfile: draftProfile,
@@ -785,7 +802,6 @@ export default function DesktopApp() {
     setForm(null);
   };
 
-  const timelineConflicts = useTimelineConflicts(caseEvents, resolvedCaseId);
   const timelineFeed = useMemo(() => {
     const existing = new Set(caseEvents.map((event) => event.id));
     const fromDrafts = draftsAsTimelineEvents(pendingDrafts).filter((event) => {
@@ -795,6 +811,23 @@ export default function DesktopApp() {
     });
     return [...caseEvents, ...fromDrafts].sort((a, b) => a.timestamp - b.timestamp);
   }, [caseEvents, pendingDrafts]);
+
+  const timelineConflicts = useTimelineConflicts(timelineFeed, resolvedCaseId);
+  const findingPins = useMemo(() => pinsFromFindings([
+    ...pendingDrafts.filter((draft) => draft.status !== "rejected").map((draft) => ({
+      id: draft.id,
+      title: draft.title,
+      text: `${draft.details} ${draft.snippet}`,
+      timestamp: draft.timestampLabel,
+    })),
+    ...caseEvents.map((event) => ({
+      id: event.id,
+      title: event.title,
+      text: event.description,
+      lat: event.latitude,
+      lng: event.longitude,
+    })),
+  ]), [pendingDrafts, caseEvents]);
 
   const chrono = useMemo(() => {
     const entityMap = new Map(caseEntities.map((e) => [e.id, e]));
@@ -1299,7 +1332,7 @@ export default function DesktopApp() {
       return;
     }
     if (hit.kind === "evidence") {
-      const evidenceId = hit.id.slice("evidence:".length);
+      const evidenceId = hit.id.slice("evidence:".length).split("@")[0];
       setActiveEvidenceId(evidenceId);
       setScreen("Verify");
       return;
@@ -1315,6 +1348,7 @@ export default function DesktopApp() {
     setDraftIncidentStart("");
     setDraftIncidentEnd("");
     setDraftFileId("");
+    setDraftDoeId("");
     setDraftLksAt("");
     setDraftProfile({});
     setDraftStatus("ACTIVE_MISSING");
@@ -1330,6 +1364,7 @@ export default function DesktopApp() {
     setDraftIncidentStart(lksAt ? lksAt.slice(0, 10) : "");
     setDraftIncidentEnd("");
     setDraftFileId(alert.id);
+    setDraftDoeId("");
     setDraftLksAt(lksAt);
     setDraftProfile({
       currentEstimatedAge: alert.age || undefined,
@@ -1427,6 +1462,7 @@ export default function DesktopApp() {
         incidentEnd: draftIncidentEnd,
         subjectName: draftTitle,
         fileIdentifier: cleanNamusId,
+        doeNetworkId: draftDoeId,
         lksAt: draftLksAt,
         lksLocation: draftJurisdiction,
         subjectProfile: draftProfile,
@@ -1817,6 +1853,8 @@ export default function DesktopApp() {
     const still = () => scanGen.current === gen;
     setIsScanning(true);
     setScanProgress("Scanning document...");
+    setScanPercent(8);
+    setBlankScanId((current) => (current === (evidenceId ?? null) ? null : current));
     setExtracting(true);
     setExtractError(null);
     try {
@@ -1983,9 +2021,11 @@ export default function DesktopApp() {
           lastError: "",
           textClarity: clarity,
         });
+        setBlankScanId(ev.id);
         setIngestJob(null);
         return;
       }
+      setBlankScanId((current) => (current === ev.id ? null : current));
       const matchEntity = (id: string | null, name: string) => {
         if (id && roster.some((e) => e.id === id)) return id;
         const needle = name.trim().toLowerCase();
@@ -2044,6 +2084,107 @@ export default function DesktopApp() {
         setExtracting(false);
         setIsScanning(false);
         setScanProgress("");
+        setScanPercent(0);
+      }
+    }
+  };
+
+  const loadPrecompiledDossier = async (key: DemoDossierId) => {
+    const gen = ++scanGen.current;
+    const still = () => scanGen.current === gen;
+    dossierGuard.current = "loading";
+    setIsScanning(true);
+    setScanPercent(0);
+    setScanProgress("Parsing text layer & OCR coordinates...");
+    setExtracting(true);
+    setExtractError(null);
+    setManualExtractHint(false);
+    const spec = demoDossier(key);
+    let evidenceId = "";
+    try {
+      const caseId = resolvedCaseId ?? await ensureActiveCase();
+      if (!still() || !caseId) return;
+      const existing = (await db.evidence.where("caseId").equals(caseId).toArray())
+        .find((row) => row.sourceUrl === spec.sourceUrl || (key === "MM_1" && isMm1Source(row.fileName, row.id)));
+      const saved = existing
+        ? existing
+        : await addEvidence({
+          caseId,
+          fileName: spec.fileName,
+          fileType: spec.fileType,
+          rawText: spec.text,
+          pageCount: spec.pageCount,
+          sourceType: spec.sourceType,
+          sourceUrl: spec.sourceUrl,
+          wordCount: spec.text.split(/\s+/).filter(Boolean).length,
+        });
+      evidenceId = saved.id;
+      dossierGuard.current = evidenceId;
+      await db.evidence.update(evidenceId, {
+        sourceUrl: spec.sourceUrl,
+        rawText: spec.text,
+        fullText: spec.text,
+        pageCount: spec.pageCount,
+        fileName: saved.fileName || spec.fileName,
+        status: "indexed",
+        lastError: "",
+      });
+      const stale = (await db.verifyDrafts.where("evidenceId").equals(evidenceId).toArray())
+        .filter((draft) => draft.status === "pending" && draft.origin !== "manual" && draft.citation !== "manual-observation")
+        .map((draft) => draft.id);
+      if (stale.length) await db.verifyDrafts.bulkDelete(stale);
+      const taken = new Set((await db.verifyDrafts.where("evidenceId").equals(evidenceId).toArray()).map((draft) => draft.id));
+      const rows = spec.findings
+        .map((finding) => ({
+          id: `${evidenceId}__${finding.id}`,
+          caseId,
+          evidenceId,
+          timestamp: parseEventTime(finding.timestamp, finding.timestampLabel, { extraText: finding.details }),
+          timestampLabel: finding.timestampLabel || finding.timestamp || "Unknown",
+          entityId: "",
+          entityName: "",
+          suggestNewEntity: false,
+          newEntityType: "" as const,
+          category: finding.category,
+          title: finding.title,
+          snippet: finding.exactSnippet,
+          details: finding.details,
+          confidence: finding.confidence,
+          citation: "demo-dossier",
+          origin: "ai" as const,
+          sourceCitation: {
+            sourceId: evidenceId,
+            sourceName: spec.fileName,
+            sourceType: spec.sourceType,
+            pageNumber: finding.pageNumber,
+            exactQuote: finding.exactSnippet,
+          },
+        }))
+        .filter((row) => !taken.has(row.id));
+      setActiveEvidenceId(evidenceId);
+      setBlankScanId(null);
+      goTo("Verify", caseId);
+      const stages = [
+        "Parsing text layer & OCR coordinates...",
+        "Cross-referencing timeline timestamps...",
+        "Complete",
+      ];
+      const size = Math.max(1, Math.ceil(rows.length / stages.length));
+      for (let step = 0; step < stages.length; step += 1) {
+        if (!still()) return;
+        setScanProgress(stages[step]);
+        setScanPercent(Math.round(((step + 1) / stages.length) * 100));
+        const slice = rows.slice(step * size, (step + 1) * size);
+        if (slice.length) await addVerifyDrafts(slice);
+        await new Promise((resolve) => window.setTimeout(resolve, 400));
+      }
+    } finally {
+      if (dossierGuard.current === "loading" || dossierGuard.current === evidenceId) dossierGuard.current = null;
+      if (still()) {
+        setIsScanning(false);
+        setExtracting(false);
+        setScanProgress("");
+        setScanPercent(0);
       }
     }
   };
@@ -2405,6 +2546,8 @@ export default function DesktopApp() {
     scroller?.scrollTo({ top: 0 });
     document.getElementById("pdf-page-1")?.scrollIntoView({ block: "start" });
     if (screen !== "Verify" || !sourceEvidence) return;
+    if (dossierGuard.current) return;
+    if ((sourceEvidence.sourceUrl || "").startsWith("dossier://")) return;
     setIsScanning(true);
     setScanProgress("Scanning document...");
     void runExtract(sourceEvidence.id, { stayOnWorkspace: true });
@@ -2511,7 +2654,7 @@ export default function DesktopApp() {
               })))}
               intakeBadge={intakeNavBadge}
               verifyBadge={verifyNavBadge}
-              locked={screen === "Hub" || screen === "Alerts" || !activeCase}
+              locked={screen === "Hub" || screen === "Alerts" || screen === "News" || screen === "CrossRef" || !activeCase}
               onGoCase={(id) => goTo(id)}
               onGoPerson={(id, leaf) => goTo(SCREEN_BY_PERSON_LEAF[leaf] ?? "PersonOverview", resolvedCaseId, id)}
               onPinPerson={(id, caseId) => {
@@ -2680,6 +2823,22 @@ export default function DesktopApp() {
               />
             )}
 
+            {screen === "News" && (
+              <NewsTriageFeed
+                cases={hubCases ?? []}
+                onBack={() => goTo("Hub")}
+                onOpenCase={(id) => goTo("Overview", id)}
+              />
+            )}
+
+            {screen === "CrossRef" && (
+              <CrossReferenceLab
+                cases={hubCases ?? []}
+                onBack={() => goTo("Hub")}
+                onOpenCase={(id) => goTo("Overview", id)}
+              />
+            )}
+
             {/* ---------------- HUB ---------------- */}
             {screen === "Hub" && (() => {
               const locatedCount = locatedHubCases.length;
@@ -2715,6 +2874,12 @@ export default function DesktopApp() {
                   )}
                   <button type="button" onClick={() => goTo("Alerts")} className="inline-flex h-10 items-center gap-2.5 rounded-[10px] border border-slate-300 bg-white px-[18px] text-[13.5px] font-semibold text-slate-800 transition-colors hover:bg-slate-50">
                     <Radio className="h-[15px] w-[15px]" />Live alerts
+                  </button>
+                  <button type="button" onClick={() => goTo("News")} className="inline-flex h-10 items-center gap-2.5 rounded-[10px] border border-slate-300 bg-white px-[18px] text-[13.5px] font-semibold text-slate-800 transition-colors hover:bg-slate-50">
+                    <Newspaper className="h-[15px] w-[15px]" />News triage
+                  </button>
+                  <button type="button" onClick={() => goTo("CrossRef")} className="inline-flex h-10 items-center gap-2.5 rounded-[10px] border border-slate-300 bg-white px-[18px] text-[13.5px] font-semibold text-slate-800 transition-colors hover:bg-slate-50">
+                    <Waypoints className="h-[15px] w-[15px]" />Cross-reference
                   </button>
                 </div>
 
@@ -2775,7 +2940,7 @@ export default function DesktopApp() {
                     >
                       <div className="mb-3.5 flex items-start justify-between gap-3">
                         <div>
-                          <div className={`mb-[7px] ${mono} text-[10.5px] tracking-[0.1em] text-slate-500`}>{c.fileIdentifier || c.id}</div>
+                          <div className={`mb-[7px] ${mono} text-[10.5px] tracking-[0.1em] text-slate-500`}>{c.doeNetworkId || c.fileIdentifier || c.id}</div>
                           <h3 className="text-[21px] font-semibold leading-tight tracking-tight">{c.subjectName || c.title}</h3>
                         </div>
                         <div className="flex shrink-0 items-center gap-1.5">
@@ -2891,6 +3056,7 @@ export default function DesktopApp() {
               <NewCaseForm
                 title={draftTitle}
                 fileIdentifier={draftFileId}
+                doeNetworkId={draftDoeId}
                 jurisdiction={draftJurisdiction}
                 lksAt={draftLksAt}
                 alertLevel={draftStatus}
@@ -2899,6 +3065,7 @@ export default function DesktopApp() {
                 saving={savingCase}
                 onTitle={setDraftTitle}
                 onFileIdentifier={setDraftFileId}
+                onDoeNetworkId={setDraftDoeId}
                 onJurisdiction={setDraftJurisdiction}
                 onLksAt={setDraftLksAt}
                 onAlertLevel={setDraftStatus}
@@ -3024,6 +3191,7 @@ export default function DesktopApp() {
                   activeCase={activeCase}
                   places={caseEntities.filter((e) => e.type === "place" || e.type === "location")}
                   events={caseEvents}
+                  findingPins={findingPins}
                   onArbitrate={requestDup}
                   onViewChronology={openPlaceChronology}
                 />
@@ -3099,12 +3267,17 @@ export default function DesktopApp() {
                 }}
                 highlightDropzone={intakeHighlight}
                 onHighlightConsumed={() => setIntakeHighlight(false)}
+                onLoadSample={(id) => { void loadPrecompiledDossier(id); }}
               />
             )}
 
             {/* ---------------- VERIFY ---------------- */}
             {screen === "Verify" && activeCase && (
-              <div className="grid min-h-0 grid-cols-1 overflow-auto lg:h-[calc(100dvh-7.5rem)] lg:grid-cols-2 lg:overflow-hidden">
+              <div className="flex min-h-0 flex-col overflow-hidden lg:h-[calc(100dvh-7.5rem)]">
+                <div className="shrink-0 border-b border-slate-200 px-3 py-2 sm:px-6">
+                  <DemoDatasets busy={isScanning} onLoad={(id) => { void loadPrecompiledDossier(id); }} />
+                </div>
+              <div className="grid min-h-0 flex-1 grid-cols-1 overflow-auto lg:grid-cols-2 lg:overflow-hidden">
                 <section className="flex min-h-[min(52dvh,480px)] min-w-0 flex-col overflow-hidden border-b border-slate-200 lg:min-h-0 lg:border-b-0 lg:border-r">
                   <div className="flex h-auto min-h-12 shrink-0 flex-wrap items-end justify-between gap-2 border-b border-slate-200 px-3 py-2 sm:px-6">
                     <VerifySourceSwitcher
@@ -3119,7 +3292,12 @@ export default function DesktopApp() {
                       <button
                         type="button"
                         disabled={busy || !(sourceEvidence?.fileBase64 || sourceEvidence?.imageBase64 || sourceEvidence?.rawText.trim())}
-                        onClick={() => sourceEvidence && void runExtract(sourceEvidence.id)}
+                        onClick={() => {
+                          if (!sourceEvidence) return;
+                          if ((sourceEvidence.sourceUrl || "").startsWith("dossier://CONFLICT")) void loadPrecompiledDossier("CONFLICT_DISPATCH");
+                          else if ((sourceEvidence.sourceUrl || "").startsWith("dossier://MM_1") || isMm1Source(sourceEvidence.fileName, sourceEvidence.id)) void loadPrecompiledDossier("MM_1");
+                          else void runExtract(sourceEvidence.id);
+                        }}
                         className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-600 hover:border-blue-500 hover:text-blue-700 disabled:opacity-40"
                       >
                         <RefreshCw className={`h-3 w-3 ${extracting ? "animate-spin" : ""}`} />
@@ -3129,6 +3307,11 @@ export default function DesktopApp() {
                     </div>
                   </div>
                   <div ref={sourcePaneRef} onScroll={syncQueueToSourceScroll} onMouseUp={captureSourceSelection} onTouchEnd={captureSourceSelection} className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+                    {manualExtractHint && (
+                      <div className="mx-3 mt-3 rounded-[10px] border border-blue-200 bg-blue-50 px-3.5 py-2.5 text-[12.5px] text-blue-950">
+                        Select a passage in the document. Releasing the selection opens a card prefilled with that text.
+                      </div>
+                    )}
                     {extractError && (
                       <div className="mx-3 mt-3 flex items-start gap-2.5 rounded-[10px] border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-950">
                         <TriangleAlert className="mt-0.5 h-[15px] w-[15px] shrink-0" />
@@ -3209,13 +3392,22 @@ export default function DesktopApp() {
                 </section>
 
                 <section className="flex min-h-[min(52dvh,480px)] min-w-0 flex-col overflow-hidden bg-slate-50/60 lg:min-h-0">
-                  <div className="flex h-auto min-h-12 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 sm:px-6">
-                    <div className={`flex min-w-0 items-center gap-2.5 truncate ${mono} text-[11px] tracking-[0.12em] text-slate-500`}>
-                      <Inbox className="h-3.5 w-3.5 shrink-0" />AI EXTRACTION QUEUE
+                  <div className="shrink-0 border-b border-slate-200">
+                    <div className="flex h-auto min-h-12 flex-wrap items-center justify-between gap-2 px-3 py-2 sm:px-6">
+                      <div className={`flex min-w-0 items-center gap-2.5 truncate ${mono} text-[11px] tracking-[0.12em] text-slate-500`}>
+                        <Inbox className="h-3.5 w-3.5 shrink-0" />AI EXTRACTION QUEUE
+                      </div>
+                      <span className={`shrink-0 whitespace-nowrap ${mono} text-[11px] text-slate-500`}>
+                        {isScanning
+                          ? `${scanProgress || "Scanning document..."}${sourcePending.length ? ` · ${sourcePending.length}` : ""}`
+                          : `${sourcePending.length} UNRESOLVED`}
+                      </span>
                     </div>
-                    <span className={`shrink-0 whitespace-nowrap ${mono} text-[11px] text-slate-500`}>
-                      {isScanning ? scanProgress || "Scanning document..." : `${sourcePending.length} UNRESOLVED`}
-                    </span>
+                    {isScanning && (
+                      <div className="h-1 w-full bg-slate-200" aria-hidden="true">
+                        <div className="h-full bg-blue-600 transition-[width] duration-300 ease-out" style={{ width: `${Math.max(scanPercent, 8)}%` }} />
+                      </div>
+                    )}
                   </div>
 
                   <div ref={queuePaneRef} className="flex flex-1 flex-col gap-3 overflow-auto px-3 pb-6 pt-5 sm:px-6">
@@ -3257,7 +3449,28 @@ export default function DesktopApp() {
                       />
                     ))}
 
-                    {!isScanning && sourcePending.length === 0 && narrativeQueue.length === 0 && (
+                    {!isScanning && blankScanId === sourceEvidence?.id && sourcePending.length === 0 && (
+                      <div className="flex flex-col items-center gap-4 rounded-[16px] border border-slate-200 bg-white px-6 py-10 text-center shadow-sm">
+                        <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 text-slate-500">
+                          <TriangleAlert className="h-5 w-5" />
+                        </div>
+                        <div className="text-[18px] font-semibold tracking-tight text-slate-900">No readable text layer</div>
+                        <p className="max-w-[38ch] text-[13px] leading-relaxed text-slate-500">
+                          This file has no digital text pdf.js could read. Scanned pages without a text layer stay blank until you highlight a passage yourself.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setManualExtractHint(true);
+                            sourcePaneRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                          }}
+                          className="inline-flex h-10 items-center rounded-[10px] bg-slate-900 px-4 text-[13px] font-semibold text-white hover:bg-slate-800"
+                        >
+                          [ Manually Highlight & Extract ]
+                        </button>
+                      </div>
+                    )}
+                    {!isScanning && blankScanId !== sourceEvidence?.id && sourcePending.length === 0 && narrativeQueue.length === 0 && (
                       <div className="flex flex-col items-center gap-4 rounded-[14px] border border-dashed border-slate-300 px-5 py-10 text-center">
                         <CheckCheck className="h-[18px] w-[18px] text-blue-600" />
                         <div className="text-[20px] font-semibold">
@@ -3271,6 +3484,7 @@ export default function DesktopApp() {
                         <VerifyIngestDropzone
                           busy={busy || extracting}
                           indexedFiles={intakeIndexedFiles}
+                          onLoadSample={(id) => { void loadPrecompiledDossier(id); }}
                           onFiles={(files) => { void ingestFiles(files, { extract: true, background: true }); }}
                           onPickIndexed={(id) => {
                             setActiveEvidenceId(id);
@@ -3283,6 +3497,7 @@ export default function DesktopApp() {
                       <VerifyIngestDropzone
                         busy={busy || extracting}
                         indexedFiles={intakeIndexedFiles}
+                        onLoadSample={(id) => { void loadPrecompiledDossier(id); }}
                         onFiles={(files) => { void ingestFiles(files, { extract: true, background: true }); }}
                         onPickIndexed={(id) => {
                           setActiveEvidenceId(id);
@@ -3300,6 +3515,7 @@ export default function DesktopApp() {
                     </button>
                   </div>
                 </section>
+              </div>
               </div>
             )}
 

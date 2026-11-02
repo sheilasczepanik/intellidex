@@ -1,5 +1,7 @@
 import { useRef, useState } from "react";
 import { CloudUpload, Loader2 } from "lucide-react";
+import DemoDatasets from "./DemoDatasets";
+import type { DemoDossierId } from "./data/demoDossiers";
 
 const ACCEPT = ".pdf,.png,.jpg,.jpeg,.txt,.csv";
 
@@ -8,11 +10,13 @@ export default function VerifyIngestDropzone({
   indexedFiles,
   onFiles,
   onPickIndexed,
+  onLoadSample,
 }: {
   busy?: boolean;
   indexedFiles: { id: string; fileName: string }[];
   onFiles: (files: FileList | File[]) => void;
   onPickIndexed: (id: string) => void;
+  onLoadSample?: (id: DemoDossierId) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
@@ -25,7 +29,8 @@ export default function VerifyIngestDropzone({
   };
 
   return (
-    <div className="w-full max-w-[420px]" data-verify-ingest="">
+    <div className="flex w-full max-w-[420px] flex-col gap-3" data-verify-ingest="">
+      {onLoadSample ? <DemoDatasets busy={busy} onLoad={onLoadSample} /> : null}
       <input
         ref={inputRef}
         type="file"

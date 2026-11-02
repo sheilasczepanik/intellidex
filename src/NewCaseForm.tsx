@@ -4,6 +4,9 @@ import type { CaseStatus, SubjectProfile } from "./db/schema";
 import { fetchNamusRecord } from "./lib/namusClient";
 import { extractNamusId, namusNumericId } from "./lib/namusRecord";
 import { ALERT_LEVELS, formatAlertLabel } from "./lib/missingPerson";
+import { doeNetworkHint } from "./lib/doeNetworkId";
+import { lksFromNamusDate } from "./lib/namusPaste";
+import AssistedNamusDrawer, { type NamusAssistResult } from "./AssistedNamusDrawer";
 
 const mono = "font-mono";
 const inputCls =
@@ -12,6 +15,7 @@ const inputCls =
 export default function NewCaseForm({
   title,
   fileIdentifier,
+  doeNetworkId,
   jurisdiction,
   lksAt,
   alertLevel,
@@ -20,6 +24,7 @@ export default function NewCaseForm({
   saving,
   onTitle,
   onFileIdentifier,
+  onDoeNetworkId,
   onJurisdiction,
   onLksAt,
   onAlertLevel,
@@ -30,6 +35,7 @@ export default function NewCaseForm({
 }: {
   title: string;
   fileIdentifier: string;
+  doeNetworkId: string;
   jurisdiction: string;
   lksAt: string;
   alertLevel: CaseStatus;
@@ -38,6 +44,7 @@ export default function NewCaseForm({
   saving: boolean;
   onTitle: (value: string) => void;
   onFileIdentifier: (value: string) => void;
+  onDoeNetworkId: (value: string) => void;
   onJurisdiction: (value: string) => void;
   onLksAt: (value: string) => void;
   onAlertLevel: (value: CaseStatus) => void;
@@ -51,6 +58,8 @@ export default function NewCaseForm({
   const [namusOk, setNamusOk] = useState(false);
   const [namusErr, setNamusErr] = useState("");
   const [namusNotice, setNamusNotice] = useState("");
+  const [assistOpen, setAssistOpen] = useState(false);
+  const doeHint = doeNetworkHint(doeNetworkId);
 
   const autoFillNamus = async () => {
     const query = fileIdentifier.trim() || title.trim();
@@ -148,8 +157,28 @@ export default function NewCaseForm({
         ) : namusErr ? (
           <p className="mb-4 text-[12.5px] text-rose-700">{namusErr}</p>
         ) : (
-          <p className="mb-4 text-[12px] text-slate-400">Use a NamUs ID such as MP2316 to pull public case details into this form.</p>
+          <p className="mb-4 text-[12px] text-slate-400">Use a NamUs ID such as MP2316 to pull a known public record, or paste a profile when the page will not load.</p>
         )}
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setAssistOpen(true)}
+            className="inline-flex h-9 items-center rounded-[10px] border border-slate-300 bg-white px-3 text-[12.5px] font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Assisted NamUs ingest
+          </button>
+          <span className="text-[12px] text-slate-400">Paste a URL and the profile text. Nothing is scraped from NamUs.</span>
+        </div>
+        <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Doe Network ID</label>
+        <input
+          value={doeNetworkId}
+          onChange={(e) => onDoeNetworkId(e.target.value.toUpperCase())}
+          placeholder="93DMFL or 1187UMFL"
+          className={`${inputCls} h-11 text-[14px] ${mono}`}
+        />
+        <p className={`mb-4 mt-1.5 text-[12px] ${doeNetworkId.trim() && doeHint.startsWith("Use ") ? "text-rose-700" : "text-slate-500"}`}>
+          {doeHint || "4 digits and 4 letters, such as 1187UMFL. Short year forms such as 93DMFL are accepted."}
+        </p>
         <div className="mb-4 grid gap-3 sm:grid-cols-2">
           <div>
             <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Last known sighting date & time</label>
@@ -257,6 +286,37 @@ export default function NewCaseForm({
           </button>
         </div>
       </form>
+      <AssistedNamusDrawer
+        open={assistOpen}
+        onClose={() => setAssistOpen(false)}
+        onApply={(result) => applyAssist(result)}
+      />
     </div>
   );
+
+  function applyAssist(result: NamusAssistResult) {
+    const data = result.record;
+    if (!title.trim() && data.fullName) onTitle(data.fullName);
+    if (!fileIdentifier.trim() && data.namusId) onFileIdentifier(`MP${data.namusId}`);
+    if (!jurisdiction.trim() && data.location) onJurisdiction(data.location);
+    const lks = lksFromNamusDate(data.dateLastSeen);
+    if (!lksAt && lks) onLksAt(lks);
+    if (!summary.trim() && (data.circumstances || data.caseNotes)) onSummary(data.circumstances || data.caseNotes);
+    onProfile({
+      ...profile,
+      ageAtDisappearance: profile.ageAtDisappearance || data.ageAtDisappearance,
+      currentEstimatedAge: profile.currentEstimatedAge || data.currentAge,
+      dateOfBirth: profile.dateOfBirth || data.dateOfBirth,
+      height: profile.height || data.height,
+      weight: profile.weight || data.weight,
+      hair: profile.hair || data.hair,
+      eyes: profile.eyes || data.eyes,
+      distinguishingMarks: profile.distinguishingMarks || data.distinguishingMarks,
+      clothingLastSeen: profile.clothingLastSeen || data.clothing,
+      medicalAlerts: profile.medicalAlerts || data.medicalAlerts,
+    });
+    setNamusOk(true);
+    setNamusNotice(result.engine === "gpt-4o" ? "Structured with GPT-4o." : "Structured from the pasted text on this machine.");
+    setNamusErr("");
+  }
 }

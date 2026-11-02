@@ -86,15 +86,28 @@ export async function searchDossier(query: string): Promise<SearchHit[]> {
   for (const ev of evidence) {
     const blob = hay(ev.fileName, ev.fileType, (ev.fullText || ev.rawText).slice(0, 12000));
     if (blob.includes(q)) {
+      const snippet = snippetAround(ev.fullText || ev.rawText || ev.fileType, q);
       hits.push({
         id: `evidence:${ev.id}`,
         group: "Evidence",
         title: ev.fileName,
-        subtitle: snippetAround(ev.fullText || ev.rawText || ev.fileType, q),
+        subtitle: snippet,
         caseId: ev.caseId,
         caseTitle: caseTitle(ev.caseId),
         kind: "evidence",
       });
+      for (const linkedId of ev.linkedCaseIds || []) {
+        if (linkedId === ev.caseId) continue;
+        hits.push({
+          id: `evidence:${ev.id}@${linkedId}`,
+          group: "Evidence",
+          title: ev.fileName,
+          subtitle: `Connected from ${caseTitle(ev.caseId)} · ${snippet}`,
+          caseId: linkedId,
+          caseTitle: caseTitle(linkedId),
+          kind: "evidence",
+        });
+      }
     }
   }
 
