@@ -1,6 +1,7 @@
+import { assistNamusProfile } from "./namusAssist.ts";
+import { parseNamusPaste, recordHasFacts, type AssistedNamusRecord } from "../src/lib/namusPaste.ts";
 import {
   extractNamusId,
-  fallbackNamusRecord,
   knownNamusRecord,
   namusNumericId,
   namusOk,
@@ -21,40 +22,70 @@ function obj(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? value as Record<string, unknown> : null;
 }
 
+function named(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number") return str(value);
+  const row = obj(value);
+  if (!row) return "";
+  return str(row.name) || str(row.description) || str(row.displayName);
+}
+
+function heightLabel(value: unknown) {
+  const raw = named(value) || str(obj(value)?.inches) || str(obj(value)?.from);
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 36 && n <= 96) {
+    return `${Math.floor(n / 12)}'${Math.round(n % 12)}"`;
+  }
+  return raw;
+}
+
+function weightLabel(value: unknown) {
+  const raw = named(value) || str(obj(value)?.pounds) || str(obj(value)?.from);
+  if (!raw) return "";
+  return /lb/i.test(raw) ? raw : `${raw} lbs`;
+}
+
+function ageLabel(value: unknown) {
+  const row = obj(value);
+  return str(row?.years) || str(row?.from) || named(value);
+}
+
 function mapNamusJson(data: unknown, mp: string): NamusRecord | null {
   const root = obj(data);
   if (!root) return null;
-  const idn = obj(root.subjectIdentification);
-  const sight = obj(root.sighting);
-  const desc = obj(root.subjectDescription);
-  const physical = obj(root.physicalDescription);
+  const idn = obj(root.subjectIdentification) || obj(root.identification);
+  const sight = obj(root.sighting) || obj(root.lastKnownLocation);
+  const desc = obj(root.subjectDescription) || obj(root.physicalDescription) || obj(root.description);
+  const physical = obj(root.physicalDescription) || desc;
   const clothes = obj(root.clothingAndAccessories);
   const medical = obj(root.medicalInformation);
+  const circumstance = obj(root.circumstances);
   const state = obj(sight?.state);
   const first = str(idn?.firstName);
   const last = str(idn?.lastName);
-  const fullName = `${first} ${last}`.trim() || str(root.fullName);
+  const fullName = `${first} ${last}`.trim() || str(root.fullName) || str(idn?.name);
   const city = str(sight?.city);
   const stateName = str(state?.name) || (typeof sight?.state === "string" ? str(sight.state) : "");
-  const location = [city, stateName].filter(Boolean).join(", ");
-  const lksDate = str(sight?.dateOfLks) || str(sight?.dateOfLastContact);
-  if (!fullName && !location && !lksDate) return null;
+  const location = [city, stateName].filter(Boolean).join(", ") || str(sight?.address);
+  const lksDate = str(sight?.dateOfLks) || str(sight?.dateOfLastContact) || str(sight?.dateLastSeen);
+  const sex = named(desc?.sex) || named(idn?.sex) || named(root.sex) || named(desc?.gender);
+  if (!fullName && !location && !lksDate && !sex) return null;
   return {
     namusId: mp,
-    fullName: fullName || `NamUs Subject (${mp})`,
+    fullName,
     lksDate,
     lksTime: str(sight?.timeOfLks) || str(sight?.timeOfLastContact),
     location,
-    ageAtDisappearance: str(desc?.ageAtDisappearance) || str(desc?.ageLastSeen),
-    currentAge: str(desc?.currentMinAge) || str(desc?.currentAge),
-    height: str(desc?.height),
-    weight: str(desc?.weight),
-    hairColor: str(desc?.hairColor) || str(obj(desc?.hair)?.name),
-    eyeColor: str(desc?.eyeColor) || str(obj(desc?.eyes)?.name),
-    distinguishingMarks: str(physical?.distinguishingMarks) || str(physical?.tattoos) || str(desc?.scarsAndMarks) || str(desc?.distinguishingMarks),
-    clothing: str(clothes?.clothing) || str(sight?.clothingDescription) || str(desc?.clothing) || str(desc?.clothingAndAccessories),
-    medicalAlerts: str(medical?.conditions) || str(physical?.medical) || str(desc?.medical) || str(desc?.medicalConditions) || "None recorded",
-    circumstances: str(root.circumstances) || str(sight?.circumstances),
+    ageAtDisappearance: ageLabel(desc?.ageLastSeen) || ageLabel(desc?.ageAtDisappearance) || str(desc?.age),
+    currentAge: ageLabel(desc?.currentMinAge) || ageLabel(desc?.currentAge),
+    height: heightLabel(desc?.heightFrom) || heightLabel(desc?.height),
+    weight: weightLabel(desc?.weightFrom) || weightLabel(desc?.weight),
+    hairColor: named(desc?.hairColor) || named(desc?.hair),
+    eyeColor: named(desc?.eyeColor) || named(desc?.eye) || named(desc?.eyes),
+    distinguishingMarks: str(physical?.distinguishingMarks) || str(physical?.tattoos) || str(desc?.scarsAndMarks),
+    clothing: str(clothes?.clothing) || str(sight?.clothingDescription) || str(desc?.clothing),
+    medicalAlerts: str(medical?.conditions) || str(physical?.medical) || str(desc?.medicalConditions),
+    circumstances: str(circumstance?.circumstancesOfDisappearance) || str(root.circumstances) || str(sight?.circumstances),
+    sex,
   };
 }
 
@@ -64,35 +95,49 @@ function timeoutSignal(ms: number) {
     : undefined;
 }
 
-function readerRecord(numericId: string, text: string): NamusRecord {
-  const titleMatch = text.match(/#\s*(?:Missing Person\s*[-—:]\s*)?([A-Za-z][A-Za-z\s.'-]{1,80})/i);
-  const name = titleMatch ? titleMatch[1].trim() : `NamUs Subject MP${numericId}`;
-  const locationMatch = text.match(/(?:Location|City, State|Last Seen|County):\s*([^\n\r]+)/i);
-  const location = locationMatch ? locationMatch[1].trim() : "Jurisdiction Pending";
+function usableNamusRecord(record: NamusRecord | null): record is NamusRecord {
+  if (!record) return false;
+  const name = record.fullName.trim();
+  if (/^NamUs (Subject|MP)\b/i.test(name)) return false;
+  if (/access denied|just a moment|enable javascript|captcha/i.test(name)) return false;
+  const hasName = /[A-Za-z]{2,}/.test(name) && !/^namus$/i.test(name);
+  const hasPlace = record.location.trim().length > 2 && !/pending verification|jurisdiction pending/i.test(record.location);
+  return hasName || (hasPlace && Boolean(record.lksDate || record.height || record.ageAtDisappearance || record.sex));
+}
+
+function recordFromAssisted(assisted: AssistedNamusRecord, numericId: string): NamusRecord | null {
+  if (!recordHasFacts(assisted)) return null;
+  const digits = assisted.namusId.replace(/\D/g, "") || numericId;
   return {
-    namusId: `MP${numericId}`,
-    fullName: name,
-    lksDate: new Date().toISOString().slice(0, 16),
+    namusId: digits ? `MP${digits}` : "",
+    fullName: assisted.fullName,
+    lksDate: assisted.dateLastSeen,
     lksTime: "",
-    location,
-    ageAtDisappearance: "25",
-    currentAge: "",
-    height: "",
-    weight: "",
-    hairColor: "",
-    eyeColor: "",
-    distinguishingMarks: "",
-    clothing: "",
-    medicalAlerts: "",
-    circumstances: `Imported from NamUs record MP${numericId}.`,
+    location: assisted.location,
+    ageAtDisappearance: assisted.ageAtDisappearance,
+    currentAge: assisted.currentAge,
+    height: assisted.height,
+    weight: assisted.weight,
+    hairColor: assisted.hair,
+    eyeColor: assisted.eyes,
+    distinguishingMarks: assisted.distinguishingMarks,
+    clothing: assisted.clothing,
+    medicalAlerts: assisted.medicalAlerts,
+    circumstances: assisted.circumstances || assisted.caseNotes,
+    sex: assisted.sex,
   };
+}
+
+function readerRecord(numericId: string, text: string): NamusRecord | null {
+  const assisted = recordFromAssisted(parseNamusPaste(text, `https://www.namus.gov/MissingPersons/Case#/${numericId}`), numericId);
+  return usableNamusRecord(assisted) ? assisted : null;
 }
 
 async function fetchNamusViaReader(numericId: string): Promise<NamusRecord | null> {
   const proxyUrl = `https://r.jina.ai/https://www.namus.nij.ojp.gov/case/MP${numericId}`;
   const res = await fetch(proxyUrl, {
     headers: { Accept: "text/plain" },
-    signal: timeoutSignal(6000),
+    signal: timeoutSignal(4000),
   });
   if (!res.ok) return null;
   const text = await res.text();
@@ -114,8 +159,7 @@ async function fetchNamusDirect(numericId: string): Promise<NamusRecord | null> 
   const json = await res.json() as unknown;
   const mp = `MP${numericId}`;
   const record = mapNamusJson(json, mp);
-  if (!record?.fullName || record.fullName.startsWith("NamUs Subject") || record.fullName.startsWith("NamUs MP")) return null;
-  return record;
+  return usableNamusRecord(record) ? record : null;
 }
 
 export async function fetchNamusCase(rawId: string): Promise<NamusLookupResponse> {
@@ -127,21 +171,24 @@ export async function fetchNamusCase(rawId: string): Promise<NamusLookupResponse
   const known = knownNamusRecord(numericId);
   if (known) return namusOk(known, "cached");
 
-  try {
-    const viaReader = await fetchNamusViaReader(numericId);
-    if (viaReader) return namusOk(viaReader, "live");
-  } catch (err) {
-    console.warn("Proxy fetch failed:", err);
-  }
+  const [direct, viaReader] = await Promise.all([
+    fetchNamusDirect(numericId).catch((err) => {
+      console.warn("Direct NamUs API blocked:", err);
+      return null;
+    }),
+    fetchNamusViaReader(numericId).catch((err) => {
+      console.warn("Proxy fetch failed:", err);
+      return null;
+    }),
+  ]);
+  const live = direct || viaReader;
+  if (live) return namusOk(live, "live");
 
-  try {
-    const direct = await fetchNamusDirect(numericId);
-    if (direct) return namusOk(direct, "live");
-  } catch (directErr) {
-    console.warn("Direct NamUs API blocked:", directErr);
-  }
-
-  return namusOk(fallbackNamusRecord(numericId), "fallback");
+  return {
+    success: false,
+    blocked: true,
+    error: "NamUs did not return a readable profile. Paste the profile text to fill this case.",
+  };
 }
 
 export async function lookupNamus(query: string): Promise<NamusLookupResponse> {
@@ -150,4 +197,23 @@ export async function lookupNamus(query: string): Promise<NamusLookupResponse> {
     return { success: false, error: "Enter a NamUs ID such as MP2316, NamUs #, or a NamUs case URL." };
   }
   return fetchNamusCase(extractNamusId(query)?.mp || numericId);
+}
+
+export async function ingestNamus(input: { query?: string; text?: string; apiKey?: string; model?: string }): Promise<NamusLookupResponse> {
+  const text = (input.text || "").trim();
+  const query = (input.query || "").trim();
+  if (text) {
+    const assisted = await assistNamusProfile({ text, url: query, apiKey: input.apiKey || "", model: input.model });
+    const numeric = assisted.record.namusId || namusNumericId(query);
+    const record = recordFromAssisted(assisted.record, numeric);
+    if (!usableNamusRecord(record)) {
+      return { success: false, blocked: true, error: "No demographic fields were found in that paste." };
+    }
+    return {
+      ...namusOk(record, "paste"),
+      engine: assisted.engine,
+      notice: assisted.engine === "gpt-4o" ? "Structured with GPT-4o." : "Structured from the pasted text on this machine.",
+    };
+  }
+  return lookupNamus(query);
 }

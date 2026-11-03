@@ -14,6 +14,7 @@ export type NamusRecord = {
   clothing: string;
   medicalAlerts: string;
   circumstances: string;
+  sex?: string;
 };
 
 /** Shape returned as `data` from `/api/namus` for the new-case form. */
@@ -33,13 +34,16 @@ export type NamusFormPayload = {
   clothing: string;
   medicalAlerts: string;
   circumstances: string;
+  sex?: string;
 };
 
 export type NamusLookupResponse = {
   success?: boolean;
   data?: NamusFormPayload;
   record?: NamusRecord;
-  source?: "live" | "cached" | "fallback";
+  source?: "live" | "cached" | "fallback" | "paste";
+  blocked?: boolean;
+  engine?: "gpt-4o" | "local";
   notice?: string;
   error?: string;
 };
@@ -84,10 +88,11 @@ export function namusRecordToPayload(record: NamusRecord): NamusFormPayload {
     clothing: record.clothing,
     medicalAlerts: record.medicalAlerts,
     circumstances: record.circumstances,
+    sex: record.sex || "",
   };
 }
 
-export function namusOk(record: NamusRecord, source: "live" | "cached" | "fallback" = "cached"): NamusLookupResponse {
+export function namusOk(record: NamusRecord, source: NonNullable<NamusLookupResponse["source"]> = "cached"): NamusLookupResponse {
   return {
     success: true,
     data: namusRecordToPayload(record),
@@ -224,22 +229,23 @@ export function fallbackNamusRecord(numericId: string): NamusRecord {
 export function extractNamusId(raw: string): { numeric: string; mp: string } | null {
   const s = raw.trim();
   if (!s) return null;
-  const fromPath = s.match(/case-details\/(\d+)/i) || s.match(/\/cases\/(\d+)/i) || s.match(/[?&](?:id|caseId)=(\d+)/i);
-  if (fromPath) {
-    const n = Number(fromPath[1]);
-    if (Number.isFinite(n) && n > 0) return { numeric: String(n), mp: `MP${n}` };
+  const patterns = [
+    /case-details\/(\d{1,8})/i,
+    /\/cases\/(\d{1,8})/i,
+    /[?&](?:id|caseId)=(\d{1,8})/i,
+    /#\/(\d{1,8})\b/,
+    /\/(?:missing-persons|unidentified-persons|missingpersons|unidentifiedpersons)\/(?:case\/)?(?:MP|UP|UF|UM)?(\d{1,8})\b/i,
+    /\/case\/(?:MP|UP|UF|UM)?(\d{1,8})\b/i,
+    /\b(?:MP|UP|UF|UM)[\s#_:-]*(\d{1,8})\b/i,
+    /\bnamus\b[^0-9]{0,48}(\d{1,8})\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = s.match(pattern);
+    if (!match) continue;
+    const n = String(Number(match[1]));
+    if (n !== "0" && n !== "NaN") return { numeric: n, mp: `MP${n}` };
   }
-  const mp = s.match(/\bMP[\s#_:-]*(\d+)\b/i);
-  if (mp) {
-    const n = String(Number(mp[1]));
-    return { numeric: n, mp: `MP${n}` };
-  }
-  const namus = s.match(/\bnamus\b[^0-9]{0,16}(\d{1,7})\b/i);
-  if (namus) {
-    const n = String(Number(namus[1]));
-    return { numeric: n, mp: `MP${n}` };
-  }
-  if (/^\d{1,7}$/.test(s)) {
+  if (/^\d{1,8}$/.test(s)) {
     const n = String(Number(s));
     return { numeric: n, mp: `MP${n}` };
   }

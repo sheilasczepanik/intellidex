@@ -7,13 +7,14 @@ import { EXTRACT_MODEL_MAX_CHARS, EXTRACT_SERVICE_UNAVAILABLE, prioritizeLegalFa
 import { mauraFallbackApiBody } from "./src/lib/mauraExtractFallback.ts";
 import { getMissingAlerts } from "./server/missingAlerts.ts";
 import { FALLBACK_MISSING_ALERTS } from "./src/lib/liveMissingAlert.ts";
-import { lookupNamus } from "./server/namusLookup.ts";
-import { fallbackNamusRecord, namusNumericId, namusOk } from "./src/lib/namusRecord.ts";
+import { ingestNamus, lookupNamus } from "./server/namusLookup.ts";
 import { getNewsTriage } from "./server/newsRss.ts";
 import { sampleNewsItems } from "./src/lib/newsTriage.ts";
 import { assistNamusProfile } from "./server/namusAssist.ts";
+import { assistDoeProfile } from "./server/doeAssist.ts";
 import { resolveExtractEngine } from "./server/structuredExtract.ts";
 import { parseNamusPaste, recordHasFacts } from "./src/lib/namusPaste.ts";
+import { doeRecordHasFacts, parseDoePaste } from "./src/lib/doeNetworkPaste.ts";
 
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
@@ -210,15 +211,26 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
       res.end();
       return;
     }
-    const url = new URL(req.url || "/", "http://127.0.0.1");
-    const query = url.searchParams.get("id") || url.searchParams.get("url") || url.searchParams.get("q") || "";
+    if (req.method !== "GET" && req.method !== "POST") {
+      send(res, 405, { success: false, error: "GET or POST" });
+      return;
+    }
     try {
-      const body = await lookupNamus(query);
-      send(res, 200, body);
+      if (req.method === "POST") {
+        const payload = JSON.parse(await readBody(req) || "{}") as { id?: unknown; url?: unknown; query?: unknown; text?: unknown };
+        const query = [payload.url, payload.id, payload.query].find((item) => typeof item === "string") as string | undefined;
+        const text = typeof payload.text === "string" ? payload.text : "";
+        const headerKey = String(req.headers["x-dossier-key"] || req.headers["x-api-key"] || "");
+        const resolved = resolveExtractEngine({ headerKey, env: process.env });
+        send(res, 200, await ingestNamus({ query, text, apiKey: resolved.apiKey, model: resolved.model }));
+        return;
+      }
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      const query = url.searchParams.get("id") || url.searchParams.get("url") || url.searchParams.get("q") || "";
+      send(res, 200, await lookupNamus(query));
     } catch (err) {
       console.error("[namus] local handler failed", err);
-      const digits = namusNumericId(query);
-      send(res, 200, digits ? namusOk(fallbackNamusRecord(digits), "fallback") : { success: false, error: "Enter a NamUs ID such as MP2316." });
+      send(res, 200, { success: false, blocked: true, error: "NamUs did not return a readable profile. Paste the profile text to fill this case." });
     }
   };
 
@@ -242,7 +254,6 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
         items: sampleNewsItems(),
         fetchedAt: new Date().toISOString(),
         offline: true,
-        warning: "Louisiana alert feeds are temporarily unreachable",
         queries: [],
       });
     }
@@ -290,6 +301,39 @@ export function extractApiPlugin(env: Record<string, string>): Plugin {
     server.middlewares.use("/api/namus", (req, res) => { void namusHandler(req, res); });
     server.middlewares.use("/api/news-rss", (req, res) => { void newsHandler(req, res); });
     server.middlewares.use("/api/namus-assist", (req, res) => { void namusAssistHandler(req, res); });
+    server.middlewares.use("/api/doe-assist", (req, res) => { void doeAssistHandler(req, res); });
+  };
+
+  const doeAssistHandler = async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    if (req.method !== "POST") {
+      send(res, 405, { error: "POST only" });
+      return;
+    }
+    try {
+      const payload = JSON.parse(await readBody(req) || "{}") as { text?: unknown; url?: unknown };
+      const text = typeof payload.text === "string" ? payload.text.trim() : "";
+      const url = typeof payload.url === "string" ? payload.url.trim() : "";
+      if (!text) {
+        send(res, 400, { error: "Paste the Doe Network profile text. A URL alone is kept for reference and is not fetched." });
+        return;
+      }
+      const headerKey = String(req.headers["x-dossier-key"] || req.headers["x-api-key"] || "");
+      const resolved = resolveExtractEngine({ headerKey, env });
+      const result = await assistDoeProfile({ text, url, apiKey: resolved.apiKey, model: resolved.model });
+      if (!doeRecordHasFacts(result.record)) {
+        send(res, 200, { ...result, warning: "No demographic fields were found in that paste." });
+        return;
+      }
+      send(res, 200, result);
+    } catch (err) {
+      console.error("[doe-assist] local handler failed", err);
+      send(res, 200, { engine: "local", record: parseDoePaste("") });
+    }
   };
 
   return {

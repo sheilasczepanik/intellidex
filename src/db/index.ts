@@ -803,6 +803,7 @@ export async function applyAssistedNamus(caseId: string, record: AssistedNamusRe
   const rec = await db.cases.get(caseId);
   if (!rec) throw new Error("Case not found.");
   const profile = { ...(rec.subjectProfile || {}) };
+  profile.sex = keep(profile.sex, record.sex);
   profile.ageAtDisappearance = keep(profile.ageAtDisappearance, record.ageAtDisappearance);
   profile.currentEstimatedAge = keep(profile.currentEstimatedAge, record.currentAge);
   profile.dateOfBirth = keep(profile.dateOfBirth, record.dateOfBirth);

@@ -5,6 +5,8 @@ import {
 } from "lucide-react";
 import type { SearchGroup, SearchHit } from "./lib/globalSearch";
 import { searchDossier } from "./lib/globalSearch";
+import { lookupOfficialId, parseOfficialId, type IdCaseDraft, type IdLookupResult, type IdPrefill } from "./lib/idLookup";
+import { IdLookupCard } from "./IdLookupField";
 
 const mono = "font-mono";
 
@@ -20,11 +22,15 @@ type Props = {
   open: boolean;
   onClose: () => void;
   onPick: (hit: SearchHit) => void;
+  onOpenCase: (caseId: string) => void;
+  onLoadFixture: (draft: IdCaseDraft) => void;
+  onCreateFromId: (prefill: IdPrefill) => void;
 };
 
-export default function GlobalSearch({ open, onClose, onPick }: Props) {
+export default function GlobalSearch({ open, onClose, onPick, onOpenCase, onLoadFixture, onCreateFromId }: Props) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
+  const [idHit, setIdHit] = useState<IdLookupResult | null>(null);
   const [active, setActive] = useState(0);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -33,6 +39,7 @@ export default function GlobalSearch({ open, onClose, onPick }: Props) {
     if (!open) return;
     setQuery("");
     setHits([]);
+    setIdHit(null);
     setActive(0);
     const t = window.setTimeout(() => inputRef.current?.focus(), 30);
     return () => window.clearTimeout(t);
@@ -47,8 +54,10 @@ export default function GlobalSearch({ open, onClose, onPick }: Props) {
     }
     setBusy(true);
     const handle = window.setTimeout(() => {
-      void searchDossier(q).then((rows) => {
+      const idQuery = parseOfficialId(q) ? lookupOfficialId(q) : Promise.resolve(null);
+      void Promise.all([searchDossier(q), idQuery]).then(([rows, idResult]) => {
         setHits(rows);
+        setIdHit(idResult && idResult.state !== "invalid" ? idResult : null);
         setActive(0);
         setBusy(false);
       });
@@ -84,11 +93,18 @@ export default function GlobalSearch({ open, onClose, onPick }: Props) {
       if (e.key === "Enter" && flat[active]) {
         e.preventDefault();
         onPick(flat[active]);
+        return;
+      }
+      if (e.key === "Enter" && idHit && idHit.state !== "invalid") {
+        e.preventDefault();
+        if (idHit.state === "case") onOpenCase(idHit.caseId);
+        if (idHit.state === "fixture") onLoadFixture(idHit.draft);
+        if (idHit.state === "missing") onCreateFromId(idHit.prefill);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, flat, active, onClose, onPick]);
+  }, [open, flat, active, idHit, onClose, onPick, onOpenCase, onLoadFixture, onCreateFromId]);
 
   if (!open) return null;
 
@@ -111,13 +127,23 @@ export default function GlobalSearch({ open, onClose, onPick }: Props) {
           </button>
         </div>
         <div className="max-h-[min(60vh,420px)] overflow-auto py-2">
+          {idHit && (
+            <div className="px-3 pb-2">
+              <IdLookupCard
+                result={idHit}
+                onOpenCase={onOpenCase}
+                onLoadFixture={onLoadFixture}
+                onCreateFromId={onCreateFromId}
+              />
+            </div>
+          )}
           {!query.trim() && (
             <div className="px-4 py-8 text-center text-[13px] text-slate-400">Type a name, plate, address, or quote.</div>
           )}
           {query.trim() && busy && hits.length === 0 && (
             <div className="px-4 py-8 text-center text-[13px] text-slate-400">Searching local vault…</div>
           )}
-          {query.trim() && !busy && hits.length === 0 && (
+          {query.trim() && !busy && hits.length === 0 && !idHit && (
             <div className="px-4 py-8 text-center text-[13px] text-slate-400">No matches in this vault.</div>
           )}
           {grouped.map((g) => {

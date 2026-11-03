@@ -1,15 +1,20 @@
-import { fallbackNamusRecord, knownNamusRecord, namusNumericId, namusOk, type NamusLookupResponse } from "./namusRecord";
+import { knownNamusRecord, namusNumericId, namusOk, type NamusLookupResponse } from "./namusRecord";
 
-function localFallback(id: string): NamusLookupResponse {
-  const numeric = namusNumericId(id);
-  if (!numeric) return { success: false, error: "Enter a NamUs ID such as MP2316." };
-  return namusOk(knownNamusRecord(numeric) || fallbackNamusRecord(numeric), knownNamusRecord(numeric) ? "cached" : "fallback");
+const BLOCKED = "NamUs did not return a readable profile. Paste the profile text to fill this case.";
+
+function blocked(message = BLOCKED): NamusLookupResponse {
+  return { success: false, blocked: true, error: message };
+}
+
+function realName(name?: string) {
+  const value = (name || "").trim();
+  return Boolean(value) && !/^NamUs (Subject|MP)\b/i.test(value);
 }
 
 export async function fetchNamusRecord(id: string): Promise<NamusLookupResponse> {
-  const clean = id.trim().toUpperCase();
+  const clean = id.trim();
   const numeric = namusNumericId(clean);
-  if (!numeric) return localFallback(clean);
+  if (!numeric) return { success: false, error: "Enter a NamUs ID such as MP2316, or a NamUs case URL." };
   const known = knownNamusRecord(numeric);
   if (known) return namusOk(known, "cached");
   try {
@@ -21,14 +26,10 @@ export async function fetchNamusRecord(id: string): Promise<NamusLookupResponse>
     } catch {
       json = {};
     }
-    if (json.data?.name) {
-      return { ...json, success: true, record: json.record };
-    }
-    if (json.record?.fullName) {
-      return namusOk(json.record, json.source ?? "cached");
-    }
-    return localFallback(clean);
+    if (realName(json.data?.name)) return { ...json, success: true };
+    if (realName(json.record?.fullName) && json.record) return namusOk(json.record, json.source ?? "live");
+    return blocked(json.error || BLOCKED);
   } catch {
-    return localFallback(clean);
+    return blocked();
   }
 }

@@ -30,6 +30,7 @@ export interface SubjectProfile {
   distinguishingMarks?: string;
   clothingLastSeen?: string;
   medicalAlerts?: string;
+  sex?: string;
   /** Profile image as data URL or remote http(s) URL (also mirrored on photoDataUrl). */
   photoUrl?: string;
   photoDataUrl?: string;

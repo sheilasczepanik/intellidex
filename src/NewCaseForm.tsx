@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { ArrowRight, Check, Loader2, Sparkles } from "lucide-react";
+import { ArrowRight, Loader2, Sparkles } from "lucide-react";
 import type { CaseStatus, SubjectProfile } from "./db/schema";
-import { fetchNamusRecord } from "./lib/namusClient";
-import { extractNamusId, namusNumericId } from "./lib/namusRecord";
 import { ALERT_LEVELS, formatAlertLabel } from "./lib/missingPerson";
-import { doeNetworkHint } from "./lib/doeNetworkId";
-import { lksFromNamusDate } from "./lib/namusPaste";
-import AssistedNamusDrawer, { type NamusAssistResult } from "./AssistedNamusDrawer";
+import { doeNetworkHint, parseDoeNetworkId } from "./lib/doeNetworkId";
+import { doeIdFromText, lksFromDoeDate } from "./lib/doeNetworkPaste";
+import { lookupOfficialId, type IdCaseDraft, type IdPrefill } from "./lib/idLookup";
+import AssistedDoeDrawer, { type DoeAssistResult } from "./AssistedDoeDrawer";
+import IdLookupField from "./IdLookupField";
 
 const mono = "font-mono";
 const inputCls =
@@ -32,6 +32,9 @@ export default function NewCaseForm({
   onProfile,
   onCancel,
   onSubmit,
+  onOpenCase,
+  onLoadFixture,
+  onCreateFromId,
 }: {
   title: string;
   fileIdentifier: string;
@@ -52,60 +55,18 @@ export default function NewCaseForm({
   onProfile: (next: SubjectProfile) => void;
   onCancel: () => void;
   onSubmit: () => void;
+  onOpenCase: (caseId: string) => void;
+  onLoadFixture: (draft: IdCaseDraft) => void;
+  onCreateFromId: (prefill: IdPrefill) => void;
 }) {
   const setP = (key: keyof SubjectProfile, value: string) => onProfile({ ...profile, [key]: value });
-  const [namusBusy, setNamusBusy] = useState(false);
-  const [namusOk, setNamusOk] = useState(false);
-  const [namusErr, setNamusErr] = useState("");
-  const [namusNotice, setNamusNotice] = useState("");
-  const [assistOpen, setAssistOpen] = useState(false);
+  const [doeOpen, setDoeOpen] = useState(false);
+  const [doeUrl, setDoeUrl] = useState("");
+  const [doeBusy, setDoeBusy] = useState(false);
+  const [doeNotice, setDoeNotice] = useState("");
+  const [doeErr, setDoeErr] = useState("");
   const doeHint = doeNetworkHint(doeNetworkId);
-
-  const autoFillNamus = async () => {
-    const query = fileIdentifier.trim() || title.trim();
-    const cleanNamusId = query.trim().toUpperCase();
-    if (!namusNumericId(cleanNamusId) && !extractNamusId(cleanNamusId)) {
-      setNamusOk(false);
-      setNamusNotice("");
-      setNamusErr("Enter a NamUs ID such as MP2316 in the case identifier field.");
-      return;
-    }
-    setNamusBusy(true);
-    setNamusOk(false);
-    setNamusErr("");
-    setNamusNotice("");
-    try {
-      const response = await fetchNamusRecord(cleanNamusId);
-      const data = response.data;
-      if (!data?.name) {
-        setNamusErr("Enter a NamUs ID such as MP2316 in the case identifier field.");
-        return;
-      }
-      onTitle(data.name);
-      onFileIdentifier((data.caseId ? String(data.caseId) : cleanNamusId).trim().toUpperCase());
-      onJurisdiction(data.location || "");
-      if (data.lksDate) onLksAt(String(data.lksDate));
-      if (data.circumstances) onSummary(String(data.circumstances));
-      onProfile({
-        ...profile,
-        ageAtDisappearance: data.ageAtDisappearance != null && String(data.ageAtDisappearance) !== "0" ? String(data.ageAtDisappearance) : "",
-        currentEstimatedAge: data.currentAge != null && String(data.currentAge) !== "0" ? String(data.currentAge) : "",
-        height: data.height || "",
-        weight: data.weight || "",
-        hair: data.hair || "",
-        eyes: data.eyes || "",
-        distinguishingMarks: data.distinguishingMarks || data.marks || "",
-        clothingLastSeen: data.clothing || "",
-        medicalAlerts: data.medicalAlerts || "",
-      });
-      setNamusNotice("");
-      setNamusOk(true);
-    } catch {
-      setNamusErr("Enter a NamUs ID such as MP2316 in the case identifier field.");
-    } finally {
-      setNamusBusy(false);
-    }
-  };
+  const doeInvalid = Boolean(doeNetworkId.trim() && doeHint.startsWith("Use "));
 
   return (
     <div className="mx-auto w-full max-w-[720px] px-4 pb-20 pt-10 sm:px-6 sm:pt-16 lg:px-10">
@@ -114,6 +75,9 @@ export default function NewCaseForm({
       <p className="mb-8 max-w-[54ch] text-[14px] leading-relaxed text-slate-500">
         Capture the subject, last known sighting, and alert level. Tips, search logs, and extraction land on Overview after you create the case.
       </p>
+      <div className="mb-6 rounded-xl border border-[#E2E8F0] bg-white p-6 shadow-sm">
+        <IdLookupField doeOnly onOpenCase={onOpenCase} onLoadFixture={onLoadFixture} onCreateFromId={onCreateFromId} />
+      </div>
       <form
         className="rounded-xl border border-[#E2E8F0] bg-white p-6 shadow-sm"
         onSubmit={(e) => {
@@ -130,55 +94,47 @@ export default function NewCaseForm({
           className={`${inputCls} mb-4 h-11 text-[15px] font-semibold`}
         />
         <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Case / file identifier</label>
+        <input
+          value={fileIdentifier}
+          onChange={(e) => onFileIdentifier(e.target.value)}
+          placeholder="Local or agency file number"
+          className={`${inputCls} mb-4 h-11 text-[14px]`}
+        />
+        <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Doe Network ID</label>
         <div className="mb-1.5 flex flex-col gap-2 sm:flex-row sm:items-center">
           <input
-            value={fileIdentifier}
-            onChange={(e) => { setNamusOk(false); setNamusErr(""); setNamusNotice(""); onFileIdentifier(e.target.value); }}
-            placeholder="MP1028, NamUs #, or agency case #"
-            className={`${inputCls} h-11 flex-1 text-[14px]`}
+            value={doeNetworkId}
+            onChange={(e) => {
+              const value = e.target.value;
+              const fromUrl = doeIdFromText(value);
+              if (/^https?:\/\//i.test(value) && fromUrl) setDoeUrl(value);
+              onDoeNetworkId(fromUrl || value.toUpperCase());
+              setDoeErr("");
+              setDoeNotice("");
+            }}
+            placeholder="93DMFL or 1187UMFL"
+            className={`${inputCls} h-11 flex-1 text-[14px] ${mono}`}
           />
           <button
             type="button"
-            onClick={() => void autoFillNamus()}
-            disabled={namusBusy}
+            onClick={() => void autoFillDoe()}
+            disabled={doeBusy}
             className="inline-flex h-11 shrink-0 items-center justify-center gap-1.5 rounded-[10px] border border-slate-300 bg-white px-3 text-[12.5px] font-semibold text-slate-700 hover:border-slate-400 hover:bg-slate-50 disabled:opacity-50"
           >
-            {namusBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 text-blue-600" />}
-            {namusBusy ? "Fetching NamUs data…" : "Auto-Fill from NamUs"}
+            {doeBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 text-blue-600" />}
+            {doeBusy ? "Checking local records…" : "Auto-Fill from Doe Network"}
           </button>
         </div>
-        {namusOk ? (
-          <div className="mb-4 inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[12px] font-medium text-emerald-800">
-            <Check className="h-3.5 w-3.5" />
-            Loaded from NamUs record
-          </div>
-        ) : namusNotice ? (
-          <p className="mb-4 text-[12.5px] text-amber-800">{namusNotice}</p>
-        ) : namusErr ? (
-          <p className="mb-4 text-[12.5px] text-rose-700">{namusErr}</p>
+        {doeNetworkId.trim() && !doeInvalid ? (
+          <p className="mt-1.5 text-[12px] text-slate-500">{doeHint}</p>
+        ) : null}
+        {doeNotice ? (
+          <p className="mb-4 mt-1.5 text-[12.5px] text-amber-800">{doeNotice}</p>
+        ) : doeErr || doeInvalid ? (
+          <p className="mb-4 mt-1.5 text-[12.5px] text-rose-700">{doeErr || doeHint}</p>
         ) : (
-          <p className="mb-4 text-[12px] text-slate-400">Use a NamUs ID such as MP2316 to pull a known public record, or paste a profile when the page will not load.</p>
+          <p className="mb-4 mt-1.5 text-[12px] text-slate-400">Use a Doe Network ID such as 93DMFL, or paste a profile when the page will not load.</p>
         )}
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setAssistOpen(true)}
-            className="inline-flex h-9 items-center rounded-[10px] border border-slate-300 bg-white px-3 text-[12.5px] font-semibold text-slate-700 hover:bg-slate-50"
-          >
-            Assisted NamUs ingest
-          </button>
-          <span className="text-[12px] text-slate-400">Paste a URL and the profile text. Nothing is scraped from NamUs.</span>
-        </div>
-        <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Doe Network ID</label>
-        <input
-          value={doeNetworkId}
-          onChange={(e) => onDoeNetworkId(e.target.value.toUpperCase())}
-          placeholder="93DMFL or 1187UMFL"
-          className={`${inputCls} h-11 text-[14px] ${mono}`}
-        />
-        <p className={`mb-4 mt-1.5 text-[12px] ${doeNetworkId.trim() && doeHint.startsWith("Use ") ? "text-rose-700" : "text-slate-500"}`}>
-          {doeHint || "4 digits and 4 letters, such as 1187UMFL. Short year forms such as 93DMFL are accepted."}
-        </p>
         <div className="mb-4 grid gap-3 sm:grid-cols-2">
           <div>
             <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Last known sighting date & time</label>
@@ -215,6 +171,10 @@ export default function NewCaseForm({
           <div>
             <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Age at disappearance</label>
             <input value={profile.ageAtDisappearance ?? ""} onChange={(e) => setP("ageAtDisappearance", e.target.value)} placeholder="21" className={`${inputCls} h-11 text-[14px]`} />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Sex</label>
+            <input value={profile.sex ?? ""} onChange={(e) => setP("sex", e.target.value)} placeholder="Female" className={`${inputCls} h-11 text-[14px]`} />
           </div>
           <div>
             <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Current estimated age</label>
@@ -286,37 +246,80 @@ export default function NewCaseForm({
           </button>
         </div>
       </form>
-      <AssistedNamusDrawer
-        open={assistOpen}
-        onClose={() => setAssistOpen(false)}
-        onApply={(result) => applyAssist(result)}
+      <AssistedDoeDrawer
+        open={doeOpen}
+        initialUrl={doeUrl}
+        onClose={() => setDoeOpen(false)}
+        onApply={(result) => {
+          applyDoe(result);
+          setDoeOpen(false);
+        }}
       />
     </div>
   );
 
-  function applyAssist(result: NamusAssistResult) {
+  async function autoFillDoe() {
+    const raw = doeNetworkId.trim() || fileIdentifier.trim();
+    const fromUrl = doeIdFromText(raw);
+    const parsed = parseDoeNetworkId(fromUrl || raw);
+    setDoeErr("");
+    setDoeNotice("");
+    if (raw && !parsed) {
+      setDoeErr("Use a Doe Network ID such as 93DMFL or 1187UMFL.");
+      return;
+    }
+    if (parsed) onDoeNetworkId(parsed.id);
+    if (!parsed) {
+      setDoeUrl("");
+      setDoeOpen(true);
+      setDoeNotice("Paste the Doe Network URL and the copied profile.");
+      return;
+    }
+    setDoeBusy(true);
+    try {
+      const hit = await lookupOfficialId(parsed.id);
+      if (hit?.state === "case") {
+        onOpenCase(hit.caseId);
+        return;
+      }
+      if (hit?.state === "fixture") {
+        onLoadFixture(hit.draft);
+        setDoeNotice("Loaded from the local Doe Network fixture.");
+        return;
+      }
+      const url = /^https?:\/\//i.test(doeUrl) ? doeUrl : `https://www.doenetwork.org/cases/${parsed.state.toLowerCase()}/${parsed.id.toLowerCase()}.html`;
+      setDoeUrl(url);
+      setDoeOpen(true);
+      setDoeNotice(`Paste the copied Doe Network profile for ${parsed.id}.`);
+    } finally {
+      setDoeBusy(false);
+    }
+  }
+
+  function applyDoe(result: DoeAssistResult) {
     const data = result.record;
-    if (!title.trim() && data.fullName) onTitle(data.fullName);
-    if (!fileIdentifier.trim() && data.namusId) onFileIdentifier(`MP${data.namusId}`);
-    if (!jurisdiction.trim() && data.location) onJurisdiction(data.location);
-    const lks = lksFromNamusDate(data.dateLastSeen);
-    if (!lksAt && lks) onLksAt(lks);
-    if (!summary.trim() && (data.circumstances || data.caseNotes)) onSummary(data.circumstances || data.caseNotes);
+    const doeId = data.doeNetworkId || doeIdFromText(result.url);
+    if ((!title.trim() || /^https?:\/\//i.test(title.trim())) && data.fullName) onTitle(data.fullName);
+    if (doeId) onDoeNetworkId(doeId);
+    if (data.location) onJurisdiction(data.location);
+    const lks = lksFromDoeDate(data.dateLastSeen);
+    if (lks) onLksAt(lks);
+    if (data.circumstances || data.caseNotes) onSummary(data.circumstances || data.caseNotes);
     onProfile({
       ...profile,
-      ageAtDisappearance: profile.ageAtDisappearance || data.ageAtDisappearance,
-      currentEstimatedAge: profile.currentEstimatedAge || data.currentAge,
-      dateOfBirth: profile.dateOfBirth || data.dateOfBirth,
-      height: profile.height || data.height,
-      weight: profile.weight || data.weight,
-      hair: profile.hair || data.hair,
-      eyes: profile.eyes || data.eyes,
-      distinguishingMarks: profile.distinguishingMarks || data.distinguishingMarks,
-      clothingLastSeen: profile.clothingLastSeen || data.clothing,
-      medicalAlerts: profile.medicalAlerts || data.medicalAlerts,
+      sex: data.sex || profile.sex || "",
+      ageAtDisappearance: data.ageAtDisappearance || profile.ageAtDisappearance || "",
+      currentEstimatedAge: data.currentAge || profile.currentEstimatedAge || "",
+      dateOfBirth: data.dateOfBirth || profile.dateOfBirth || "",
+      height: data.height || profile.height || "",
+      weight: data.weight || profile.weight || "",
+      hair: data.hair || profile.hair || "",
+      eyes: data.eyes || profile.eyes || "",
+      distinguishingMarks: data.distinguishingMarks || profile.distinguishingMarks || "",
+      clothingLastSeen: data.clothing || profile.clothingLastSeen || "",
+      medicalAlerts: data.medicalAlerts || profile.medicalAlerts || "",
     });
-    setNamusOk(true);
-    setNamusNotice(result.engine === "gpt-4o" ? "Structured with GPT-4o." : "Structured from the pasted text on this machine.");
-    setNamusErr("");
+    setDoeErr("");
+    setDoeNotice(result.engine === "gpt-4o" ? "Structured with GPT-4o." : "Structured from the pasted text on this machine.");
   }
 }

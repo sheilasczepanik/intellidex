@@ -34,6 +34,8 @@ import EditEntityDrawer from "./EditEntityDrawer";
 import EntityDossier from "./EntityDossier";
 import ExportDossierModal from "./ExportDossierModal";
 import GlobalSearch from "./GlobalSearch";
+import IdLookupField from "./IdLookupField";
+import type { IdCaseDraft, IdPrefill } from "./lib/idLookup";
 import ProfileSettings from "./ProfileSettings";
 import SourceDocumentViewer, { CitationPill } from "./SourceDocumentViewer";
 import TimelineToolbar, { TimelineDateStrip, TimelineHoverTip } from "./Timeline";
@@ -1355,6 +1357,41 @@ export default function DesktopApp() {
     goTo("Setup");
   };
 
+  const openCaseById = (caseId: string) => {
+    setSearchOpen(false);
+    const row = (hubCases || []).find((item) => item.id === caseId);
+    setActiveCaseId(caseId);
+    if (row) {
+      setDraftTitle(row.title);
+      setDraftSummary(row.summary);
+      setDraftStatus((CASE_STATUSES.includes(row.status as CaseStatus) ? row.status : "ACTIVE_MISSING") as CaseStatus);
+    }
+    goTo("Overview", caseId);
+  };
+
+  const openFixtureDraft = (draft: IdCaseDraft) => {
+    setSearchOpen(false);
+    setActiveCaseId("");
+    setDraftTitle(draft.subjectName);
+    setDraftSummary(draft.summary);
+    setDraftJurisdiction(draft.jurisdiction);
+    setDraftIncidentStart(draft.lksAt ? draft.lksAt.slice(0, 10) : "");
+    setDraftIncidentEnd("");
+    setDraftFileId(draft.fileIdentifier);
+    setDraftDoeId(draft.doeNetworkId);
+    setDraftLksAt(draft.lksAt);
+    setDraftProfile(draft.profile);
+    setDraftStatus(draft.status);
+    goTo("Setup");
+  };
+
+  const openCaseFromOfficialId = (prefill: IdPrefill) => {
+    openNewCase();
+    setDraftFileId(prefill.fileIdentifier);
+    setDraftDoeId(prefill.doeNetworkId);
+    setSearchOpen(false);
+  };
+
   const openCaseFromAlert = (alert: LiveMissingAlert) => {
     const lksAt = parseAlertMissingAt(alert.summary);
     setActiveCaseId("");
@@ -2589,7 +2626,7 @@ export default function DesktopApp() {
   /* ---------------------------------------------------------------- */
 
   return (
-    <div className="flex min-h-dvh bg-slate-200/60 p-0 font-sans text-slate-900 md:p-3.5">
+    <div className="flex h-dvh overflow-hidden bg-slate-200/60 p-0 font-sans text-slate-900 md:p-3.5">
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-none border-0 border-slate-200 bg-white shadow-none md:rounded-[20px] md:border md:shadow-sm">
 
         {navOpen ? (
@@ -2602,7 +2639,7 @@ export default function DesktopApp() {
         ) : null}
 
         {/* sidebar */}
-        <aside className={`app-shell-nav z-40 flex w-[min(256px,88vw)] flex-col border-r border-slate-200 bg-white transition-transform duration-200 ${navOpen ? "is-open" : ""}`}>
+        <aside className={`app-shell-nav z-40 flex h-full min-h-0 w-[min(256px,88vw)] flex-col border-r border-slate-200 bg-white transition-transform duration-200 ${navOpen ? "is-open" : ""}`}>
           <div className="flex shrink-0">
           <button
             type="button"
@@ -2682,7 +2719,7 @@ export default function DesktopApp() {
         </aside>
 
         {/* main column */}
-        <div className="flex min-w-0 flex-1 flex-col bg-slate-50">
+        <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-slate-50">
           <header className="flex min-h-16 shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-3 py-2 sm:px-4 lg:h-16 lg:flex-nowrap lg:gap-4 lg:px-6 lg:py-0">
             <button
               type="button"
@@ -2785,7 +2822,7 @@ export default function DesktopApp() {
             </div>
           </header>
 
-          <main className={`flex min-w-0 flex-1 flex-col ${screen === "Locations" ? "min-h-0 overflow-hidden" : "overflow-auto"}`}>
+          <main className={`flex min-h-0 min-w-0 flex-1 flex-col ${screen === "Locations" ? "overflow-hidden" : "overflow-auto"}`}>
 
             {screen === "Profile" && (
               <ProfileSettings
@@ -2881,6 +2918,9 @@ export default function DesktopApp() {
                   <button type="button" onClick={() => goTo("CrossRef")} className="inline-flex h-10 items-center gap-2.5 rounded-[10px] border border-slate-300 bg-white px-[18px] text-[13.5px] font-semibold text-slate-800 transition-colors hover:bg-slate-50">
                     <Waypoints className="h-[15px] w-[15px]" />Cross-reference
                   </button>
+                </div>
+                <div className="mt-6 max-w-[640px] rounded-[14px] border border-slate-200 bg-white p-4 shadow-sm">
+                  <IdLookupField onOpenCase={openCaseById} onLoadFixture={openFixtureDraft} onCreateFromId={openCaseFromOfficialId} />
                 </div>
 
                 <div className="mb-5 mt-10 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3.5 sm:mt-16">
@@ -3073,6 +3113,9 @@ export default function DesktopApp() {
                 onProfile={setDraftProfile}
                 onCancel={() => goTo("Hub")}
                 onSubmit={() => void submitNewCase()}
+                onOpenCase={openCaseById}
+                onLoadFixture={openFixtureDraft}
+                onCreateFromId={openCaseFromOfficialId}
               />
             )}
 
@@ -4197,7 +4240,14 @@ export default function DesktopApp() {
         </div>
       )}
 
-      <GlobalSearch open={searchOpen} onClose={() => setSearchOpen(false)} onPick={applySearchHit} />
+      <GlobalSearch
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onPick={applySearchHit}
+        onOpenCase={openCaseById}
+        onLoadFixture={openFixtureDraft}
+        onCreateFromId={openCaseFromOfficialId}
+      />
 
       {/* ---------------- entity slide-over ---------------- */}
       {form && (

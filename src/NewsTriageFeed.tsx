@@ -41,41 +41,46 @@ export default function NewsTriageFeed({
   const [feedError, setFeedError] = useState("");
   const [filingId, setFilingId] = useState("");
 
-  const refresh = async (persistFeeds = false) => {
+  const refresh = async () => {
     const lines = feeds.split(/\n+/).map((line) => line.trim()).filter(Boolean);
-    const saved = lines.length ? lines : loadCustomAlertFeeds();
-    if (persistFeeds) {
-      const invalid = lines.find((line) => !isGoogleAlertFeed(line));
-      if (invalid) {
-        setFeedError("Custom feeds must be https://www.google.com/alerts/feeds/… links.");
-        return;
-      }
-      saveCustomAlertFeeds(lines);
+    const valid = lines.filter((line) => isGoogleAlertFeed(line));
+    const invalid = lines.find((line) => !isGoogleAlertFeed(line));
+    if (invalid) setFeedError("Custom feeds must be https://www.google.com/alerts/feeds/… links.");
+    else {
+      saveCustomAlertFeeds(valid);
       setFeedError("");
     }
     setLoading(true);
-    const data = await fetchNewsTriage(saved);
-    setItems(data.items);
-    setOffline(data.offline);
-    setWarning(data.warning || "");
-    if (!data.offline) {
-      await db.newsItems.bulkPut(data.items.map((item) => ({ ...item, sample: false })));
+    try {
+      const data = await fetchNewsTriage(invalid ? loadCustomAlertFeeds() : valid);
+      const next = await storeFreshTriage(data);
+      setItems(next);
+      setOffline(next.length > 0 && next.every((item) => item.sample));
+      setWarning(data.warning || "");
+    } catch (err) {
+      console.error("[news] refresh failed", err);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   useEffect(() => {
     const saved = loadCustomAlertFeeds();
     void (async () => {
-      const cached = await db.newsItems.orderBy("publishedAt").reverse().limit(48).toArray();
-      if (cached.length) setItems(cached);
-      setLoading(true);
-      const data = await fetchNewsTriage(saved);
-      setItems(data.items);
-      setOffline(data.offline);
-      setWarning(data.warning || "");
-      if (!data.offline) await db.newsItems.bulkPut(data.items.map((item) => ({ ...item, sample: false })));
-      setLoading(false);
+      try {
+        const cached = await db.newsItems.orderBy("publishedAt").reverse().limit(48).toArray();
+        if (cached.length) setItems(cached);
+        setLoading(true);
+        const data = await fetchNewsTriage(saved);
+        const next = await storeFreshTriage(data);
+        setItems(next);
+        setOffline(next.length > 0 && next.every((item) => item.sample));
+        setWarning(data.warning || "");
+      } catch (err) {
+        console.error("[news] load failed", err);
+      } finally {
+        setLoading(false);
+      }
     })();
   }, []);
 
@@ -127,7 +132,7 @@ export default function NewsTriageFeed({
         </h1>
         <button
           type="button"
-          onClick={() => void refresh(true)}
+          onClick={() => void refresh()}
           disabled={loading}
           className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-[12px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
         >
@@ -136,7 +141,7 @@ export default function NewsTriageFeed({
         </button>
       </div>
       <p className="mb-6 max-w-4xl text-[15px] leading-relaxed text-slate-500">
-        Google News RSS for the Louisiana alert queries, plus any Google Alert feed URL you paste. Headlines, dates, sources, and snippets stay on this machine so they can be filed against an open case.
+        Louisiana Google Alert feeds for missing persons, remains, and bodies found. Headlines, dates, sources, and snippets stay on this machine so they can be filed against an open case.
       </p>
       {offline && (
         <div className="mb-4 inline-flex rounded-full border border-slate-300 bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-slate-700">
@@ -145,13 +150,13 @@ export default function NewsTriageFeed({
       )}
       {warning && <p className="mb-4 text-[13px] text-amber-800">{warning}</p>}
 
-      <div className="mb-6 grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
-        <div className="flex flex-wrap gap-1.5">
-          <FilterChip active={query === "all"} label="All queries" onClick={() => setQuery("all")} />
-          {LOUISIANA_ALERT_QUERIES.map((name) => (
-            <FilterChip key={name} active={query === name} label={name} onClick={() => setQuery(name)} />
-          ))}
-        </div>
+      <div className="mb-4 flex flex-row flex-nowrap items-center gap-2 overflow-x-auto pb-1">
+        <FilterChip active={query === "all"} label="All queries" onClick={() => setQuery("all")} />
+        {LOUISIANA_ALERT_QUERIES.map((name) => (
+          <FilterChip key={name} active={query === name} label={name} onClick={() => setQuery(name)} />
+        ))}
+      </div>
+      <div className="mb-6 max-w-md">
         <div>
           <label className="mb-1.5 block text-[12px] font-semibold text-slate-700">Custom Google Alert RSS</label>
           <textarea
@@ -229,12 +234,36 @@ export default function NewsTriageFeed({
   );
 }
 
+async function storeFreshTriage(data: Awaited<ReturnType<typeof fetchNewsTriage>>) {
+  const existing = await db.newsItems.toArray();
+  const failed = new Set(data.queries.filter((row) => row.ok === false).map((row) => row.query));
+  const live = data.items.filter((item) => !item.sample);
+  const samples = data.items.filter((item) => item.sample);
+  const totalFailure = data.offline && (data.queries.length === 0 || data.queries.every((row) => !row.ok));
+  if (totalFailure) {
+    const cached = existing.filter((row) => !row.sample && row.status !== "dismissed");
+    if (cached.length) return cached.sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
+    return data.items;
+  }
+  const cachedFailed = existing.filter((row) => failed.has(row.query) && !row.sample && row.status !== "dismissed");
+  const keep = new Set([...live, ...cachedFailed].map((item) => item.id));
+  const managed = new Set<string>([...LOUISIANA_ALERT_QUERIES, "Custom Google Alert"]);
+  const drop = existing.filter((row) => managed.has(row.query) && !failed.has(row.query) && row.status !== "linked" && row.status !== "dismissed" && !keep.has(row.id));
+  if (drop.length) await db.newsItems.bulkDelete(drop.map((row) => row.id));
+  if (live.length) await db.newsItems.bulkPut(live);
+  const retained = existing.filter((row) => managed.has(row.query) && (row.status === "linked" || row.status === "dismissed") && !keep.has(row.id));
+  const covered = new Set(cachedFailed.map((row) => row.query));
+  const visibleSamples = samples.filter((item) => !covered.has(item.query));
+  const remembered = cachedFailed.filter((row) => !live.some((item) => item.id === row.id));
+  return [...live, ...remembered, ...visibleSamples, ...retained];
+}
+
 function FilterChip({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-full border px-3 py-1 text-[12px] font-medium ${active ? "border-blue-600 bg-blue-50 text-blue-800" : "border-slate-200 text-slate-600"}`}
+      className={`inline-flex h-auto w-auto max-w-none shrink-0 items-center whitespace-nowrap rounded-lg border px-4 py-2 text-left text-[13px] font-medium leading-none ${active ? "border-blue-600 bg-blue-50 text-blue-800" : "border-slate-200 bg-white text-slate-600"}`}
     >
       {label}
     </button>

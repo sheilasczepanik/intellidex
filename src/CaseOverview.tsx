@@ -382,7 +382,30 @@ export default function CaseOverview({
   }
 
     return (
-    <div className="mx-auto w-full max-w-[1180px] px-4 pb-20 pt-8 sm:px-6 sm:pt-10 lg:px-10">
+    <div className="mx-auto w-full max-w-[1180px] px-4 pb-20 pt-4 sm:px-6 lg:px-10">
+      <div className="sticky top-0 z-30 -mx-4 mb-6 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-sm sm:-mx-6 sm:px-6 lg:-mx-10 lg:px-10">
+        <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+          {[
+            { label: "Time elapsed", value: formatElapsedCompact(parseLksTimestamp(activeCase), clock), icon: Clock, onClick: onOpenTimeline },
+            { label: "Verified sightings", value: verifiedSightings.length, icon: Check, onClick: onOpenTimeline },
+            { label: "Open tips & leads", value: openTips, icon: AlertTriangle, onClick: onLogTip },
+            { label: "Search zones & pings", value: searchZones.length, icon: Radio, onClick: () => document.getElementById("overview-search-zones")?.scrollIntoView({ behavior: "smooth", block: "start" }) },
+          ].map((stat) => (
+            <button
+              key={stat.label}
+              type="button"
+              onClick={() => stat.onClick()}
+              className="min-h-[92px] min-w-0 cursor-pointer rounded-[14px] border border-slate-200 bg-white px-4 py-3 text-left shadow-sm transition-colors hover:border-amber-400"
+            >
+              <div className="mb-2 flex items-center justify-between gap-2 text-slate-500">
+                <stat.icon className="h-4 w-4 shrink-0" />
+                <span className={`${mono} truncate text-[10px] tracking-[0.12em] text-slate-600`}>{stat.label.toUpperCase()}</span>
+              </div>
+              <div className="truncate text-[28px] font-semibold leading-none tracking-tight text-slate-950">{stat.value}</div>
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <div className={`mb-2.5 ${mono} text-[11px] tracking-[0.14em] text-slate-500`}>
@@ -424,7 +447,7 @@ export default function CaseOverview({
           ) : null}
           <button type="button" onClick={() => setAssistOpen(true)}
             className="inline-flex h-10 items-center gap-2 rounded-[10px] border border-slate-300 bg-white px-4 text-[13px] font-semibold text-slate-700 hover:bg-slate-50">
-            Assisted NamUs
+            Paste NamUs profile
           </button>
           <button type="button" onClick={onAddEvidence}
             className="inline-flex h-10 items-center gap-2 rounded-[10px] bg-blue-600 px-4 text-[13px] font-semibold text-white hover:bg-blue-700">
@@ -449,6 +472,7 @@ export default function CaseOverview({
         onClose={() => setAssistOpen(false)}
         onApply={async (result) => {
           await applyAssistedNamus(activeCase.id, result.record, { rawText: result.rawText, url: result.url });
+          setAssistOpen(false);
         }}
       />
 
@@ -468,28 +492,6 @@ export default function CaseOverview({
           )}
         </div>
       ) : null}
-
-      <div className="mb-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {[
-          { label: "Time elapsed", value: formatElapsedCompact(parseLksTimestamp(activeCase), clock), icon: Clock, onClick: onOpenTimeline },
-          { label: "Verified sightings", value: verifiedSightings.length, icon: Check, onClick: onOpenTimeline },
-          { label: "Open tips & leads", value: openTips, icon: AlertTriangle, onClick: onLogTip },
-          { label: "Search zones & pings", value: searchZones.length, icon: Radio, onClick: () => document.getElementById("overview-search-zones")?.scrollIntoView({ behavior: "smooth", block: "start" }) },
-        ].map((stat) => (
-          <button
-            key={stat.label}
-            type="button"
-            onClick={() => stat.onClick()}
-            className="cursor-pointer rounded-[14px] border border-slate-200 bg-white px-4 py-4 text-left shadow-sm transition-colors hover:border-amber-400"
-          >
-            <div className="mb-3 flex items-center justify-between text-slate-500">
-              <stat.icon className="h-4 w-4" />
-              <span className={`${mono} text-[10px] tracking-[0.12em] text-slate-600`}>{stat.label.toUpperCase()}</span>
-            </div>
-            <div className="text-[28px] font-semibold tracking-tight text-slate-950">{stat.value}</div>
-          </button>
-        ))}
-      </div>
 
       <div className="mb-8">
         <div className="mb-3.5 flex flex-wrap items-center justify-between gap-3">

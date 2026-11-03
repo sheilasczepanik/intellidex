@@ -29,7 +29,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       items: sampleNewsItems(),
       fetchedAt: new Date().toISOString(),
       offline: true,
-      warning: "Louisiana alert feeds are temporarily unreachable",
       queries: [],
     });
   }

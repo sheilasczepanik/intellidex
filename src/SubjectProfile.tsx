@@ -164,6 +164,7 @@ export default function SubjectProfile({
         </div>
         <p className="mt-1 text-[13px] text-slate-600">
           Age at disappearance {dashBtn(!profile.ageAtDisappearance?.trim(), "ageAtDisappearance", profile.ageAtDisappearance || "")}
+          {profile.sex?.trim() ? ` · ${profile.sex.trim()}` : ""}
           {profile.dateOfBirth ? ` · Born ${profile.dateOfBirth}` : ""}
           {profile.currentEstimatedAge ? ` · Current estimate ${profile.currentEstimatedAge}` : ""}
         </p>

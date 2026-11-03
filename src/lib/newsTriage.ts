@@ -2,11 +2,22 @@ import type { CaseRecord, NewsTriageItem } from "../db/schema";
 
 export type { NewsTriageItem };
 
-export const LOUISIANA_ALERT_QUERIES = [
-  "Louisiana missing person",
-  "Louisiana remains found",
-  "Louisiana body found",
+export const LOUISIANA_ALERT_FEEDS = [
+  {
+    query: "Louisiana missing person",
+    url: "https://www.google.com/alerts/feeds/14801168394638114600/2101019157095713831",
+  },
+  {
+    query: "Louisiana remains found",
+    url: "https://www.google.com/alerts/feeds/14801168394638114600/2101019157095714660",
+  },
+  {
+    query: "Louisiana body found",
+    url: "https://www.google.com/alerts/feeds/14801168394638114600/5310712761515719825",
+  },
 ] as const;
+
+export const LOUISIANA_ALERT_QUERIES = LOUISIANA_ALERT_FEEDS.map((feed) => feed.query);
 
 export type NewsTriageResponse = {
   items: NewsTriageItem[];
@@ -52,7 +63,7 @@ export function sampleNewsItems(now = new Date().toISOString()): NewsTriageItem[
     title: sampleTitle(query),
     link: `https://news.google.com/search?q=${encodeURIComponent(query)}`,
     source: "Cached sample",
-    snippet: "Cached sample for this alert query. A live Google News item replaces it when the feed responds.",
+    snippet: "Cached sample for this alert query. A live Google Alert headline replaces it when the feed has a new story.",
     publishedAt: now,
     ingestedAt: now,
     status: "new",
@@ -79,6 +90,15 @@ export function matchNewsToCases(item: NewsTriageItem, cases: CaseRecord[]) {
   });
 }
 
+function sampleResponse(): NewsTriageResponse {
+  return {
+    items: sampleNewsItems(),
+    fetchedAt: new Date().toISOString(),
+    offline: true,
+    queries: [],
+  };
+}
+
 export async function fetchNewsTriage(feeds: string[]): Promise<NewsTriageResponse> {
   try {
     const res = await fetch("/api/news-rss", {
@@ -86,17 +106,10 @@ export async function fetchNewsTriage(feeds: string[]): Promise<NewsTriageRespon
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ feeds }),
     });
+    if (!res.ok) return sampleResponse();
     const json = await res.json() as Partial<NewsTriageResponse>;
     const items = Array.isArray(json.items) ? json.items.filter((item) => item && item.title && item.link) : [];
-    if (!res.ok || items.length === 0) {
-      return {
-        items: sampleNewsItems(),
-        fetchedAt: new Date().toISOString(),
-        offline: true,
-        warning: "Louisiana alert feeds are temporarily unreachable",
-        queries: [],
-      };
-    }
+    if (!items.length) return sampleResponse();
     return {
       items,
       fetchedAt: typeof json.fetchedAt === "string" ? json.fetchedAt : new Date().toISOString(),
@@ -105,12 +118,6 @@ export async function fetchNewsTriage(feeds: string[]): Promise<NewsTriageRespon
       queries: Array.isArray(json.queries) ? json.queries : [],
     };
   } catch {
-    return {
-      items: sampleNewsItems(),
-      fetchedAt: new Date().toISOString(),
-      offline: true,
-      warning: "Louisiana alert feeds are temporarily unreachable",
-      queries: [],
-    };
+    return sampleResponse();
   }
 }
